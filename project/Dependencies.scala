@@ -391,7 +391,7 @@ object Dependencies {
 
   lazy val classGraph    = "io.github.classgraph" % "classgraph"    % classGraphVersion
   lazy val nimbusJoseJwt = hiveExcludes("com.nimbusds" % "nimbus-jose-jwt" % nimbusJoseJwtVersion)
-  lazy val airCompressor = "io.airlift"           % "aircompressor" % "2.0"
+  lazy val airCompressor = "io.airlift"           % "aircompressor" % "2.0.2"
   lazy val zstd          = "com.github.luben"     % "zstd-jni"      % "1.5.6-2"
 
   // testcontainers module only
