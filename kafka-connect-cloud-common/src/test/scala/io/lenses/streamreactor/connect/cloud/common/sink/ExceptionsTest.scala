@@ -150,4 +150,54 @@ class ExceptionsTest extends AnyFunSuiteLike with Matchers {
     batch.topicPartitions() shouldBe Set(tpA)
     batch.topicPartitions() should not contain tpB
   }
+
+  // ── hasUnswallowable truth-table ──────────────────────────────────────────────────────────────
+  // Pin BatchCloudSinkError.hasUnswallowable so CloudSinkTask.handleErrors
+  // can rely on it for RetriableIntegrityException routing.
+
+  test("BatchCloudSinkError.hasUnswallowable is false when nonFatal set is empty") {
+    val fatal = FatalCloudSinkError("fatal", tpA)
+    BatchCloudSinkError(fatal = Set(fatal), nonFatal = Set.empty).hasUnswallowable shouldBe false
+  }
+
+  test("BatchCloudSinkError.hasUnswallowable is false when only swallowable non-fatal errors present") {
+    val nf1 = NonFatalCloudSinkError("nf-1", None, swallowable = true)
+    val nf2 = NonFatalCloudSinkError("nf-2", None, swallowable = true)
+    BatchCloudSinkError(fatal = Set.empty, nonFatal = Set(nf1, nf2)).hasUnswallowable shouldBe false
+  }
+
+  test("BatchCloudSinkError.hasUnswallowable is true when at least one non-fatal entry is unswallowable") {
+    val swallowable   = NonFatalCloudSinkError("ok", None, swallowable = true)
+    val unswallowable = NonFatalCloudSinkError.unswallowable("integrity-sensitive", None)
+    BatchCloudSinkError(fatal = Set.empty, nonFatal = Set(swallowable, unswallowable)).hasUnswallowable shouldBe true
+  }
+
+  test("BatchCloudSinkError.hasUnswallowable is true when ALL non-fatal entries are unswallowable") {
+    val u1 = NonFatalCloudSinkError.unswallowable("u1", None)
+    val u2 = NonFatalCloudSinkError.unswallowable("u2", None)
+    BatchCloudSinkError(fatal = Set.empty, nonFatal = Set(u1, u2)).hasUnswallowable shouldBe true
+  }
+
+  test("BatchCloudSinkError.hasUnswallowable is false when batch is entirely empty") {
+    BatchCloudSinkError(fatal = Set.empty, nonFatal = Set.empty).hasUnswallowable shouldBe false
+  }
+
+  // ── rollBack() with empty batch ──────────────────────────────────────────────────────────────
+
+  test("BatchCloudSinkError.rollBack() is false when both fatal and nonFatal sets are empty") {
+    BatchCloudSinkError(fatal = Set.empty, nonFatal = Set.empty).rollBack() shouldBe false
+  }
+
+  // ── topicPartitions() with multi-fatal sets from distinct topics ──────────────────────────────
+
+  test("BatchCloudSinkError.topicPartitions() returns all fatal TPs when multiple fatal entries on different TPs") {
+    val tpC    = TopicPartition(Topic("topic-c"), 1)
+    val fatal1 = FatalCloudSinkError("f1", tpA)
+    val fatal2 = FatalCloudSinkError("f2", tpC)
+    // nonFatal entries for tpB must NOT appear in topicPartitions()
+    val nf    = NonFatalCloudSinkError("nf", None)
+    val batch = BatchCloudSinkError(fatal = Set(fatal1, fatal2), nonFatal = Set(nf))
+    batch.topicPartitions() shouldBe Set(tpA, tpC)
+    batch.topicPartitions() should not contain tpB
+  }
 }

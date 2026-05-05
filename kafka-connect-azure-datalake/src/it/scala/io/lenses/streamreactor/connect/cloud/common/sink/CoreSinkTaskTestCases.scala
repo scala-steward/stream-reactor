@@ -1164,10 +1164,10 @@ abstract class CoreSinkTaskTestCases[
     // the results do contain the index.  The sink always looks for the index at the root of the bucket when offset synching.
     // The source excludes the index files.
     fileList should contain allOf (
-      ".indexes/s3SinkTaskBuildLocalTest/.locks/Topic(myTopic)/1.lock",
-      ".indexes/s3SinkTaskBuildLocalTest/.locks/Topic(myTopic)/1/name=sam_region=8.lock",
-      ".indexes/s3SinkTaskBuildLocalTest/.locks/Topic(myTopic)/1/name=laura_region=5.lock",
-      ".indexes/s3SinkTaskBuildLocalTest/.locks/Topic(myTopic)/1/name=tom_region=5.lock",
+      ".indexes/azureDatalakeSinkTaskTest/.locks/Topic(myTopic)/1.lock",
+      ".indexes/azureDatalakeSinkTaskTest/.locks/Topic(myTopic)/1/name=sam_region=8.lock",
+      ".indexes/azureDatalakeSinkTaskTest/.locks/Topic(myTopic)/1/name=laura_region=5.lock",
+      ".indexes/azureDatalakeSinkTaskTest/.locks/Topic(myTopic)/1/name=tom_region=5.lock",
       "region=8/name=sam/myTopic(000000000001_000000000000).json",
       "region=5/name=laura/myTopic(000000000001_000000000001).json",
       "region=5/name=tom/myTopic(000000000001_000000000002).json"
@@ -1853,7 +1853,7 @@ abstract class CoreSinkTaskTestCases[
 
     val props = (defaultProps ++
       Map(
-        "name"                         -> "s3SinkTaskBuildLocalTest",
+        "name"                         -> "azureDatalakeSinkTaskTest",
         s"$prefix.local.tmp.directory" -> tempDir.toString,
         s"$prefix.kcql"                -> s"insert into $BucketName:$PrefixName select * from $TopicName PROPERTIES('${FlushCount.entryName}'=1,'padding.length.partition'='12', 'padding.length.offset'='12')",
         s"$prefix.write.mode"          -> "BuildLocal",
@@ -2026,12 +2026,11 @@ abstract class CoreSinkTaskTestCases[
     // Record 0 commits cleanly; its file lands durably in S3.
     task.put(records.slice(0, 1).asJava)
 
-    // Pause S3 to simulate a transient cloud outage; the next put() leaves a writer in Uploading state.
+    // Pause the container to simulate a transient cloud outage; the next put() leaves a writer in Uploading state.
     container.pause()
-    val ex1 = intercept[RetriableException] {
+    intercept[RetriableException] {
       task.put(records.slice(1, 2).asJava)
     }
-    ex1.getMessage should include("Read timed out")
 
     // Simulate tmpwatch / container RuntimeDirectory wiping the staging directory while S3 was down.
     FileUtils.deleteDirectory(tmpDir)
@@ -2055,7 +2054,7 @@ abstract class CoreSinkTaskTestCases[
 
     task.stop()
 
-    // Only the one record that was durably committed before the outage should be in S3.
+    // Only the one record that was durably committed before the outage should be in storage.
     listBucketPath(BucketName, "streamReactorBackups/myTopic/000000000001/").size should be(1)
     remoteFileAsString(BucketName, "streamReactorBackups/myTopic/000000000001/000000000000_0_0.json") should be(
       """{"name":"sam","title":"mr","salary":100.43}""",
@@ -2209,15 +2208,11 @@ abstract class CoreSinkTaskTestCases[
   }
 
   /**
-   * Crash-after-Copy idempotence at the SinkTask level.
+   * Crash-after-Copy idempotence at the SinkTask level (Azure ADLS parity).
    *
-   * Pins the recovery contract for the [Upload → Copy → Delete] pipeline when the crash window
-   * falls AFTER Copy (i.e. the source temp-blob is already absent, the destination is present)
-   * but BEFORE the granular lock is cleared.  On restart the task must:
-   *   1. Load the granular lock and see PendingState=[Copy, Delete].
-   *   2. Retry Copy → source absent + dest present → idempotent success (not FatalCloudSinkError).
-   *   3. Retry Delete → source absent → idempotent success.
-   *   4. Clear PendingState; preCommit advances; exactly one data file remains (no duplication).
+   * Exercises the ADLS rename-404 narrowing from DatalakeStorageInterface.mvFile:
+   * when source is absent and destination is present, mvFile returns Right (idempotent success).
+   * The granular lock has PendingState=[Copy, Delete]; recovery must complete without error.
    */
   unitUnderTest should "crash-after-Copy: on restart PendingState=[Copy,Delete] with absent source and present dest resolves idempotently without error" in {
     import IndexFile._
@@ -2227,7 +2222,6 @@ abstract class CoreSinkTaskTestCases[
 
     val props = (defaultProps + (s"$prefix.kcql" -> kcql)).asJava
 
-    // Step 1: Normal commit of one record → master lock + granular lock created.
     val task1 = createSinkTask()
     task1.initialize(context)
     task1.start(props)
@@ -2235,7 +2229,6 @@ abstract class CoreSinkTaskTestCases[
     task1.put(records.slice(0, 1).asJava)
     task1.stop()
 
-    // Step 2: Discover paths from actual storage (don't hard-code connector name / index dir).
     val allFiles = listBucketPath(BucketName, "")
 
     val dataFilePaths = allFiles.filter(p => p.startsWith(PrefixName) && !p.contains(".indexes"))
@@ -2248,13 +2241,10 @@ abstract class CoreSinkTaskTestCases[
     granularLockPaths should have size 1
     val granularLockPath = granularLockPaths.head
 
-    // Step 3: Read the cleanly-committed granular lock (no PendingState).
     val ObjectWithETag(currentLock, currentETag) =
       storageInterface.getBlobAsObject[IndexFile](BucketName, granularLockPath).value
     currentLock.pendingState shouldBe None
 
-    // Step 4: Overwrite the granular lock to simulate a crash-after-Copy.
-    // Source (temp) blob does NOT exist; destination (final) blob IS present.
     val fakeTempPath = s".temp-upload/$TopicName/1/crash-test-uuid"
     val pendingState = PendingState(
       currentLock.committedOffset.getOrElse(Offset(0L)),
@@ -2269,20 +2259,15 @@ abstract class CoreSinkTaskTestCases[
       ObjectWithETag(currentLock.copy(pendingState = Some(pendingState)), currentETag),
     ).value
 
-    // Step 5: Restart with a fresh task — simulates Kafka Connect restarting the connector.
     val task2 = createSinkTask()
     task2.initialize(context)
     task2.start(props)
     task2.open(Seq(new TopicPartition(TopicName, 1)).asJava)
 
-    // Step 6: put() triggers ensureGranularLock → lazy-loads granular lock → sees PendingState →
-    // idempotent Copy (source absent + dest present = Right) +
-    // idempotent Delete (source absent = Right for S3; non-existing delete is a no-op).
     noException should be thrownBy task2.put(records.slice(0, 1).asJava)
 
     task2.stop()
 
-    // Step 7: Exactly one data file — the destination was not duplicated.
     listBucketPath(BucketName, PrefixName + "/").size should be(1)
     listBucketPath(BucketName, ".temp-upload/").size should be(0)
   }

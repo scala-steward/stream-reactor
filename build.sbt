@@ -203,8 +203,8 @@ lazy val `aws-s3` = (project in file("kafka-connect-aws-s3"))
 
 lazy val `azure-datalake` = (project in file("kafka-connect-azure-datalake"))
   .dependsOn(common)
-  .dependsOn(`cloud-common` % "compile->compile;test->test")
-  .dependsOn(`test-common` % "test->compile")
+  .dependsOn(`cloud-common` % "compile->compile;test->test;it->it")
+  .dependsOn(`test-common` % "test->compile;it->compile")
   .settings(
     settings ++
       Seq(
@@ -221,7 +221,7 @@ lazy val `azure-datalake` = (project in file("kafka-connect-azure-datalake"))
   .configureAssembly(true)
   .configureMavenDescriptor()
   .configureTests(baseTestDeps)
-  //.configureIntegrationTests(kafkaConnectAzureDatalakeTestDeps)
+  .configureIntegrationTests(kafkaConnectAzureDatalakeTestDeps)
   //.configureFunctionalTests(kafkaConnectAzureDatalakeFuncTestDeps)
   .enablePlugins(PackPlugin)
 
