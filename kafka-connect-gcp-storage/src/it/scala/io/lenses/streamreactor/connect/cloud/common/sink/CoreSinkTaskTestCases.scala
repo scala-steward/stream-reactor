@@ -28,9 +28,17 @@ import org.apache.kafka.common.record.TimestampType
 import org.apache.kafka.connect.data.Schema
 import org.apache.kafka.connect.data.SchemaBuilder
 import org.apache.kafka.connect.data.Struct
+import cats.data.NonEmptyList
 import io.lenses.streamreactor.common.errors.FatalConnectException
+import io.lenses.streamreactor.connect.cloud.common.model.Offset
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.CopyOperation
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.DeleteOperation
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexFile
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.ObjectWithETag
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState
 import org.apache.kafka.connect.errors.ConnectException
 import org.apache.kafka.connect.errors.RetriableException
+import org.scalatest.EitherValues
 import org.apache.kafka.connect.header.ConnectHeaders
 import org.apache.kafka.connect.header.Header
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
@@ -65,7 +73,8 @@ abstract class CoreSinkTaskTestCases[
 ) extends CloudPlatformEmulatorSuite[MD, SI, C, CC, CT, T]
     with Matchers
     with MockitoSugar
-    with LazyLogging {
+    with LazyLogging
+    with EitherValues {
 
   private val context = mock[SinkTaskContext]
 
@@ -2206,6 +2215,105 @@ abstract class CoreSinkTaskTestCases[
         |{"name":"tom","title":null,"salary":395.44}
         |""".stripMargin.filter(_ >= ' '),
     )
+
+  }
+
+  /**
+   * Crash-after-Copy idempotence at the SinkTask level (GCP parity with S3).
+   *
+   * See the crash-after-Copy scenario in the S3 CoreSinkTaskTestCases for the full rationale.
+   */
+  unitUnderTest should "crash-after-Copy: on restart PendingState=[Copy,Delete] with absent source and present dest resolves idempotently without error" in {
+    import IndexFile._
+
+    val kcql =
+      s"insert into $BucketName:$PrefixName select * from $TopicName PARTITIONBY name PROPERTIES('${FlushCount.entryName}'=1,'padding.length.partition'='12','padding.length.offset'='12')"
+
+    val props = (defaultProps + (s"$prefix.kcql" -> kcql)).asJava
+
+    val task1 = createSinkTask()
+    task1.initialize(context)
+    task1.start(props)
+    task1.open(Seq(new TopicPartition(TopicName, 1)).asJava)
+    task1.put(records.slice(0, 1).asJava)
+    task1.stop()
+
+    val allFiles = listBucketPath(BucketName, "")
+
+    val dataFilePaths = allFiles.filter(p => p.startsWith(PrefixName) && !p.contains(".indexes"))
+    dataFilePaths should have size 1
+    val finalPath = dataFilePaths.head
+
+    val masterLockSuffix = "/1.lock"
+    val granularLockPaths =
+      allFiles.filter(p => p.contains("/.locks/") && p.endsWith(".lock") && !p.endsWith(masterLockSuffix))
+    granularLockPaths should have size 1
+    val granularLockPath = granularLockPaths.head
+
+    val ObjectWithETag(currentLock, currentETag) =
+      storageInterface.getBlobAsObject[IndexFile](BucketName, granularLockPath).value
+    currentLock.pendingState shouldBe None
+
+    val fakeTempPath = s".temp-upload/$TopicName/1/crash-test-uuid"
+    val pendingState = PendingState(
+      currentLock.committedOffset.getOrElse(Offset(0L)),
+      NonEmptyList.of(
+        CopyOperation(BucketName, fakeTempPath, finalPath, currentETag),
+        DeleteOperation(BucketName, fakeTempPath, currentETag),
+      ),
+    )
+    storageInterface.writeBlobToFile(
+      BucketName,
+      granularLockPath,
+      ObjectWithETag(currentLock.copy(pendingState = Some(pendingState)), currentETag),
+    ).value
+
+    val task2 = createSinkTask()
+    task2.initialize(context)
+    task2.start(props)
+    task2.open(Seq(new TopicPartition(TopicName, 1)).asJava)
+
+    noException should be thrownBy task2.put(records.slice(0, 1).asJava)
+
+    task2.stop()
+
+    listBucketPath(BucketName, PrefixName + "/").size should be(1)
+    listBucketPath(BucketName, ".temp-upload/").size should be(0)
+  }
+
+  /**
+   * Tombstone-bytes parity with S3.
+   *
+   * The S3 CoreSinkTaskTestCases already includes a "write tombstone to bytes format" test.
+   * This is its exact GCP mirror so both providers cover the tombstone write path at the IT level.
+   */
+  unitUnderTest should "write tombstone to bytes format" in {
+
+    val stream = classOf[BytesFormatWriter].getResourceAsStream("/streamreactor-logo.png")
+    val bytes: Array[Byte] = IOUtils.toByteArray(stream)
+
+    val textRecords = List(
+      new SinkRecord(TopicName, 1, null, null, null, bytes, 0, 6, TimestampType.CREATE_TIME),
+      new SinkRecord(TopicName, 2, null, null, null, null, 0, 7, TimestampType.CREATE_TIME),
+      new SinkRecord(TopicName, 3, null, null, null, null, 0, 7, TimestampType.CREATE_TIME),
+      new SinkRecord(TopicName, 4, null, null, null, null, 0, 7, TimestampType.CREATE_TIME),
+    )
+    val task = createSinkTask()
+
+    val props = (defaultProps ++ Map(
+      s"$prefix.kcql"             -> s"insert into $BucketName:$PrefixName select * from $TopicName STOREAS `BYTES` PROPERTIES('${FlushCount.entryName}'=1)",
+      s"$prefix.skip.null.values" -> "true",
+    )).asJava
+
+    task.start(props)
+    task.open(Seq(new TopicPartition(TopicName, 1)).asJava)
+    task.put(textRecords.asJava)
+    task.close(Seq(new TopicPartition(TopicName, 1)).asJava)
+    task.stop()
+
+    listBucketPath(BucketName, "streamReactorBackups/myTopic/1/").size should be(1)
+
+    remoteFileAsBytes(BucketName, "streamReactorBackups/myTopic/1/000000000000_6_6.bytes") should be(bytes)
 
   }
 

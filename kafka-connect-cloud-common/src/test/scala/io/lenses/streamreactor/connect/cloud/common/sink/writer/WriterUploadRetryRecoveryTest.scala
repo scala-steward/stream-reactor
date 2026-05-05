@@ -36,6 +36,7 @@ import io.lenses.streamreactor.connect.cloud.common.sink.naming.KeyNamer
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManagerV2
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.NoIndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingOperationsProcessors
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.deprecated.IndexFilenames
@@ -380,6 +381,7 @@ class WriterUploadRetryRecoveryTest
       directoryFileName,
       gcIntervalSeconds      = Int.MaxValue,
       gcSweepIntervalSeconds = Int.MaxValue,
+      gcSweepMinAgeSeconds   = Int.MaxValue,
       gcSweepEnabled         = false,
     )
 
@@ -487,6 +489,7 @@ class WriterUploadRetryRecoveryTest
         directoryFileName,
         gcIntervalSeconds      = Int.MaxValue,
         gcSweepIntervalSeconds = Int.MaxValue,
+        gcSweepMinAgeSeconds   = Int.MaxValue,
         gcSweepEnabled         = false,
       )
 
@@ -895,5 +898,77 @@ class WriterUploadRetryRecoveryTest
         NonExistingFileError(missingFile).asLeft
       else
         super.uploadFile(source, bucket, path)
+  }
+
+  // ── NoIndexManager Writer-level fail-fast on missing staging file ─────────────────────────────
+  // docs/datalake-sinks-write-pipeline.md
+
+  test(
+    "NoIndexManager - writer in Uploading whose staging file is gone fails fast on Writer.commit; toNoWriter is not reached; committedOffset does not advance",
+  ) {
+    val storage = new AlwaysMissingFileStorage()
+    val pop     = new PendingOperationsProcessors(storage)
+
+    val missingFile = new File("/nonexistent/noindex-test/staging.tmp")
+    missingFile.exists() shouldBe false
+
+    // Use the real NoIndexManager (not a mock) — this is the key difference from the existing tests.
+    val noIndexManager = new NoIndexManager()
+
+    val formatWriter = mock[FormatWriter]
+    when(formatWriter.complete()).thenReturn(().asRight)
+
+    val objectKeyBuilder = mock[ObjectKeyBuilder]
+    when(objectKeyBuilder.build(any[Offset], any[Long], any[Long])).thenReturn(finalKeyLocation.asRight)
+
+    val oldCommittedOffset = Offset(99)
+    val uncommittedOff     = Offset(150)
+
+    val writer = new Writer[FakeFileMetadata](
+      topicPartition,
+      mock[CommitPolicy],
+      noIndexManager,
+      stagingFilenameFn = () => missingFile.asRight,
+      objectKeyBuilder,
+      formatWriterFn = _ => formatWriter.asRight,
+      mock[SchemaChangeDetector],
+      pop,
+      partitionKey     = None,
+      lastSeekedOffset = Some(oldCommittedOffset),
+    )
+
+    val initialUploadingState = Uploading(
+      CommitState(topicPartition, Some(oldCommittedOffset)),
+      missingFile,
+      firstBufferedOffset     = firstBufferedOff,
+      uncommittedOffset       = uncommittedOff,
+      earliestRecordTimestamp = 1L,
+      latestRecordTimestamp   = 100L,
+    )
+    writer.forceWriteState(initialUploadingState)
+
+    // committedOffset before the commit attempt
+    val commitStateBefore = writer.currentWriteState.asInstanceOf[Uploading].commitState.committedOffset
+
+    val result = writer.commit
+
+    // Live-commit escalation: NonExistingFileError on Upload escalates to FatalCloudSinkError
+    // when escalateOnCancel=true (the always-true contract for Writer.commit).
+    result.isLeft shouldBe true
+    result.left.value shouldBe a[FatalCloudSinkError]
+
+    // Writer stays in Uploading — toNoWriter is not reached; data is preserved for the
+    // seek-back-on-restart path (IndexManagerV2.open will re-read the master lock offset).
+    writer.currentWriteState shouldBe a[Uploading]
+    writer.hasPendingUpload shouldBe true
+
+    // committedOffset has not advanced — same value as before the failed commit.
+    val commitStateAfter = writer.currentWriteState.asInstanceOf[Uploading].commitState.committedOffset
+    commitStateAfter shouldBe commitStateBefore
+
+    // Nothing landed in cloud storage.
+    storage.keysUnder(bucket, "data/").toList shouldBe Nil
+    storage.keysUnder(bucket, ".temp-upload/").toList shouldBe Nil
+    ()
   }
 }

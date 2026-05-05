@@ -4,6 +4,8 @@ This document explains how the datalake sink connectors (Amazon S3, Google Cloud
 
 For the end-to-end record-write pipeline (staging file lifecycle, three-phase Upload → Copy → Delete chain, retry semantics, and error matrix), see [datalake-sinks-write-pipeline.md](datalake-sinks-write-pipeline.md).
 
+For a map of which tests exercise each stage of this pipeline (default path and edge cases), see [datalake-sink-test-coverage.md](datalake-sink-test-coverage.md).
+
 ---
 
 ## Background: How Offset Tracking Works

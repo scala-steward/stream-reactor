@@ -177,4 +177,44 @@ class AwsS3StorageInterfaceTest extends AnyFlatSpecLike with Matchers with Eithe
     Mockito.verify(s3Client, Mockito.never()).copyObject(anyCopyObjectRequest())
     Mockito.verify(s3Client, Mockito.never()).deleteObject(anyDeleteObjectRequest())
   }
+
+  // ── Permanent copyObject error (KMS-style) ────────────────────────────────────────────────
+
+  it should "return FileMoveError when copyObject throws a permanent S3Exception (KMS-style 400) and NOT treat it as idempotent success" in {
+    // Motivation (from docs/datalake-exactly-once-partitionby.md): a KMS key being disabled
+    // produces a permanent error from S3 during the Copy phase (HTTP 400 / KMSDisabledException).
+    // Unlike the idempotent-replay 404 path, this error MUST propagate as Left(FileMoveError)
+    // so the sink escalates to FatalCloudSinkError and the LC-2451 in-place rollback path runs.
+    //
+    // This test complements the existing 404 idempotence test by covering the symmetric
+    // permanent-error case. The key distinction: the destination is NOT checked when copyObject
+    // itself fails (the source headObject succeeded, so the 404 idempotence branch is skipped).
+    val s3Client         = newMockS3Client()
+    val storageInterface = new AwsS3StorageInterface(newMockTaskId(), s3Client, batchDelete = false, None)
+
+    // Source exists: headObject succeeds.
+    Mockito.doReturn(HeadObjectResponse.builder().build())
+      .when(s3Client).headObject(anyHeadObjectRequest())
+
+    // copyObject fails with a permanent 400 (KMS key disabled simulation).
+    val kmsError = S3Exception.builder()
+      .statusCode(400)
+      .message("KMS.KMSDisabledException: The specified KMS key has been disabled")
+      .build()
+      .asInstanceOf[Throwable]
+    Mockito.doThrow(kmsError).when(s3Client).copyObject(anyCopyObjectRequest())
+
+    val result = storageInterface.mvFile("oldBucket", "oldPath", "newBucket", "newPath", none)
+
+    // Permanent error: Left(FileMoveError) — NOT silently treated as idempotent success.
+    result.isLeft shouldBe true
+    result.left.value shouldBe a[FileMoveError]
+
+    // copyObject was attempted (source existed), but delete was NOT called (copy failed first).
+    Mockito.verify(s3Client).copyObject(anyCopyObjectRequest())
+    Mockito.verify(s3Client, Mockito.never()).deleteObject(anyDeleteObjectRequest())
+
+    // Crucially: the destination head was NOT inspected (no idempotence bypass for 400 errors).
+    Mockito.verify(s3Client, Mockito.times(1)).headObject(anyHeadObjectRequest())
+  }
 }

@@ -89,7 +89,16 @@ class IndexManagerV2(
 ) extends IndexManager
     with LazyLogging {
 
-  // A unique identifier for the lock owner, derived from the connector task ID.
+  // Construction-time validation: the orphan sweep's age threshold (gcSweepMinAgeSeconds) must be
+  // greater than or equal to the sweep's tick interval (gcSweepIntervalSeconds). Otherwise a lock
+  // file written shortly before a sweep tick fires could be misclassified as orphaned and reaped
+  // before the writer has had a chance to claim it. The previous behaviour was to silently accept
+  // an inverted configuration; closing the documented gap pre-validates and fails fast.
+  require(
+    gcSweepMinAgeSeconds >= gcSweepIntervalSeconds,
+    s"gcSweepMinAgeSeconds ($gcSweepMinAgeSeconds) must be >= gcSweepIntervalSeconds ($gcSweepIntervalSeconds)",
+  )
+
   private val lockOwner = connectorTaskId.lockUuid
 
   // Thread-safe map storing the latest offset for each TopicPartition seeked during SinkTask initialization.
@@ -613,7 +622,7 @@ class IndexManagerV2(
         logger.error(s"Failed to get bucket and prefix for $topicPartition: ${err.message()}")
         err
       }
-      // Resolve the cached eTag; fails fatally on miss to preserve zombie-task fencing
+      // Resolve the cached eTag; fails fatally on miss to preserve zombie-task fencing.
       eTag <- resolveGranularETag(topicPartition, partitionKey)
       index = ObjectWithETag(
         IndexFile(lockOwner, committedOffset, pendingState),
@@ -952,6 +961,23 @@ class IndexManagerV2(
         }
       }
     } catch {
+      // InterruptedException is deliberately handled BEFORE NonFatal because
+      // `scala.util.control.NonFatal` excludes InterruptedException by design. Without an
+      // explicit case here the signal would propagate uncaught, the polled items would not
+      // be re-offered, and the executor's interrupt flag would be cleared by the time the
+      // exception bubbled up — silently dropping the cancellation request.
+      case _: InterruptedException =>
+        unprocessed.foreach(gcQueue.offer)
+        if (unprocessed.nonEmpty) {
+          logger.warn(
+            s"Re-enqueued ${unprocessed.size} GC item(s) after interruption for ${connectorTaskId.show}",
+          )
+        }
+        // Restore interrupt status so cooperative shutdown (close() awaitTermination) still
+        // observes the cancellation request.
+        Thread.currentThread().interrupt()
+        logger.info(s"Background GC drain interrupted for ${connectorTaskId.show}; exiting drain loop")
+
       case NonFatal(e) =>
         // Re-offer any items we polled but could not send through the Right/Left
         // branches -- otherwise an unexpected throw (bug, metric failure, etc.)
@@ -963,10 +989,6 @@ class IndexManagerV2(
             s"Re-enqueued ${unprocessed.size} GC item(s) after unexpected drain error for ${connectorTaskId.show}",
           )
         }
-        // Restore interrupt status so cooperative shutdown (close() awaitTermination)
-        // still observes the cancellation request -- InterruptedException is NonFatal
-        // on Scala 2.13, so without this the signal would be silently swallowed.
-        if (e.isInstanceOf[InterruptedException]) Thread.currentThread().interrupt()
         logger.warn(s"Unexpected error in background GC drain for ${connectorTaskId.show}", e)
     }
   }

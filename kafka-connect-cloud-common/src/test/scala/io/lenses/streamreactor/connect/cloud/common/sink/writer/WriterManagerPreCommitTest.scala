@@ -22,6 +22,7 @@ import io.lenses.streamreactor.connect.cloud.common.formats.writer.schema.Schema
 import io.lenses.streamreactor.connect.cloud.common.model.Offset
 import io.lenses.streamreactor.connect.cloud.common.model.Topic
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
+import io.lenses.streamreactor.connect.cloud.common.model.TopicPartitionOffset
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocation
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocationValidator
 import io.lenses.streamreactor.connect.cloud.common.sink.FatalCloudSinkError
@@ -29,6 +30,7 @@ import io.lenses.streamreactor.connect.cloud.common.sink.commit.CommitPolicy
 import io.lenses.streamreactor.connect.cloud.common.sink.config.PartitionField
 import io.lenses.streamreactor.connect.cloud.common.sink.config.PartitionNamePath
 import io.lenses.streamreactor.connect.cloud.common.sink.config.ValuePartitionField
+import io.lenses.streamreactor.connect.cloud.common.sink.conversion.NullSinkData
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.KeyNamer
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
@@ -713,6 +715,80 @@ class WriterManagerPreCommitTest
     // Sixth step: calc=31, HWM=201 -> 201
     // Seventh step: calc=301, HWM=201 -> 301
     observed shouldBe List(51L, 121L, 121L, 201L, 201L, 201L, 301L)
+  }
+
+  // --- evictIdleWriters Some(newKey) exclusion via the production write() path ---
+
+  /**
+   * Regression guard for `evictIdleWriters(topicPartition, Some(key))` in WriterManager.write().
+   *
+   * When a new writer is created (NoWriter state), WriterManager immediately calls
+   * `evictIdleWriters(tp, Some(newKey))` to reclaim other idle writers on the same
+   * topic-partition.  Without the `Some(newKey)` exclusion, the brand-new writer would
+   * evict itself (it is also in NoWriter / isIdle=true) before its first `write()` call.
+   *
+   * This test drives the production `write()` path so the `Some(key)` parameter is actually
+   * passed, and verifies the intended invariant:
+   *   - An existing idle writer for a different partition key IS evicted.
+   *   - The just-created writer is NOT evicted.
+   */
+  test(
+    "write() via production path evicts other idle writers on the same TP but preserves the just-created writer (Some(newKey) exclusion in evictIdleWriters)",
+  ) {
+    val keyNamer = mock[KeyNamer]
+    when(keyNamer.processPartitionValues(any[MessageDetail], any[TopicPartition])).thenReturn(Right(dateB))
+
+    val indexManager = mock[IndexManager]
+    when(indexManager.ensureGranularLock(any[TopicPartition], any[String])).thenReturn(Right(()))
+    when(indexManager.getSeekedOffsetForPartitionKey(any[TopicPartition], any[String])).thenReturn(Right(None))
+    when(indexManager.getSeekedOffsetForTopicPartition(any[TopicPartition])).thenReturn(None)
+
+    when(formatWriter.write(any[MessageDetail])).thenReturn(Right(()))
+
+    val wm = new WriterManager[FileMetadata](
+      commitPolicyFn              = _ => Right(commitPolicy),
+      bucketAndPrefixFn           = _ => Right(CloudLocation("bucket", None)),
+      keyNamerFn                  = _ => Right(keyNamer),
+      stagingFilenameFn           = (_, _) => Right(new File("test")),
+      objKeyBuilderFn             = (_, _) => objectKeyBuilder,
+      formatWriterFn              = (_, _) => Right(formatWriter),
+      indexManager                = indexManager,
+      transformerF                = (m: MessageDetail) => Right(m),
+      schemaChangeDetector        = schemaChangeDetector,
+      skipNullValues              = false,
+      pendingOperationsProcessors = pendingOpsProcessors,
+    )
+
+    // Pre-populate an idle (NoWriter-state) writer for dateA on tp0.
+    // This writer must be evicted when a new writer for dateB is created on the same tp0.
+    val writerA = writerInNoWriterState(tp0, Some(Offset(10)))
+    wm.putWriter(MapKey(tp0, dateA), writerA)
+    wm.writerCount shouldBe 1
+
+    // Drive the production write() path for dateB.
+    // Internally this calls createWriter → writers.put(keyB, writerB) →
+    //   evictIdleWriters(tp0, Some(keyB)).
+    // At the eviction point, writerB is still in NoWriter (isIdle=true), but the Some(keyB)
+    // exclusion prevents it from being evicted; writerA (dateA, idle, not excluded) IS evicted.
+    val msg = MessageDetail(
+      key       = NullSinkData(None),
+      value     = NullSinkData(None),
+      headers   = Map.empty,
+      timestamp = None,
+      topic     = Topic("topic"),
+      partition = 0,
+      offset    = Offset(11),
+    )
+    val tpo = TopicPartitionOffset(Topic("topic"), 0, Offset(11))
+
+    wm.write(tpo, msg).value
+
+    // writerA (dateA) was evicted; writerB (dateB) was preserved — exactly 1 writer remains.
+    wm.writerCount shouldBe 1
+
+    // The surviving writer is the one for dateB (its granular lock was NOT evicted).
+    verify(indexManager).evictGranularLock(tp0, WriterManager.derivePartitionKey(dateA).get)
+    verify(indexManager, never).evictGranularLock(tp0, WriterManager.derivePartitionKey(dateB).get)
   }
 
   test("eviction is scoped to the target TopicPartition and does not evict idle writers from other partitions") {

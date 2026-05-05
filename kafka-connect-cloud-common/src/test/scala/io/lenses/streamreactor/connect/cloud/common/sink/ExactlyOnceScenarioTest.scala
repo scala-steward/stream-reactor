@@ -395,6 +395,100 @@ class ExactlyOnceScenarioTest extends AnyFunSuite with Matchers with BeforeAndAf
     h.persistedOffsetsForPk(tp0, Some(pk)) shouldBe Set(5L)
   }
 
+  // ── LC-2451 retry-replay completes [Copy, Delete] PendingState without crash ─────────────────
+  test(
+    "(LC-2451): retry on same task instance completes [Copy, Delete] PendingState after cleanUp; no duplication; preCommit advances",
+  ) {
+    // PR #307 invariant: WriterManager.cleanUp(tp) evicts the in-memory granular cache but
+    // preserves seekedOffsets + topicPartitionToETags. The next put() call thus triggers
+    // ensureGranularLock which re-reads the storage-side granular lock, detects PendingState,
+    // and replays [Copy, Delete] before processing the new batch.
+
+    val pk        = "pk-lc2451"
+    val tempPath  = h.predictTempPathFor(tp0, Some(pk), 30L)
+    val finalPath = h.expectedFinalPath(tp0, Some(pk), 30L)
+
+    val ops = List[Op](
+      Assign(Set(tp0)),
+      Write(tp0, Some(pk), 30L),
+      InjectFailMove(tempPath), // arm one-shot Copy failure
+      Commit(tp0),              // Upload succeeds; Copy fails → PendingState=[Copy,Delete] recorded
+      // Simulate WriterManager.cleanUp(tp) after handleErrors: evict granular cache only.
+      // seekedOffsets + topicPartitionToETags are preserved (LC-2451 invariant).
+      EvictGranularLocks(tp0),
+      // Re-deliver the same batch (same partition key, same offset). Production retries here.
+      Write(tp0, Some(pk), 30L),
+      Commit(tp0), // ensureGranularLock detects PendingState, replays [Copy,Delete]; then processes new record
+      PreCommit(tp0, 100L),
+    )
+    h.run(ops, expectCommitErrors = true)
+
+    // Final blob present (exactly once — the retry did not duplicate it).
+    h.storage.pathExists(h.bucket, finalPath).getOrElse(false) shouldBe true
+    // Temp blob cleaned up (Delete step ran in recovery).
+    h.storage.pathExists(h.bucket, tempPath).getOrElse(true) shouldBe false
+    // Offset 30 persisted exactly once.
+    h.persistedOffsetsForPk(tp0, Some(pk)) shouldBe Set(30L)
+    // preCommit advanced.
+    h.ks(tp0).lastOption shouldBe Some(31L)
+  }
+
+  // ── Rebalance while writer in Uploading (mid-commit) state ───────────────────────────────────
+  // docs/datalake-exactly-once-partitionby.md L564-L566; docs/datalake-sinks-write-pipeline.md L284
+  test(
+    "rebalance while writer in Uploading — granular cache evicted, seekedOffsets/master-eTag retained, fresh open replays PendingState, no duplication, K advances",
+  ) {
+    // 1. Drive a commit that leaves PendingState=[Copy, Delete] in the granular lock (Copy fails).
+    val pk        = "pk-rebalance-uploading"
+    val tempPath  = h.predictTempPathFor(tp0, Some(pk), 15L)
+    val finalPath = h.expectedFinalPath(tp0, Some(pk), 15L)
+
+    val phase1 = List[Op](
+      Assign(Set(tp0)),
+      Write(tp0, Some(pk), 15L),
+      InjectFailMove(tempPath), // Copy will fail; PendingState=[Copy, Delete] written to granular lock
+      Commit(tp0),              // Upload succeeds → temp blob present; Copy fails → PendingState left in lock
+    )
+    h.run(phase1, expectCommitErrors = true)
+    // Temp blob present in storage (Upload succeeded before Copy failed).
+    h.storage.pathExists(h.bucket, tempPath).getOrElse(false) shouldBe true
+    h.storage.pathExists(h.bucket, finalPath).getOrElse(true) shouldBe false // not yet
+
+    // 2. Simulate rebalance: WriterManager.close() evicts the in-memory granular cache for tp0
+    //    but DOES NOT clear seekedOffsets or topicPartitionToETags (LC-2451 invariant).
+    //    The EvictGranularLocks op maps directly to IndexManagerV2.evictAllGranularLocks(tp).
+    //
+    // 3. Crash + reboot: fresh IndexManagerV2 opens from durable storage.
+    //    Because seekedOffsets were retained through the rebalance, the master lock eTag is
+    //    still valid and does not need an unnecessary re-read on open.
+    val phase2 = List[Op](
+      EvictGranularLocks(tp0),  // simulate WriterManager.close() granular-cache eviction
+      Crash,                    // new IndexManagerV2 instance reads from storage on open
+      LoadGranularLock(tp0, pk),// fresh open triggers getSeekedOffsetForPartitionKey
+      // → loadGranularLock → resolveAndCacheGranularLock
+      // → PendingState=[Copy, Delete] replayed idempotently
+    )
+    h.run(phase2)
+
+    // 4. Post-recovery assertions:
+    //    - Final blob now present (Copy replayed: temp → final).
+    h.storage.pathExists(h.bucket, finalPath).getOrElse(false) shouldBe true
+    //    - Temp blob cleaned up (Delete replayed).
+    h.storage.pathExists(h.bucket, tempPath).getOrElse(true) shouldBe false
+    //    - Offset 15 persisted exactly once (no duplication from the retry).
+    h.persistedOffsetsForPk(tp0, Some(pk)) shouldBe Set(15L)
+
+    // 5. PreCommit advances after a fresh put succeeds (K = max committed + 1).
+    val phase3 = List[Op](
+      Write(tp0, Some(pk), 16L),
+      Commit(tp0),
+      PreCommit(tp0, 100L),
+    )
+    h.run(phase3)
+    h.ks(tp0).lastOption shouldBe Some(17L)
+    h.persistedOffsetsForPk(tp0, Some(pk)) shouldBe Set(15L, 16L)
+  }
+
   // (d) mid-chain Copy failure returns FatalCloudSinkError (not NonFatal) and leaves no orphan after recovery
   test("non-PARTITIONBY: Copy failure returns FatalCloudSinkError and no temp blob is orphaned after recovery") {
     // The Copy phase is mid-chain (not an UploadOperation), so its failure escalates to
@@ -455,6 +549,14 @@ object ExactlyOnceScenarioTest {
   ) extends Op
 
   /**
+   * Calls `IndexManagerV2.evictAllGranularLocks(tp)` directly, simulating what
+   * `WriterManager.cleanUp(tp)` does to the IndexManagerV2 state after a fatal error.
+   * Unlike [[Crash]], this does NOT destroy `seekedOffsets` or `topicPartitionToETags`
+   * (the LC-2451 invariant: those are preserved so the master-lock eTag remains valid).
+   */
+  final case class EvictGranularLocks(tp: TopicPartition) extends Op
+
+  /**
    * Wires a real `IndexManagerV2` + `PendingOperationsProcessors` against an in-memory fake.
    * Tracks per-(tp, pk) committed offsets locally so K is computed without round-tripping
    * to storage on every PreCommit (mirrors how `WriterManager` caches its own writers).
@@ -513,6 +615,7 @@ object ExactlyOnceScenarioTest {
         directoryFileName,
         gcIntervalSeconds      = Int.MaxValue,
         gcSweepIntervalSeconds = Int.MaxValue,
+        gcSweepMinAgeSeconds   = Int.MaxValue,
         gcSweepEnabled         = false,
       )(si, taskId)
       if (assignment.nonEmpty) openOrFail(assignment)
@@ -527,6 +630,14 @@ object ExactlyOnceScenarioTest {
         case (tp, None)      => committed.remove((tp, None))
       }
     }
+
+    /**
+     * Evict the in-memory granular cache for `tp` without destroying the IndexManagerV2 instance.
+     *  Simulates what `WriterManager.cleanUp(tp)` does: calls `evictAllGranularLocks(tp)` but
+     *  does NOT clear `seekedOffsets` or `topicPartitionToETags` (LC-2451 invariant).
+     */
+    def evictGranularLocks(tp: TopicPartition): Unit =
+      im.evictAllGranularLocks(tp)
 
     /** Drop the IndexManagerV2 (releases executors). The next bootTask reads from storage. */
     def crash(): Unit = {
@@ -551,10 +662,11 @@ object ExactlyOnceScenarioTest {
       ops:                   List[Op],
       expectCommitErrors:    Boolean = false,
       expectPreCommitErrors: Boolean = false,
+      checkInvariants:       Boolean = true,
     ): Unit = {
       lastCommitError = None
       ops.foreach(runOp(_, expectCommitErrors, expectPreCommitErrors))
-      checkInvariants()
+      if (checkInvariants) this.checkInvariants()
     }
 
     private def runOp(op: Op, expectCommitErrors: Boolean, expectPreCommitErrors: Boolean): Unit = op match {
@@ -651,6 +763,9 @@ object ExactlyOnceScenarioTest {
         import IndexFile.indexFileEncoder
         val _ = storage.writeBlobToFile(bucket, lockPath, ObjectWithETag(newIdx, currentETag))
           .left.map(err => throw new AssertionError(s"ManipulateGranularLock write failed: ${err.message()}"))
+
+      case EvictGranularLocks(tp) =>
+        evictGranularLocks(tp)
     }
 
     private def commitOne(tp: TopicPartition, pk: Option[String], offsets: List[Long]): Either[SinkError, Unit] = {

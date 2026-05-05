@@ -164,4 +164,5 @@ class InMemoryStorageInterfaceTest extends AnyFunSuiteLike with Matchers with Ei
     val resp = fake.listKeysRecursive(Bucket, Some("a/")).value.getOrElse(fail("expected non-empty list"))
     resp.files.toSet shouldBe Set("a/x", "a/y")
   }
+
 }

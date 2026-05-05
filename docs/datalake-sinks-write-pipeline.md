@@ -6,6 +6,8 @@ It applies uniformly to all three datalake sink connectors: Amazon S3 (`S3SinkTa
 
 For the **lock file layout**, master-lock semantics, `PARTITIONBY` granular locks, GC, orphan sweep, and zombie-task fencing, see [datalake-exactly-once-partitionby.md](datalake-exactly-once-partitionby.md). That document assumes the reader knows the upload pipeline; this document fills that gap.
 
+For a map of which tests exercise each stage of this pipeline (default path and edge cases), see [datalake-sink-test-coverage.md](datalake-sink-test-coverage.md).
+
 ---
 
 ## Configuration knobs that change the pipeline shape

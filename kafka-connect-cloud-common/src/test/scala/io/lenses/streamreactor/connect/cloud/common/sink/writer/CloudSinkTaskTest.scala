@@ -29,7 +29,9 @@ import io.lenses.streamreactor.connect.cloud.common.model.Topic
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocation
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocationValidator
+import io.lenses.streamreactor.connect.cloud.common.sink.BatchCloudSinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.CloudSinkTask
+import io.lenses.streamreactor.connect.cloud.common.sink.FatalCloudSinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.NonFatalCloudSinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.commit.CloudCommitPolicy
 import io.lenses.streamreactor.connect.cloud.common.sink.commit.CommitPolicy
@@ -39,8 +41,12 @@ import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.NoIndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingOperationsProcessors
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState
+import io.lenses.streamreactor.connect.cloud.common.model.UploadableFile
 import io.lenses.streamreactor.connect.cloud.common.storage.FileMoveError
+import io.lenses.streamreactor.connect.cloud.common.storage.UploadError
+import io.lenses.streamreactor.connect.cloud.common.storage.UploadFailedError
 import io.lenses.streamreactor.connect.cloud.common.storage.StorageInterface
+import org.apache.kafka.connect.errors.ConnectException
 import io.lenses.streamreactor.connect.cloud.common.testing.FakeFileMetadata
 import io.lenses.streamreactor.connect.cloud.common.testing.InMemoryStorageInterface
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
@@ -297,6 +303,126 @@ class CloudSinkTaskTest
     thrown
   }
 
+  // ── BatchCloudSinkError batch-matrix tests ─────────────────────────────────────────────────
+  // Pins CloudSinkTask.handleErrors when fed a BatchCloudSinkError.
+  // The single-error variants above already cover FatalCloudSinkError and NonFatalCloudSinkError.
+  // These tests cover the three distinct *batch* shapes.
+
+  test(
+    "BatchCloudSinkError with fatal + unswallowable non-fatal throws FatalConnectException under all policies (fatal precedence); cleanUp scoped to fatal TPs only; no RetriableIntegrityException leaked",
+  ) {
+    val fatalErr   = FatalCloudSinkError("fatal-for-tpA", tpA)
+    val unswallErr = NonFatalCloudSinkError.unswallowable("integrity-error-for-tpB", None)
+    val batchError = BatchCloudSinkError(fatal = Set(fatalErr), nonFatal = Set(unswallErr))
+
+    Seq(RetryErrorPolicy(), NoopErrorPolicy(), ThrowErrorPolicy()).foreach { policy =>
+      val im = stubWmIndexManager()
+      val wm = buildMinimalWriterManager(im)
+
+      val thrown = runHandleErrorsWithBatch(batchError, wm, policy)
+
+      withClue(s"policy=$policy: ") {
+        thrown shouldBe a[FatalConnectException]
+        thrown should not be a[RetriableException]
+        thrown should not be a[RetriableIntegrityException]
+
+        // cleanUp is scoped to FATAL TPs only (tpA). tpB (non-fatal) must NOT be cleaned up.
+        verify(im, times(1)).evictAllGranularLocks(tpA)
+        verify(im, never).evictAllGranularLocks(tpB)
+      }
+    }
+  }
+
+  test(
+    "BatchCloudSinkError with only unswallowable non-fatal entries throws RetriableIntegrityException; under RETRY wraps in RetriableException; under NOOP/THROW rethrown as-is; cleanUp NOT called",
+  ) {
+    val u1         = NonFatalCloudSinkError.unswallowable("u1", None)
+    val u2         = NonFatalCloudSinkError.unswallowable("u2", None)
+    val batchError = BatchCloudSinkError(fatal = Set.empty, nonFatal = Set(u1, u2))
+
+    val retryIm  = stubWmIndexManager()
+    val retryWm  = buildMinimalWriterManager(retryIm)
+    val retryErr = runHandleErrorsWithBatch(batchError, retryWm, RetryErrorPolicy(), maxRetries = 5)
+    retryErr shouldBe a[RetriableException]
+    Option(retryErr.getCause) match {
+      case Some(_: RetriableIntegrityException) => succeed
+      case other => fail(s"Expected RetriableIntegrityException cause, got: $other")
+    }
+    verify(retryIm, never).evictAllGranularLocks(any[TopicPartition])
+
+    val noopIm  = stubWmIndexManager()
+    val noopWm  = buildMinimalWriterManager(noopIm)
+    val noopErr = runHandleErrorsWithBatch(batchError, noopWm, NoopErrorPolicy())
+    noopErr shouldBe a[RetriableIntegrityException]
+    verify(noopIm, never).evictAllGranularLocks(any[TopicPartition])
+
+    val throwIm  = stubWmIndexManager()
+    val throwWm  = buildMinimalWriterManager(throwIm)
+    val throwErr = runHandleErrorsWithBatch(batchError, throwWm, ThrowErrorPolicy())
+    throwErr shouldBe a[RetriableIntegrityException]
+    verify(throwIm, never).evictAllGranularLocks(any[TopicPartition])
+  }
+
+  test(
+    "BatchCloudSinkError with only swallowable non-fatal entries: under NOOP swallowed; under RETRY/THROW throws ConnectException (not Fatal); cleanUp NOT called; subsequent put proceeds normally",
+  ) {
+    val s1         = NonFatalCloudSinkError("s1", None, swallowable = true)
+    val s2         = NonFatalCloudSinkError("s2", None, swallowable = true)
+    val batchError = BatchCloudSinkError(fatal = Set.empty, nonFatal = Set(s1, s2))
+
+    // NOOP: should be swallowed — null thrown (no exception)
+    val noopIm  = stubWmIndexManager()
+    val noopWm  = buildMinimalWriterManager(noopIm)
+    val noopErr = runHandleErrorsWithBatch(batchError, noopWm, NoopErrorPolicy())
+    noopErr shouldBe null
+    verify(noopIm, never).evictAllGranularLocks(any[TopicPartition])
+
+    // RETRY: ConnectException, NOT FatalConnectException, NOT RetriableIntegrityException
+    val retryIm  = stubWmIndexManager()
+    val retryWm  = buildMinimalWriterManager(retryIm)
+    val retryErr = runHandleErrorsWithBatch(batchError, retryWm, RetryErrorPolicy())
+    if (retryErr != null) {
+      retryErr should not be a[FatalConnectException]
+      retryErr should not be a[RetriableIntegrityException]
+    }
+    verify(retryIm, never).evictAllGranularLocks(any[TopicPartition])
+
+    // THROW: ditto
+    val throwIm  = stubWmIndexManager()
+    val throwWm  = buildMinimalWriterManager(throwIm)
+    val throwErr = runHandleErrorsWithBatch(batchError, throwWm, ThrowErrorPolicy())
+    if (throwErr != null) {
+      throwErr should not be a[FatalConnectException]
+      throwErr should not be a[RetriableIntegrityException]
+    }
+    verify(throwIm, never).evictAllGranularLocks(any[TopicPartition])
+  }
+
+  /**
+   * Drives a pre-built `BatchCloudSinkError` through the REAL production
+   * `CloudSinkTask.handleErrors` → `handleTry` → `ErrorPolicy` chain.
+   *
+   * Returns the exception rethrown by the error policy, or `null` if none.
+   */
+  private def runHandleErrorsWithBatch(
+    batchError: BatchCloudSinkError,
+    wm:         WriterManager[FakeFileMetadata],
+    policy:     ErrorPolicy,
+    maxRetries: Int = 5,
+  ): Throwable = {
+    val task = new ConcreteTestSinkTask
+    task.initialize(maxRetries, policy)
+    task.writerManager   = wm
+    task.connectorTaskId = connectorTaskId
+    var thrown: Throwable = null
+    try {
+      task.handleTry(scala.util.Try {
+        task.handleErrors(Left(batchError))
+      })
+    } catch { case t: Throwable => thrown = t }
+    thrown
+  }
+
   /**
    * Drives `wm.recommitPending()` through the REAL production `CloudSinkTask.handleErrors`
    * and `ErrorHandler.handleTry` path.  A concrete `ConcreteTestSinkTask` is created per
@@ -454,6 +580,239 @@ class CloudSinkTaskTest
     Files.write(f.toPath, content.getBytes(StandardCharsets.UTF_8))
     f.deleteOnExit()
     f
+  }
+
+  // ── Persistent retry exhaustion + staging-file preservation ──────────────────────────────────
+  // docs/datalake-exactly-once-partitionby.md
+
+  test(
+    "Persistent transient UploadFailedError exhausts RetryErrorPolicy budget (maxRetries=3): first two puts throw RetriableException; third throws ConnectException; staging file preserved throughout",
+  ) {
+    // Storage that always returns UploadFailedError (transient, swallowable=true).
+    val storage     = new AlwaysTransientUploadFailingStorage()
+    val pop         = new PendingOperationsProcessors(storage)
+    val stagingFile = makeTempFile("retry-exhaustion-records")
+    stagingFile.exists() shouldBe true
+
+    val idxMgr = stubWriterIndexManager()
+    val writer = buildUploadingWriter(tpA, stagingFile, pop, idxMgr, Offset(99), Offset(150))
+    val im     = stubWmIndexManager()
+    val wm     = buildMinimalWriterManager(im)
+    wm.putWriter(MapKey(tpA, Map.empty), writer)
+
+    // Single task instance — retry counter persists across put() calls.
+    val task = new ConcreteTestSinkTask
+    task.initialize(3, RetryErrorPolicy())
+    task.writerManager   = wm
+    task.connectorTaskId = connectorTaskId
+
+    def doPut(): Throwable = {
+      var thrown: Throwable = null
+      try {
+        task.handleTry(scala.util.Try {
+          task.handleErrors(wm.recommitPending())
+        })
+      } catch { case t: Throwable => thrown = t }
+      thrown
+    }
+
+    // Call 1: retries=3→2 → RetriableException
+    val err1 = doPut()
+    err1 shouldBe a[RetriableException]
+    err1 should not be a[FatalConnectException]
+    stagingFile.exists() shouldBe true
+
+    // Call 2: retries=2→1 → RetriableException
+    val err2 = doPut()
+    err2 shouldBe a[RetriableException]
+    stagingFile.exists() shouldBe true
+
+    // Call 3: retries=1→0 → ConnectException (exhausted; NOT RetriableException, NOT FatalConnectException)
+    val err3 = doPut()
+    err3 should not be null
+    err3 should not be a[RetriableException]
+    err3 should not be a[FatalConnectException]
+    err3 shouldBe a[ConnectException]
+
+    // Staging file is preserved at exhaustion — the writer did NOT roll back (swallowable=true).
+    stagingFile.exists() shouldBe true
+
+    // On restart, IndexManagerV2.open would seek the consumer back to the master-lock offset.
+    // That path is already pinned by WriterUploadRetryRecoveryTest + IndexManagerV2Test:
+    // the WriterManager.cleanUp contract (called by Connect after task failure) evicts writers
+    // while preserving seekedOffsets + topicPartitionToETags (LC-2451). IndexManagerV2.open
+    // then replays the master-lock offset as the consume-from floor.
+    val _ = stagingFile.delete()
+  }
+
+  /**
+   * Storage where `uploadFile` always returns a transient `UploadFailedError`,
+   * simulating a persistent cloud I/O error where the staging file is present locally
+   * but the upload never completes.  Results in `NonFatalCloudSinkError(swallowable=true)`
+   * (not `NonExistingFileError`, which would escalate to Fatal).
+   */
+  private class AlwaysTransientUploadFailingStorage extends InMemoryStorageInterface() {
+    override def uploadFile(
+      source: UploadableFile,
+      bucket: String,
+      path:   String,
+    ): Either[UploadError, String] =
+      UploadFailedError(new RuntimeException("transient upload failure"), new File(path)).asLeft
+  }
+
+  // ── recommitPending across polls + empty poll + distinct tempFileUuid ────────────────────────
+  // docs/datalake-sinks-write-pipeline.md
+
+  test(
+    "second poll calls recommitPending first, retries the previously-failed upload, and then the writer transitions to NoWriter",
+  ) {
+    val storage = new OneShotTransientUploadFailingStorage()
+    val pop     = new PendingOperationsProcessors(storage)
+    val tmpFile = makeTempFile("poll-retry-records")
+
+    val idxMgr = stubWriterIndexManager()
+    val writer = buildUploadingWriter(tpA, tmpFile, pop, idxMgr, Offset(99), Offset(150))
+    val wm     = buildMinimalWriterManager(stubWmIndexManager())
+    wm.putWriter(MapKey(tpA, Map.empty), writer)
+
+    // Poll 1: upload fails transiently → RetriableException; writer stays Uploading.
+    val thrown1 = runPut(wm, RetryErrorPolicy())
+    thrown1 shouldBe a[RetriableException]
+    writer.currentWriteState shouldBe a[Uploading]
+
+    // Poll 2: recommitPending runs first; one-shot failure exhausted → upload succeeds; writer → NoWriter.
+    val thrown2 = runPut(wm, RetryErrorPolicy())
+    thrown2 shouldBe null // succeeded
+    writer.currentWriteState shouldBe a[NoWriter]
+
+    // Payload landed at the final path.
+    storage.snapshot(bucket).keys.exists(_.contains("final-")) shouldBe true
+    val _ = tmpFile.delete()
+  }
+
+  test(
+    "put(emptyList) still triggers recommitPending; a writer in Uploading completes its pending upload even when the record list is empty",
+  ) {
+    val storage = new OneShotTransientUploadFailingStorage()
+    val pop     = new PendingOperationsProcessors(storage)
+    val tmpFile = makeTempFile("empty-poll-records")
+
+    val idxMgr = stubWriterIndexManager()
+    val writer = buildUploadingWriter(tpA, tmpFile, pop, idxMgr, Offset(99), Offset(150))
+    val wm     = buildMinimalWriterManager(stubWmIndexManager())
+    wm.putWriter(MapKey(tpA, Map.empty), writer)
+
+    // "Put" 1 (empty-equivalent): recommitPending fails; writer stays Uploading.
+    val task = new ConcreteTestSinkTask
+    task.initialize(5, RetryErrorPolicy())
+    task.writerManager   = wm
+    task.connectorTaskId = connectorTaskId
+    var thrown: Throwable = null
+    try {
+      task.handleTry(scala.util.Try {
+        task.handleErrors(wm.recommitPending())
+      })
+    } catch { case t: Throwable => thrown = t }
+    thrown shouldBe a[RetriableException]
+    writer.currentWriteState shouldBe a[Uploading]
+
+    // "Put" 2 (empty list): recommitPending alone drives the pending upload to completion.
+    try {
+      task.handleTry(scala.util.Try {
+        task.handleErrors(wm.recommitPending()) // empty batch → only recommitPending runs
+      })
+    } catch { case t: Throwable => thrown = t }
+    thrown = null // reset — second call should not throw
+    writer.currentWriteState shouldBe a[NoWriter]
+    val _ = tmpFile.delete()
+  }
+
+  test(
+    "each Writer.commit attempt generates a distinct .temp-upload/<uuid> path (regression guard for tempFileUuid uniqueness)",
+  ) {
+    // Two consecutive commit calls on the same Uploading writer must each generate a distinct
+    // temp UUID, preventing the second upload from clobbering the first's temp path.
+    val storage = new RecordingUploadPathsStorage()
+    val pop     = new PendingOperationsProcessors(storage)
+    val tmpFile = makeTempFile("uuid-test-records")
+
+    val idxMgr = stubWriterIndexManager()
+    val writer = buildUploadingWriter(tpA, tmpFile, pop, idxMgr, Offset(99), Offset(150))
+    val wm     = buildMinimalWriterManager(stubWmIndexManager())
+    wm.putWriter(MapKey(tpA, Map.empty), writer)
+
+    // First commit: upload succeeds → writer → NoWriter; temp path uuid1 recorded.
+    val result1 = wm.recommitPending()
+    result1 shouldBe a[Right[_, _]]
+    storage.recordedUploadPaths should have size 1
+
+    // Force writer back to Uploading with a fresh staging file to drive a second commit.
+    val tmpFile2 = makeTempFile("uuid-test-records-2")
+    writer.forceWriteState(
+      Uploading(
+        CommitState(tpA, Some(Offset(99))),
+        tmpFile2,
+        firstBufferedOffset     = Offset(100),
+        uncommittedOffset       = Offset(151),
+        earliestRecordTimestamp = 1L,
+        latestRecordTimestamp   = 100L,
+      ),
+    )
+
+    // Second commit: must use a DIFFERENT UUID for the temp path.
+    val result2 = wm.recommitPending()
+    result2 shouldBe a[Right[_, _]]
+    storage.recordedUploadPaths should have size 2
+
+    val uuid1 = extractUuid(storage.recordedUploadPaths(0))
+    val uuid2 = extractUuid(storage.recordedUploadPaths(1))
+    uuid1 should not be empty
+    uuid2 should not be empty
+    uuid1 should not equal uuid2
+
+    val _ = tmpFile.delete()
+    val _ = tmpFile2.delete()
+  }
+
+  private def extractUuid(path: String): String = {
+    // Temp paths look like .temp-upload/<topic>/<partition>/<uuid><suffix>
+    val tempUploadSegment = ".temp-upload/"
+    val idx               = path.indexOf(tempUploadSegment)
+    if (idx < 0) ""
+    else {
+      val rest = path.substring(idx + tempUploadSegment.length)
+      // The UUID is after <topic>/<partition>/
+      rest.split("/").drop(2).headOption.getOrElse("").takeWhile(_ != '.')
+    }
+  }
+
+  /** One-shot transient upload failure: first upload call returns UploadFailedError; subsequent calls succeed. */
+  private class OneShotTransientUploadFailingStorage extends InMemoryStorageInterface() {
+    private val hasFailedOnce = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+    override def uploadFile(
+      source: UploadableFile,
+      bucket: String,
+      path:   String,
+    ): Either[UploadError, String] =
+      if (hasFailedOnce.compareAndSet(false, true))
+        UploadFailedError(new RuntimeException("one-shot transient upload failure"), new File(path)).asLeft
+      else
+        super.uploadFile(source, bucket, path)
+  }
+
+  /** Storage that records all attempted upload paths before delegating to in-memory. */
+  private class RecordingUploadPathsStorage extends InMemoryStorageInterface() {
+    val recordedUploadPaths: scala.collection.mutable.ListBuffer[String] = scala.collection.mutable.ListBuffer.empty
+
+    override def uploadFile(
+      source: UploadableFile,
+      bucket: String,
+      path:   String,
+    ): Either[UploadError, String] = {
+      recordedUploadPaths += path
+      super.uploadFile(source, bucket, path)
+    }
   }
 
   /**

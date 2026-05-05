@@ -591,4 +591,365 @@ class PendingOperationsProcessorsTest
     result.left.value.exception().exists(_.isInstanceOf[IllegalStateException]) shouldBe true
   }
 
+  // pending-operations edge cases
+
+  test(
+    "single-op [Upload] chain + transient UploadFailedError returns NonFatalCloudSinkError, not Fatal (NoIndexManager path regression guard)",
+  ) {
+    // In the NoIndexManager shape a Writer's entire chain is just [Upload]. When that
+    // single Upload step hits a transient network error (UploadFailedError), the last-op
+    // None-branch must classify it as NonFatal so recommitPending can retry from the
+    // still-on-disk staging file. Escalating to Fatal here would delete the staging file
+    // via WriterManager.cleanUp → Writer.close, causing permanent record loss.
+    val pendingState = PendingState(
+      pendingOffset = Offset(100),
+      pendingOperations = NonEmptyList.of(
+        UploadOperation("bucket1", tempLocalFile, tempRemoteFile),
+      ),
+    )
+
+    val networkError = new RuntimeException("connection reset")
+    when(storageInterface.uploadFile(any[UploadableFile], anyString(), anyString()))
+      .thenReturn(Left(UploadFailedError(networkError, tempLocalFile)))
+
+    val result = pendingOperationsProcessors.processPendingOperations(
+      topicPartition,
+      Some(Offset(50)),
+      pendingState,
+      fnIndexUpdate,
+    )
+
+    result.left.value shouldBe a[NonFatalCloudSinkError]
+    result.left.value.asInstanceOf[NonFatalCloudSinkError].exception shouldBe Some(networkError)
+    verifyNoInteractions(fnIndexUpdate)
+  }
+
+  test(
+    "successful Upload propagates the new eTag to the subsequent CopyOperation and DeleteOperation (not the original placeholder)",
+  ) {
+    // After Upload succeeds the storage returns a fresh eTag for the temp blob.
+    // updateEtag() must thread that eTag into all following CopyOperation / DeleteOperation
+    // entries so the cloud provider can use it for optimistic-concurrency checks. If the
+    // original placeholder eTag were used instead, Copy/Delete could be rejected.
+    val originalEtag = "etag-A-placeholder"
+    val newEtag      = "etag-B-from-upload"
+
+    val pendingState = PendingState(
+      pendingOffset = Offset(100),
+      pendingOperations = NonEmptyList.of(
+        UploadOperation("bucket1", tempLocalFile, tempRemoteFile),
+        CopyOperation("bucket1", tempRemoteFile, "dest-final", originalEtag),
+        DeleteOperation("bucket1", tempRemoteFile, originalEtag),
+      ),
+    )
+
+    when(storageInterface.uploadFile(any[UploadableFile], anyString(), anyString()))
+      .thenReturn(Right(newEtag))
+    when(storageInterface.mvFile(anyString(), anyString(), anyString(), anyString(), any[Option[String]]))
+      .thenReturn(Right(()))
+    when(storageInterface.deleteFile(anyString(), anyString(), any[String]))
+      .thenReturn(Right(()))
+
+    val result = pendingOperationsProcessors.processPendingOperations(
+      topicPartition,
+      Some(Offset(50)),
+      pendingState,
+      fnIndexUpdate,
+    )
+
+    result shouldBe Right(Some(Offset(100)))
+
+    // CopyOperation passes op.eTag.some as the last arg to mvFile; it must carry the new eTag.
+    // DeleteOperation passes op.eTag directly to deleteFile.
+    verify(storageInterface).mvFile(anyString(), anyString(), anyString(), anyString(), eqTo(Some(newEtag)))
+    verify(storageInterface).deleteFile(anyString(), anyString(), eqTo(newEtag))
+  }
+
+  test(
+    "escalateOnCancel=true does NOT change last-op Copy error classification (NonFatal, symmetric with last-op Delete)",
+  ) {
+    // Copy is not a live-commit-cancellation signal. escalateOnCancel only gates on
+    // UploadOperation + NonExistingFileError. A single-op [Copy] failure (e.g. on a
+    // reduced chain after a partial recovery) must return NonFatal under all escalation
+    // settings, just as a last-op Delete failure does.
+    val pendingState = PendingState(
+      pendingOffset = Offset(100),
+      pendingOperations = NonEmptyList.of(
+        CopyOperation("bucket1", tempRemoteFile, "dest-final", "etag1"),
+      ),
+    )
+
+    when(storageInterface.mvFile(anyString(), anyString(), anyString(), anyString(), any[Option[String]]))
+      .thenReturn(Left(FileMoveError(new RuntimeException("mvFile-error"), tempRemoteFile, "dest-final")))
+
+    val result = pendingOperationsProcessors.processPendingOperations(
+      topicPartition,
+      Some(Offset(50)),
+      pendingState,
+      fnIndexUpdate,
+      escalateOnCancel = true,
+    )
+
+    result.left.value shouldBe a[NonFatalCloudSinkError]
+    verifyNoInteractions(fnIndexUpdate)
+  }
+
+  test(
+    "single-op [Upload] success (NoIndexManager path) calls fnIndexUpdate with pendingOffset and returns Right(pendingOffset)",
+  ) {
+    // Defensive correctness test: verifies that the None-branch success case for an
+    // UploadOperation calls fnIndexUpdate(tp, pendingOffset, None) — advancing the
+    // committed offset to the pending value and clearing PendingState from the index.
+    val pendingState = PendingState(
+      pendingOffset = Offset(100),
+      pendingOperations = NonEmptyList.of(
+        UploadOperation("bucket1", tempLocalFile, tempRemoteFile),
+      ),
+    )
+
+    when(storageInterface.uploadFile(any[UploadableFile], anyString(), anyString()))
+      .thenReturn(Right("etag-upload"))
+
+    val result = pendingOperationsProcessors.processPendingOperations(
+      topicPartition,
+      Some(Offset(50)),
+      pendingState,
+      fnIndexUpdate,
+    )
+
+    result shouldBe Right(Some(Offset(100)))
+    verify(fnIndexUpdate).apply(topicPartition, Some(Offset(100)), None)
+  }
+
+  // ─── OS edge cases — 0-byte staging file + AccessDeniedException simulation ──────────────────
+
+  /**
+   * Upload of a 0-byte staging file (empty time-flush with no records).
+   *
+   * When the commit policy fires on a time threshold before any records have been buffered
+   * into the local staging file, the file is 0 bytes. The Upload operation should succeed
+   * (the connector does not gate on payload size), and the full [Upload, Copy, Delete] chain
+   * completes normally. `processPendingOperations` must not crash or return an error.
+   */
+  test(
+    "Upload of a 0-byte staging file completes the chain; processPendingOperations does not crash",
+  ) {
+    // Create a real 0-byte temp file (the UploadableFile wrapper reads it from disk).
+    val zeroByteFile = java.io.File.createTempFile("pop-d27b-zero-", ".tmp")
+    zeroByteFile.deleteOnExit()
+    // 0-byte: do NOT write any content
+
+    val pendingState = PendingState(
+      pendingOffset = Offset(80),
+      pendingOperations = NonEmptyList.of(
+        UploadOperation("bucket1", zeroByteFile, tempRemoteFile),
+      ),
+    )
+
+    // storageInterface.uploadFile accepts the 0-byte file and returns a fresh eTag.
+    when(storageInterface.uploadFile(any[UploadableFile], anyString(), anyString()))
+      .thenReturn(Right("etag-zero"))
+    // fnIndexUpdate is already stubbed in before{} to return the incoming offset.
+
+    val result = pendingOperationsProcessors.processPendingOperations(
+      topicPartition,
+      Some(Offset(70)),
+      pendingState,
+      fnIndexUpdate,
+    )
+
+    // Chain completes successfully — 0-byte payload does not cause a crash.
+    result shouldBe Right(Some(Offset(80)))
+    verify(fnIndexUpdate).apply(topicPartition, Some(Offset(80)), None)
+  }
+
+  /**
+   * UploadFailedError (simulating an OS-locked or access-denied staging file)
+   * is classified as NonFatalCloudSinkError (not Fatal), allowing recommitPending to retry.
+   *
+   * This mirrors what happens when `storageInterface.uploadFile` throws an AccessDeniedException
+   * or returns Left(UploadFailedError): PendingOperationsProcessors wraps it in NonFatal so the
+   * Kafka Connect framework retries the pending write on the next poll without losing the local file.
+   */
+  test(
+    "UploadFailedError (AccessDeniedException simulation) on Upload is classified as NonFatalCloudSinkError, not Fatal",
+  ) {
+    val pendingState = PendingState(
+      pendingOffset = Offset(90),
+      pendingOperations = NonEmptyList.of(
+        UploadOperation("bucket1", tempLocalFile, tempRemoteFile),
+      ),
+    )
+
+    // Simulate AccessDeniedException at the storage layer: returns Left(UploadFailedError).
+    val accessDenied = UploadFailedError(
+      new java.io.IOException("Permission denied — staging file locked by OS"),
+      new File(tempRemoteFile),
+    )
+    when(storageInterface.uploadFile(any[UploadableFile], anyString(), anyString()))
+      .thenReturn(Left(accessDenied))
+
+    val result = pendingOperationsProcessors.processPendingOperations(
+      topicPartition,
+      Some(Offset(80)),
+      pendingState,
+      fnIndexUpdate,
+    )
+
+    // NonFatal — recommitPending can retry from the still-on-disk local file.
+    result.isLeft shouldBe true
+    result.left.value shouldBe a[NonFatalCloudSinkError]
+
+    // fnIndexUpdate must NOT have been called (offset was not advanced).
+    Mockito.verify(fnIndexUpdate, Mockito.never).apply(
+      any[TopicPartition],
+      any[Option[Offset]],
+      any[Option[PendingState]],
+    )
+  }
+
+  // ─── Stage E gap closure — final granular IndexUpdate fails after all storage ops succeed ────
+
+  /**
+   * Stage E in the pipeline failure mosaic: Upload + Copy + Delete all succeed, but the
+   * FINAL `fnIndexUpdate` (clear PendingState, advance committedOffset) returns Left.
+   *
+   * Pins the success branch in [[PendingOperationsProcessors.processOperations]] last-op
+   * `case (_, Right(_))` (line 230). The chain's bytes are durable at the final path; the
+   * `.temp-upload/<uuid>` blob has been deleted; only the granular-lock CAS clear failed.
+   * The connector must propagate the `Left` as-is (NOT mask it with success), so that
+   * `committedOffset` does not advance in memory and the next preCommit will not surface
+   * a new offset for this TP. A subsequent attempt or restart will replay safely because
+   * `shouldSkip` filters records past the granular lock and the master lock acts as the
+   * durable seek floor.
+   */
+  test(
+    "Stage E: final fnIndexUpdate failure after Upload+Copy+Delete success propagates Left; committedOffset does not advance",
+  ) {
+    val pendingState = PendingState(
+      pendingOffset = Offset(100),
+      pendingOperations = NonEmptyList.of(
+        UploadOperation("bucket1", tempLocalFile, tempRemoteFile),
+        CopyOperation("bucket1", tempRemoteFile, "dest-final", "etag-placeholder"),
+        DeleteOperation("bucket1", tempRemoteFile, "etag-placeholder"),
+      ),
+    )
+
+    when(storageInterface.uploadFile(any[UploadableFile], anyString(), anyString()))
+      .thenReturn(Right("etag-from-upload"))
+    when(storageInterface.mvFile(anyString(), anyString(), anyString(), anyString(), any[Option[String]]))
+      .thenReturn(Right(()))
+    when(storageInterface.deleteFile(anyString(), anyString(), any[String]))
+      .thenReturn(Right(()))
+
+    // fnIndexUpdate: succeed on the two intermediate calls (third arg = Some(pendingState.copy(...))),
+    // fail on the FINAL call (third arg = None) which corresponds to the last-op success branch
+    // at PendingOperationsProcessors.scala line 230.
+    val casFailure = NonFatalCloudSinkError("granular lock CAS failed (eTag mismatch)", None)
+    when(fnIndexUpdate.apply(any[TopicPartition], any[Option[Offset]], any[Option[PendingState]]))
+      .thenAnswer { (_: TopicPartition, lastCommitted: Option[Offset], pending: Option[PendingState]) =>
+        pending match {
+          case Some(_) => lastCommitted.asRight[SinkError]
+          case None    => Left(casFailure)
+        }
+      }
+
+    val result = pendingOperationsProcessors.processPendingOperations(
+      topicPartition,
+      Some(Offset(50)),
+      pendingState,
+      fnIndexUpdate,
+    )
+
+    // Left propagated as-is — NonFatal, not masked with success.
+    result.left.value shouldBe a[NonFatalCloudSinkError]
+    result.left.value.message() should include("granular lock CAS failed")
+
+    // All three storage ops ran in order; only the final fnIndexUpdate (third arg = None) failed.
+    val inOrderVerifier = Mockito.inOrder(storageInterface, fnIndexUpdate)
+    inOrderVerifier.verify(storageInterface).uploadFile(any[UploadableFile], anyString(), anyString())
+    // First fnIndexUpdate after Upload: chain still has [Copy, Delete] pending.
+    inOrderVerifier.verify(fnIndexUpdate).apply(eqTo(topicPartition), eqTo(Some(Offset(50))), any[Some[PendingState]])
+    inOrderVerifier.verify(storageInterface).mvFile(anyString(),
+                                                    anyString(),
+                                                    anyString(),
+                                                    anyString(),
+                                                    any[Option[String]],
+    )
+    // Second fnIndexUpdate after Copy: chain still has [Delete] pending.
+    inOrderVerifier.verify(fnIndexUpdate).apply(eqTo(topicPartition), eqTo(Some(Offset(50))), any[Some[PendingState]])
+    inOrderVerifier.verify(storageInterface).deleteFile(anyString(), anyString(), any[String])
+    // FINAL fnIndexUpdate after Delete: clears PendingState (third arg = None) and advances offset to 100.
+    // This is the one we forced to fail.
+    inOrderVerifier.verify(fnIndexUpdate).apply(topicPartition, Some(Offset(100)), None)
+  }
+
+  // ─── Gap 3 — transient Copy fails fast (no in-process retry, mirror of transient-Upload retry) ──
+
+  /**
+   * Pins the deliberate dichotomy between Upload retry and Copy retry behaviour.
+   *
+   * When a transient cloud error (e.g. throttling, network reset) is returned by `mvFile`
+   * mid-chain, `processPendingOperations` must:
+   *  1. Return `Left(FatalCloudSinkError)` immediately, NOT a `NonFatal` that recommitPending
+   *     would retry in-process.
+   *  2. Make a single `mvFile` call (no in-process retry loop).
+   *
+   * Contrast with Upload: a transient `UploadFailedError` in the same shape returns
+   * `NonFatalCloudSinkError`, leaving the writer in `Uploading` so the local staging file
+   * survives and `recommitPending` can rebuild a fresh chain on the next put. See
+   * `WriterUploadRetryRecoveryTest` "transient upload failure leaves writer in Uploading;
+   * recommitPending recovers without data loss" (line 108) and
+   * `PendingOperationsProcessorsTest` "should propagate transient Upload NonFatal as-is in
+   * multi-step chain" (line 194).
+   *
+   * Why the dichotomy is intentional: an Upload failure leaves no cloud-side state from the
+   * failed attempt, so a fresh in-process retry with a new `tempFileUuid` is safe. A Copy
+   * failure mid-chain leaves the durable `.temp-upload/<uuid>` blob plus a granular lock
+   * with `PendingState=[Copy, Delete]`. Recovery is the existing crash + reopen replay
+   * (`ExactlyOnceScenarioTest` line 149) or LC-2451 in-place rollback (line 398), which
+   * reuses the existing temp blob — this avoids the orphaned-temp-blob accumulation an
+   * in-process Copy retry loop would produce.
+   */
+  test(
+    "transient Copy failure escalates Fatal immediately (single mvFile call, no in-process retry; mirror dichotomy with transient Upload)",
+  ) {
+    val pendingState = PendingState(
+      pendingOffset = Offset(100),
+      pendingOperations = NonEmptyList.of(
+        CopyOperation("bucket1", tempRemoteFile, "dest-final", "etag1"),
+        DeleteOperation("bucket1", tempRemoteFile, "etag1"),
+      ),
+    )
+
+    val transientCloudError = new RuntimeException("connection reset by peer")
+    when(storageInterface.mvFile(anyString(), anyString(), anyString(), anyString(), any[Option[String]]))
+      .thenReturn(Left(FileMoveError(transientCloudError, tempRemoteFile, "dest-final")))
+
+    val result = pendingOperationsProcessors.processPendingOperations(
+      topicPartition,
+      Some(Offset(50)),
+      pendingState,
+      fnIndexUpdate,
+    )
+
+    // Fatal — recovery path is restart+replay, NOT in-process recommitPending.
+    result.left.value shouldBe a[FatalCloudSinkError]
+    result.left.value.message() should include("Unable to resume processOperations")
+
+    // Single mvFile call: no in-process retry loop. (Contrast: Upload would NOT escalate Fatal
+    // and recommitPending would attempt a second uploadFile on the next put with a new
+    // tempFileUuid; here, escalating Fatal triggers cleanUp which closes the writer.)
+    verify(storageInterface, Mockito.times(1)).mvFile(anyString(),
+                                                      anyString(),
+                                                      anyString(),
+                                                      anyString(),
+                                                      any[Option[String]],
+    )
+    // No follow-on Delete (chain abandoned at Copy failure).
+    verify(storageInterface, Mockito.never()).deleteFile(anyString(), anyString(), any[String])
+    // No fnIndexUpdate: granular lock retains PendingState=[Copy, Delete] for crash-recovery replay.
+    verifyNoInteractions(fnIndexUpdate)
+  }
+
 }

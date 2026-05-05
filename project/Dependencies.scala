@@ -576,6 +576,9 @@ trait Dependencies {
 
   val kafkaConnectS3TestDeps: Seq[ModuleID] = baseTestDeps ++ compressionCodecDeps :+ testcontainersCore :+ `javaFaker`
 
+  val kafkaConnectAzureDatalakeTestDeps: Seq[ModuleID] =
+    baseTestDeps ++ kafkaConnectAzureDatalakeDeps ++ compressionCodecDeps :+ testcontainersCore
+
   val kafkaConnectS3FuncTestDeps: Seq[ModuleID] = baseTestDeps ++ compressionCodecDeps :+ s3Sdk
 
   val kafkaConnectHttpDeps: Seq[ModuleID] = Seq(http4sJdkClient, http4sCirce, histogram)
