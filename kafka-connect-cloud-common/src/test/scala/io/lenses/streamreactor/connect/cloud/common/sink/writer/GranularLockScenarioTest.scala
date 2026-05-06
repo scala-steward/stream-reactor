@@ -1540,6 +1540,262 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     verify(mockFW, times(1)).write(any[MessageDetail])
   }
 
+  test("selective commit: sibling buffered records replay correctly after crash; no data loss, no duplication") {
+    when(indexManager.indexingEnabled).thenReturn(true)
+
+    // Writer A has flushed offsets up to 105 (committedOffset = 105, granular lock = 105).
+    // Under selective commit, A is now NoWriter and would not be re-touched on the next
+    // commit cycle. Writer B is still in Writing with firstBufferedOffset = 100,
+    // uncommittedOffset = 104 — its flush threshold has not fired.
+    val writerA = new Writer[FileMetadata](topicPartition,
+                                           commitPolicy,
+                                           indexManager,
+                                           stagingFilenameFn,
+                                           objectKeyBuilder,
+                                           formatWriterFn,
+                                           schemaChangeDetector,
+                                           pendingOperationsProcessors,
+                                           partitionKey     = Some("date=12_00"),
+                                           lastSeekedOffset = Some(Offset(105)),
+    )
+    writerA.forceWriteState(NoWriter(CommitState(topicPartition, Some(Offset(105)))))
+
+    val writerB = new Writer[FileMetadata](topicPartition,
+                                           commitPolicy,
+                                           indexManager,
+                                           stagingFilenameFn,
+                                           objectKeyBuilder,
+                                           formatWriterFn,
+                                           schemaChangeDetector,
+                                           pendingOperationsProcessors,
+                                           partitionKey     = Some("date=12_15"),
+                                           lastSeekedOffset = None,
+    )
+    writerB.forceWriteState(
+      Writing(
+        CommitState(topicPartition, None),
+        formatWriter,
+        new File("test"),
+        firstBufferedOffset = Offset(100),
+        uncommittedOffset   = Offset(104),
+        1L,
+        1L,
+      ),
+    )
+
+    // Pre-crash globalSafeOffset must clamp at writer B's firstBuffered = 100, NOT
+    // advance past A's committedOffset = 105. The master lock is therefore written at
+    // 100 (committedOffset = 99 in lock-file terms).
+    val firstBufferedOffsets = Seq(writerA, writerB).flatMap(_.getFirstBufferedOffset)
+    val committedOffsets     = Seq(writerA, writerB).flatMap(_.getCommittedOffset)
+    val globalSafeOffset =
+      if (firstBufferedOffsets.nonEmpty) firstBufferedOffsets.map(_.value).min
+      else committedOffsets.map(_.value).max + 1
+    globalSafeOffset shouldBe 100L
+
+    // Simulated crash: the consumer is rewound to the master lock floor (offset 100).
+    // Records re-delivered for writer B (offsets 100..104) are NOT skipped by its
+    // restart-side `shouldSkip` because B never committed (lastSeekedOffset = None).
+    val replayedB = new Writer[FileMetadata](topicPartition,
+                                             commitPolicy,
+                                             indexManager,
+                                             stagingFilenameFn,
+                                             objectKeyBuilder,
+                                             formatWriterFn,
+                                             schemaChangeDetector,
+                                             pendingOperationsProcessors,
+                                             partitionKey     = Some("date=12_15"),
+                                             lastSeekedOffset = None,
+    )
+    Seq(100L, 101L, 102L, 103L, 104L).foreach { off =>
+      replayedB.shouldSkip(Offset(off)) shouldBe false
+    }
+
+    // Records re-delivered for writer A (anything at or below 105) ARE skipped via the
+    // surviving granular lock — no duplication at A's path even though A's records were
+    // re-delivered alongside B's.
+    val replayedA = new Writer[FileMetadata](topicPartition,
+                                             commitPolicy,
+                                             indexManager,
+                                             stagingFilenameFn,
+                                             objectKeyBuilder,
+                                             formatWriterFn,
+                                             schemaChangeDetector,
+                                             pendingOperationsProcessors,
+                                             partitionKey     = Some("date=12_00"),
+                                             lastSeekedOffset = Some(Offset(105)),
+    )
+    Seq(100L, 101L, 102L, 103L, 104L, 105L).foreach { off =>
+      replayedA.shouldSkip(Offset(off)) shouldBe true
+    }
+    replayedA.shouldSkip(Offset(106)) shouldBe false
+  }
+
+  test(
+    "selective commit: schema rollover fans out to all TP writers via WriterManager.write, not only flushable writers",
+  ) {
+    // Integration test for WriterManager.rollOverTopicPartitionWriters routing.
+    //
+    // The critical invariant: when a record with an incompatible schema arrives for pk-a,
+    // WriterManager must call commitForTopicPartition (full fan-out), NOT
+    // commitFlushableWritersForTopicPartition (selective). The sibling writer for pk-b —
+    // whose shouldFlush is false and therefore would never be touched by the selective path
+    // — must also be committed so the format boundary stays consistent across every writer
+    // on the topic-partition.
+    //
+    // If commitForTopicPartition were replaced with commitFlushableWritersForTopicPartition
+    // in rollOverTopicPartitionWriters, the verify(mockFwB, times(1)).complete() assertion
+    // at the end of this test would fail, catching the regression.
+    //
+    // Sequence:
+    //   msg1 (schemaV1, pk-a) → writer A created, lastKnownSchema[A] = schemaV1
+    //   msg2 (schemaV1, pk-b) → writer B created, lastKnownSchema[B] = schemaV1
+    //   msg3 (schemaV2, pk-a) → writer A detects schema change → commitForTopicPartition
+    //                           → both A and B committed (complete() called on both FormatWriters)
+    //                           → msg3 written to fresh writer A (mockFwA2)
+
+    // Three FormatWriter mocks dispensed in call order by multiFormatWriterFn:
+    //   call 1 (msg1→pk-a)  → mockFwA   (writer A, schema-V1 records)
+    //   call 2 (msg2→pk-b)  → mockFwB   (writer B, sibling never triggering rollover)
+    //   call 3 (msg3→pk-a)  → mockFwA2  (new writer A created after rollover, schema-V2 records)
+    val mockFwA  = mock[FormatWriter]
+    val mockFwB  = mock[FormatWriter]
+    val mockFwA2 = mock[FormatWriter]
+    Seq(mockFwA, mockFwB, mockFwA2).foreach { fw =>
+      when(fw.write(any[MessageDetail])).thenReturn(Right(()))
+      when(fw.getPointer).thenReturn(100L)
+      when(fw.rolloverFileOnSchemaChange()).thenReturn(true) // must be true for shouldRollover to fire
+      when(fw.complete()).thenReturn(Right(()))
+      when(fw.close()).thenAnswer(())
+    }
+
+    val fwSeq = Array(mockFwA, mockFwB, mockFwA2)
+    var fwIdx = 0
+    val multiFormatWriterFn: (TopicPartition, File) => Either[SinkError, FormatWriter] = (_, _) => {
+      val fw = fwSeq(fwIdx); fwIdx += 1; Right(fw)
+    }
+
+    // Two distinct schema objects; reference inequality guarantees schemaHasChanged fires.
+    val schemaV1 = mock[org.apache.kafka.connect.data.Schema]
+    val schemaV2 = mock[org.apache.kafka.connect.data.Schema]
+
+    val mockSCD = mock[SchemaChangeDetector]
+    when(mockSCD.detectSchemaChange(schemaV1, schemaV2)).thenReturn(true)
+
+    // shouldFlush always false — so selective commit would never touch writer B.
+    val mockCP = mock[CommitPolicy]
+    when(mockCP.shouldFlush(any[CommitContext])).thenReturn(false)
+
+    // indexingEnabled = false keeps stubs minimal (single UploadOperation, no temp-copy chain).
+    val mockIM = mock[IndexManager]
+    when(mockIM.indexingEnabled).thenReturn(false)
+    when(mockIM.getSeekedOffsetForTopicPartition(any[TopicPartition])).thenReturn(None)
+    when(mockIM.getSeekedOffsetForPartitionKey(any[TopicPartition], any[String])).thenReturn(Right(None))
+    when(mockIM.ensureGranularLock(any[TopicPartition], any[String])).thenReturn(Right(()))
+    when(mockIM.updateForPartitionKey(any[TopicPartition], any[String], any[Option[Offset]], any[Option[PendingState]]))
+      .thenAnswer((_: TopicPartition, _: String, co: Option[Offset], _: Option[PendingState]) => Right(co))
+
+    val mockOKB = mock[ObjectKeyBuilder]
+    when(mockOKB.build(Offset(ArgumentMatchers.anyLong()), ArgumentMatchers.anyLong(), ArgumentMatchers.anyLong()))
+      .thenReturn(Right(CloudLocation("bucket", Some("prefix"), Some("prefix/file.jsonl"))))
+
+    type IndexUpdateFn = (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]]
+    val mockPOP = mock[PendingOperationsProcessors]
+    when(
+      mockPOP.processPendingOperations(
+        any[TopicPartition],
+        any[Option[Offset]],
+        any[PendingState],
+        any[IndexUpdateFn],
+        any[Boolean],
+        any[Option[String]],
+        any[Option[java.io.File]],
+      ),
+    ).thenAnswer {
+      (
+        tp: TopicPartition,
+        _:  Option[Offset],
+        ps: PendingState,
+        fn: IndexUpdateFn,
+        _:  Boolean,
+        _:  Option[String],
+        _:  Option[java.io.File],
+      ) =>
+        fn(tp, Some(ps.pendingOffset), None)
+    }
+
+    type SD = io.lenses.streamreactor.connect.cloud.common.sink.conversion.SinkData
+    val valueV1 = mock[SD]
+    val valueV2 = mock[SD]
+    val mockKey = mock[SD]
+    when(valueV1.schema()).thenReturn(Some(schemaV1))
+    when(valueV2.schema()).thenReturn(Some(schemaV2))
+    when(mockKey.schema()).thenReturn(None)
+
+    def makeMsg(offset: Long, value: SD): MessageDetail = {
+      val m = mock[MessageDetail]
+      when(m.topic).thenReturn(Topic("test-topic"))
+      when(m.partition).thenReturn(0)
+      when(m.offset).thenReturn(Offset(offset))
+      when(m.epochTimestamp).thenReturn(1000L)
+      when(m.value).thenReturn(value)
+      when(m.key).thenReturn(mockKey)
+      when(m.headers).thenReturn(Map.empty)
+      m
+    }
+
+    // Messages are created before the KeyNamer mock so that specific-instance argument
+    // matching can be used: each message maps to its intended partition key without needing
+    // thenAnswer (which has Scala type-inference issues in chained multi-arg form).
+    val pf   = PartitionField(Seq("_value")).value
+    val msg1 = makeMsg(10L, valueV1) // pk-a
+    val msg2 = makeMsg(11L, valueV1) // pk-b
+    val msg3 = makeMsg(12L, valueV2) // pk-a (triggers rollover)
+
+    val mockKN = mock[KeyNamer]
+    when(mockKN.processPartitionValues(msg1, topicPartition))
+      .thenReturn(Right(immutable.Map(pf -> "pk-a")))
+    when(mockKN.processPartitionValues(msg2, topicPartition))
+      .thenReturn(Right(immutable.Map(pf -> "pk-b")))
+    when(mockKN.processPartitionValues(msg3, topicPartition))
+      .thenReturn(Right(immutable.Map(pf -> "pk-a")))
+
+    val wm = new WriterManager[FileMetadata](
+      commitPolicyFn              = _ => Right(mockCP),
+      bucketAndPrefixFn           = _ => Right(CloudLocation("bucket", Some("prefix"))),
+      keyNamerFn                  = _ => Right(mockKN),
+      stagingFilenameFn           = (_, _) => Right(File.createTempFile("rollover-test-", ".tmp")),
+      objKeyBuilderFn             = (_, _) => mockOKB,
+      formatWriterFn              = multiFormatWriterFn,
+      indexManager                = mockIM,
+      transformerF                = m => Right(m),
+      schemaChangeDetector        = mockSCD,
+      skipNullValues              = false,
+      pendingOperationsProcessors = mockPOP,
+    )
+
+    // msg1: primes writer A with schemaV1 (lastKnownSchema[A] = schemaV1).
+    wm.write(topicPartition.withOffset(Offset(10L)), msg1) shouldBe Right(())
+
+    // msg2: primes writer B with schemaV1 (lastKnownSchema[B] = schemaV1).
+    wm.write(topicPartition.withOffset(Offset(11L)), msg2) shouldBe Right(())
+
+    // msg3: schema V2 on pk-a.  Writer A is still in Writing state when
+    // rollOverTopicPartitionWriters is called, so shouldRollover fires:
+    //   rolloverOnSchemaChange = true  (mockFwA.rolloverFileOnSchemaChange() = true)
+    //   schemaHasChanged(schemaV2) = true  (lastKnownSchema=schemaV1, detector returns true)
+    // → commitForTopicPartition flushes BOTH writer A and writer B.
+    // → writer.write(msg3) then transitions writer A to Writing again with mockFwA2.
+    wm.write(topicPartition.withOffset(Offset(12L)), msg3) shouldBe Right(())
+
+    // Writer A committed during rollover (schema boundary before V2 record lands).
+    verify(mockFwA, times(1)).complete()
+    // Writer B (sibling) must also be committed by the full-fan-out path.
+    // This assertion fails if rollOverTopicPartitionWriters is changed to use
+    // commitFlushableWritersForTopicPartition, because mockCP.shouldFlush returns false.
+    verify(mockFwB, times(1)).complete()
+  }
+
   test("master lock fallback: globalSafeOffset == 0 produces None, no false skip of offset 0") {
     val mockIM = mock[IndexManager]
     when(mockIM.indexingEnabled).thenReturn(true)

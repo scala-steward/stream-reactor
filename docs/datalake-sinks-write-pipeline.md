@@ -49,7 +49,7 @@ For each `SinkRecord`:
 1. Route to the correct `Writer` via `WriterManager.write`. The writer is keyed on `(TopicPartition, partitionValues)`. If no writer exists for the key, a new one is created (`createWriter`), which lazily loads the granular lock from storage (indexing-on, PARTITIONBY) or uses defaults (indexing-on, no PARTITIONBY; indexing-off).
 2. `shouldSkip(offset)` consults the writer's in-memory committed offset and uncommitted offset. If the offset was already committed (e.g. the one-record overlap after a seek), the record is silently dropped.
 3. `Writer.write(messageDetail)` appends the record to the open `FormatWriter`, which writes to the **local staging file**.
-4. After every write, `WriterCommitManager.commitFlushableWritersForTopicPartition` checks whether any writer for the same `TopicPartition` has reached its flush threshold (record count, file size, or time interval). If so, **all** writers for that `TopicPartition` are committed together -- this is required for the `globalSafeOffset` computation to be correct (see [datalake-exactly-once-partitionby.md](datalake-exactly-once-partitionby.md)).
+4. After every write, `WriterCommitManager.commitFlushableWritersForTopicPartition` checks whether any writer for the same `TopicPartition` has reached its flush threshold (record count, file size, or time interval). Only those writers that satisfy the trigger commit; sibling writers on the same `TopicPartition` stay open. `globalSafeOffset` correctness comes from `WriterManager.getOffsetAndMeta` scanning every active writer for the TP at `preCommit` time (the BarrierSet), not from fan-out at commit time. Schema rollover is the one explicit full-TP fan-out path (see [Selective commit fan-out](datalake-exactly-once-partitionby.md#selective-commit-fan-out) in the exactly-once doc).
 
 **Step 3 -- empty-poll flush.** If the records collection is empty (Kafka returned nothing), `commitFlushableWriters()` still runs to flush any timed-out writers.
 
@@ -73,7 +73,7 @@ Called periodically by Kafka Connect to ask which consumer offsets are safe to c
 
 `WriterManager.preCommit` computes a `globalSafeOffset` per `TopicPartition`:
 
-- With active (buffered) writers: `globalSafeOffset = min(firstBufferedOffset across all writers)`. Kafka never advances past a record that may not be in cloud storage.
+- With active (buffered) writers: `globalSafeOffset = min(firstBufferedOffset across all writers)`. Kafka never advances past a record that may not be in cloud storage. This is the BarrierSet — every active writer for the TP is observed at `preCommit` time, regardless of whether it just committed or is still buffering. See [Selective commit fan-out](datalake-exactly-once-partitionby.md#selective-commit-fan-out) for how this composes with the new selective commit semantics.
 - With no buffered writers (all committed): `globalSafeOffset = max(committedOffset) + 1`.
 - A monotonicity high-watermark (`safeOffsetHighWatermarks`) prevents regression if idle writers are evicted between `preCommit` calls.
 
@@ -214,7 +214,7 @@ sequenceDiagram
     KC->>CST: put(records)
     CST->>WM: recommitPending()
     WM->>WCM: commitPending()
-    note over WCM: commits all writers in Uploading state
+    note over WCM: selective: commits only writers in Uploading;<br/>sibling Writing writers are not pulled in
     WCM->>W: commit() (for each Uploading writer)
     W->>POP: processPendingOperations(...)
     POP->>Cloud: Upload / Copy / Delete
@@ -234,7 +234,7 @@ sequenceDiagram
             WM->>W: write(messageDetail)
             W-->>WM: Right(())
             WM->>WCM: commitFlushableWritersForTopicPartition(tp)
-            note over WCM: commits ALL writers for tp if any hit flush threshold
+            note over WCM: selective: commits only flushable writers on tp;<br/>schema rollover takes the separate full-fan-out path
             WCM->>W: commit() (for each flushable writer)
             W->>POP: processPendingOperations(...)
             POP->>Cloud: Upload (→ Copy → Delete if indexing on)

@@ -58,9 +58,12 @@ import scala.collection.mutable
  *   - M  ("committed offset"): the highest record offset whose bytes are durably persisted
  *        at a final storage path. Stored on the master lock file per topic-partition.
  *   - K  ("safe offset"): the offset reported to Kafka at `preCommit` time -- the offset of
- *        the next record Kafka should deliver. Invariant: `K = M + 1`. Returning a K that
- *        implies Kafka has already stored record M would violate exactly-once, so K must be
- *        monotonically non-decreasing while this task continues to own the topic-partition.
+ *        the next record Kafka should deliver. Two-arm formula (mirrors production
+ *        `WriterManager.getOffsetAndMeta`):
+ *          - If any writer has buffered (uncommitted) data: K = min(firstBufferedOffset)
+ *          - Otherwise: K = max(committedOffset) + 1
+ *        Both arms are modelled in this harness. K must be monotonically non-decreasing
+ *        while this task continues to own the topic-partition.
  *   - partition key (often shortened to `pk`): the PARTITIONBY grouping within a
  *        topic-partition. In PARTITIONBY mode there is one writer per distinct key, each
  *        writing to its own namespaced final-path prefix (e.g. `.../pk-a/`, `.../pk-b/`);
@@ -97,6 +100,23 @@ import scala.collection.mutable
  *   pending-op chain that `Writer.commit` does. This keeps the test deterministic and
  *   focused on the storage / index-manager interaction surface (where the bugs live)
  *   without dragging in the format-writer / object-key-builder / commit-policy layers.
+ *
+ * Op DSL semantics
+ *   - `Write(tp, pk, off)`:       append `off` to the in-memory buffer for `(tp, pk)`.
+ *                                 Fails fast if `(tp, pk)` is already in `Uploading` state
+ *                                 -- use `RecommitPending(tp)` first to clear it.
+ *   - `Commit(tp)`:               flush ALL buffered `(tp, pk)` pairs. On failure the
+ *                                 offsets move to `uploading` (mirroring `Writer.Uploading`).
+ *   - `CommitOnly(tp, pk)`:       flush a single buffered `(tp, pk)`, leaving siblings
+ *                                 buffered. Models a selective-commit cycle. Same
+ *                                 failure semantics as `Commit`.
+ *   - `RecommitPending(tp)`:      re-runs `commitOne` for every `(tp, pk)` currently in
+ *                                 the `uploading` map. Models `WriterManager.recommitPending`
+ *                                 retrying the stored pending-op chain without re-buffering.
+ *   - `Crash`:                    drops the `IndexManagerV2` instance, clears `buffers`
+ *                                 and `uploading` (in-memory `Uploading` state is lost on
+ *                                 JVM crash; only the granular/master lock's `PendingState`
+ *                                 survives in storage).
  */
 class ExactlyOnceScenarioTest extends AnyFunSuite with Matchers with BeforeAndAfter {
 
@@ -165,6 +185,8 @@ class ExactlyOnceScenarioTest extends AnyFunSuite with Matchers with BeforeAndAf
     h.persistedOffsets(tp0) shouldBe Set(5L)
     h.storage.pathExists(h.bucket, finalPath).getOrElse(false) shouldBe true
     h.storage.pathExists(h.bucket, tempPath).getOrElse(true) shouldBe false
+    // K = max(committed)+1 = 5+1 = 6; buffered and uploading are both empty after Crash.
+    h.ks(tp0).toList shouldBe List(6L)
   }
 
   test("crash after copy before delete: replay cleans temp and delivers once") {
@@ -184,6 +206,8 @@ class ExactlyOnceScenarioTest extends AnyFunSuite with Matchers with BeforeAndAf
     h.run(ops, expectCommitErrors = true)
     h.persistedOffsets(tp0) shouldBe Set(7L)
     h.storage.pathExists(h.bucket, tempPath).getOrElse(true) shouldBe false
+    // K = max(committed)+1 = 7+1 = 8; recovery seeded committed[(tp0,None)]=7 via open().
+    h.ks(tp0).toList shouldBe List(8L)
   }
 
   test("crash during master-lock CAS: a stale-eTag write fails fenced, recovery succeeds") {
@@ -265,6 +289,8 @@ class ExactlyOnceScenarioTest extends AnyFunSuite with Matchers with BeforeAndAf
     )
     h.run(ops, expectCommitErrors = true)
     h.persistedOffsetsForPk(tp0, Some("pk-a")) shouldBe Set(9L)
+    // K = max(committed)+1 = 9+1 = 10; uploading cleared by Crash before the follow-up commit.
+    h.ks(tp0).lastOption shouldBe Some(10L)
   }
 
   test("long monotone sequence: records dance up and down, each commit produces a final blob") {
@@ -318,12 +344,15 @@ class ExactlyOnceScenarioTest extends AnyFunSuite with Matchers with BeforeAndAf
       InjectFailMove(tempPath), // Copy will fail; lock records PendingState=[Copy, Delete]
       Commit(tp0),              // expected to fail
       Crash,
-      LoadGranularLock(tp0, pk), // triggers getSeekedOffsetForPartitionKey -> loadGranularLock
+      LoadGranularLock(tp0, pk), // triggers getSeekedOffsetForPartitionKey -> loadGranularLock;
+      // seeds committed[(tp0, Some(pk))] = 20
+      PreCommit(tp0, 100L), // K = max(committed)+1 = 20+1 = 21
     )
     h.run(ops, expectCommitErrors = true)
     h.storage.pathExists(h.bucket, finalPath).getOrElse(false) shouldBe true
     h.storage.pathExists(h.bucket, tempPath).getOrElse(true) shouldBe false
     h.persistedOffsetsForPk(tp0, Some(pk)) shouldBe Set(20L)
+    h.ks(tp0).toList shouldBe List(21L)
   }
 
   // (b) Copy/Delete pending recovery via ensureGranularLock (resolveAndCacheGranularLock path)
@@ -346,6 +375,8 @@ class ExactlyOnceScenarioTest extends AnyFunSuite with Matchers with BeforeAndAf
     h.run(ops, expectCommitErrors = true)
     h.persistedOffsetsForPk(tp0, Some(pk)) shouldBe Set(21L, 22L)
     h.storage.pathExists(h.bucket, tempPath).getOrElse(true) shouldBe false
+    // K = max(committed)+1 = 22+1 = 23; recovery seeded committed=22 via ensureGranularLock.
+    h.ks(tp0).lastOption shouldBe Some(23L)
   }
 
   // (c) crash-after-Copy-before-lock-update idempotence (mvFile source absent + dest present)
@@ -413,12 +444,15 @@ class ExactlyOnceScenarioTest extends AnyFunSuite with Matchers with BeforeAndAf
       Write(tp0, Some(pk), 30L),
       InjectFailMove(tempPath), // arm one-shot Copy failure
       Commit(tp0),              // Upload succeeds; Copy fails → PendingState=[Copy,Delete] recorded
+      // offsets moved to `uploading[(tp0, Some(pk))]` by flushOne
       // Simulate WriterManager.cleanUp(tp) after handleErrors: evict granular cache only.
       // seekedOffsets + topicPartitionToETags are preserved (LC-2451 invariant).
       EvictGranularLocks(tp0),
-      // Re-deliver the same batch (same partition key, same offset). Production retries here.
-      Write(tp0, Some(pk), 30L),
-      Commit(tp0), // ensureGranularLock detects PendingState, replays [Copy,Delete]; then processes new record
+      // RecommitPending models exactly what WriterManager.recommitPending does in production:
+      // re-runs the failed commitOne chain on the preserved staging data without re-buffering.
+      // ensureGranularLock detects PendingState=[Copy,Delete], replays them, then the new
+      // processPendingOperations chain completes successfully.
+      RecommitPending(tp0),
       PreCommit(tp0, 100L),
     )
     h.run(ops, expectCommitErrors = true)
@@ -489,6 +523,135 @@ class ExactlyOnceScenarioTest extends AnyFunSuite with Matchers with BeforeAndAf
     h.persistedOffsetsForPk(tp0, Some(pk)) shouldBe Set(15L, 16L)
   }
 
+  // ── Selective commit (PARTITIONBY) end-to-end safety ─────────────────────────────────────
+  // Pin the selective-commit semantics (see "Selective commit fan-out" in
+  // `docs/datalake-exactly-once-partitionby.md`): under selective commit,
+  // a single `commitFlushableWriters` cycle now commits only the writers that are flushable;
+  // sibling writers on the same TP that aren't flushable stay buffered and are not pulled
+  // in. The exactly-once contract (no loss, no duplication, monotone K) must hold across
+  // such asymmetric cycles, including when the buffered sibling commits later in a separate
+  // cycle. This scenario exercises the storage / index-manager interaction when one pk
+  // commits multiple times while another keeps buffering, then both finalize.
+
+  test(
+    "selective commit (PARTITIONBY): pk-a commits across multiple cycles while pk-b only commits at the end; per-pk final paths stay independent and K is monotone",
+  ) {
+    // Three commit cycles for pk-a (offsets 100, 200, 300), interleaved with PreCommit. In
+    // none of the first three cycles is anything in pk-b's buffer — modelling a low-throughput
+    // partition key that stays "buffered" (i.e. not flushable) throughout. At the end pk-b
+    // commits a single batch (offsets 50, 60). Persisted bytes per pk must match exactly
+    // what each writer committed, with no record bleeding across pks, and K must be
+    // monotonically non-decreasing across every preCommit.
+    val ops = List[Op](
+      Assign(Set(tp0)),
+      Write(tp0, Some("pk-a"), 100L),
+      Commit(tp0),
+      PreCommit(tp0, 1000L),
+      Write(tp0, Some("pk-a"), 200L),
+      Commit(tp0),
+      PreCommit(tp0, 1000L),
+      Write(tp0, Some("pk-a"), 300L),
+      Commit(tp0),
+      PreCommit(tp0, 1000L),
+      // Now pk-b finally flushes a single batch with strictly increasing offsets.
+      Write(tp0, Some("pk-b"), 50L),
+      Write(tp0, Some("pk-b"), 60L),
+      Commit(tp0),
+      PreCommit(tp0, 1000L),
+    )
+    h.run(ops)
+
+    h.persistedOffsetsForPk(tp0, Some("pk-a")) shouldBe Set(100L, 200L, 300L)
+    h.persistedOffsetsForPk(tp0, Some("pk-b")) shouldBe Set(50L, 60L)
+
+    val ks = h.ks(tp0).toList
+    ks shouldBe ks.scanLeft(0L)(math.max).tail.filter(_ > 0)
+  }
+
+  test(
+    "selective commit (PARTITIONBY): crash mid-cycle on pk-a leaves pk-b's earlier durable state intact; recovery completes pk-a; no duplication",
+  ) {
+    // pk-b commits cleanly first (records 70, 71). Then in a subsequent cycle, pk-a's
+    // commit fails mid-chain (Copy injected to fail). The durable state of pk-b must
+    // survive untouched; on crash + recovery, pk-a's PendingState replays and completes.
+    // Final state: every offset that was successfully committed by either pk lands at
+    // exactly one final path; the failed-then-recovered pk-a record also lands once.
+    val pkA       = "pk-a"
+    val pkB       = "pk-b"
+    val tempPathA = h.predictTempPathFor(tp0, Some(pkA), 80L)
+    val finalA    = h.expectedFinalPath(tp0, Some(pkA), 80L)
+
+    val ops = List[Op](
+      Assign(Set(tp0)),
+      // pk-b commits cleanly — establishes durable state we must protect.
+      Write(tp0, Some(pkB), 70L),
+      Write(tp0, Some(pkB), 71L),
+      Commit(tp0),
+      PreCommit(tp0, 1000L),
+      // Now arm Copy failure for pk-a's next commit, then drive pk-a's commit. Copy fails
+      // mid-chain → PendingState=[Copy, Delete] left in pk-a's granular lock. pk-b is not
+      // touched (no fan-out), so pk-b's earlier durable state is unaffected.
+      Write(tp0, Some(pkA), 80L),
+      InjectFailMove(tempPathA),
+      Commit(tp0), // pk-a commit fails; pk-b unaffected
+      Crash,
+      LoadGranularLock(tp0, pkA), // recovery replays pk-a's PendingState idempotently
+      PreCommit(tp0, 1000L),
+    )
+    h.run(ops, expectCommitErrors = true)
+
+    h.persistedOffsetsForPk(tp0, Some(pkB)) shouldBe Set(70L, 71L)
+    h.persistedOffsetsForPk(tp0, Some(pkA)) shouldBe Set(80L)
+    h.storage.pathExists(h.bucket, finalA).getOrElse(false) shouldBe true
+    h.storage.pathExists(h.bucket, tempPathA).getOrElse(true) shouldBe false
+    // First PreCommit: buffers and uploading empty, max(committed)=71 → K=72.
+    // Second PreCommit: after recovery, max(committed)=max(71,80)=80 → K=81, clamped by hwm=72 → 81.
+    h.ks(tp0).toList shouldBe List(72L, 81L)
+  }
+
+  test(
+    "selective commit (PARTITIONBY): K is bounded by buffered sibling's firstBufferedOffset",
+  ) {
+    // pk-a commits (offset 200) while pk-b is still buffered (offset 50).
+    // The production K-formula uses min(firstBufferedOffset) when any writer is still
+    // buffering. Because pk-b has not yet committed, K must equal 50 (the buffered sibling's
+    // first offset) rather than 201 (max-committed+1). This pins the buffered-min arm.
+    val ops = List[Op](
+      Assign(Set(tp0)),
+      Write(tp0, Some("pk-b"), 50L),
+      Write(tp0, Some("pk-a"), 200L),
+      CommitOnly(tp0, Some("pk-a")), // selective flush: only pk-a is committed
+      PreCommit(tp0, 1000L),         // K = min(firstBuffered) = 50 (pk-b still buffering)
+    )
+    h.run(ops)
+    // Buffered-min arm fires: K is clamped at pk-b's first buffered offset, not max(committed)+1.
+    h.ks(tp0).toList shouldBe List(50L)
+    h.persistedOffsetsForPk(tp0, Some("pk-a")) shouldBe Set(200L)
+    h.persistedOffsetsForPk(tp0, Some("pk-b")) shouldBe Set.empty
+  }
+
+  test(
+    "selective commit then sibling commits: K rises only after barrier clears",
+  ) {
+    // Extends the previous test: after pk-b also commits, there are no more buffered writers
+    // so K rises to max(committed)+1. The HWM (50) ensures K never regresses between the
+    // two PreCommit calls.
+    val ops = List[Op](
+      Assign(Set(tp0)),
+      Write(tp0, Some("pk-b"), 50L),
+      Write(tp0, Some("pk-a"), 200L),
+      CommitOnly(tp0, Some("pk-a")), // selective: only pk-a
+      PreCommit(tp0, 1000L),         // K = 50 (buffered-min arm, pk-b still in Writing)
+      CommitOnly(tp0, Some("pk-b")), // now pk-b commits; barrier clears
+      PreCommit(tp0, 1000L),         // K = max(committed)+1 = 201, clamped by hwm=50 → 201
+    )
+    h.run(ops)
+    // K rises from 50 to 201 only after the barrier writer (pk-b) commits.
+    h.ks(tp0).toList shouldBe List(50L, 201L)
+    h.persistedOffsetsForPk(tp0, Some("pk-a")) shouldBe Set(200L)
+    h.persistedOffsetsForPk(tp0, Some("pk-b")) shouldBe Set(50L)
+  }
+
   // (d) mid-chain Copy failure returns FatalCloudSinkError (not NonFatal) and leaves no orphan after recovery
   test("non-PARTITIONBY: Copy failure returns FatalCloudSinkError and no temp blob is orphaned after recovery") {
     // The Copy phase is mid-chain (not an UploadOperation), so its failure escalates to
@@ -513,6 +676,8 @@ class ExactlyOnceScenarioTest extends AnyFunSuite with Matchers with BeforeAndAf
     // The commit error must have been Fatal, not NonFatal.
     h.lastCommitError should not be empty
     h.lastCommitError.get shouldBe a[FatalCloudSinkError]
+    // K = max(committed)+1 = 10+1 = 11; recovery via open() seeded committed[(tp0,None)]=10.
+    h.ks(tp0).toList shouldBe List(11L)
   }
 }
 
@@ -525,6 +690,23 @@ object ExactlyOnceScenarioTest {
   final case class Assign(tps: Set[TopicPartition]) extends Op
   final case class Write(tp: TopicPartition, pk: Option[String], offset: Long) extends Op
   final case class Commit(tp: TopicPartition) extends Op
+
+  /**
+   * Flush a single `(tp, pk)` pair, leaving all other buffered writers for `tp` untouched.
+   * Models a selective-commit cycle (only the writer whose flush threshold fired commits;
+   * siblings stay in `Writing`). Same failure semantics as `Commit`: on `commitOne` failure
+   * the offsets move to the `uploading` map.
+   */
+  final case class CommitOnly(tp: TopicPartition, pk: Option[String]) extends Op
+
+  /**
+   * Re-run `commitOne` for every `(tp, pk)` currently in the `uploading` map.
+   * Models `WriterManager.recommitPending`: retries the pending-op chain for writers still
+   * in `Uploading` state without re-buffering records. Unlike `Commit`, this does NOT
+   * require the `(tp, pk)` pair to have buffered data -- the offsets come from `uploading`.
+   */
+  final case class RecommitPending(tp: TopicPartition) extends Op
+
   final case class PreCommit(tp: TopicPartition, kafkaOffset: Long) extends Op
   final case class Rebalance(newAssignment: Set[TopicPartition]) extends Op
   case object Crash extends Op
@@ -597,6 +779,14 @@ object ExactlyOnceScenarioTest {
 
     /** In-memory record buffers per (tp, pk). Mirrors a Writer holding records before commit. */
     private val buffers = mutable.Map.empty[(TopicPartition, Option[String]), mutable.ListBuffer[Long]]
+
+    /**
+     * Offsets that were drained from `buffers` but whose `commitOne` call failed.
+     * Mirrors a `Writer` in `Uploading` state: the offsets contribute their minimum as
+     * `firstBufferedOffset` to the K-formula and are inert until `RecommitPending` retries.
+     * Cleared by `Crash` (in-memory `Uploading` state is lost on JVM crash).
+     */
+    private val uploading = mutable.Map.empty[(TopicPartition, Option[String]), List[Long]]
 
     /** Records the harness has issued on the current run (used for invariant a/a'). */
     private val deliveredAll = mutable.Map.empty[TopicPartition, mutable.Set[Long]]
@@ -676,6 +866,14 @@ object ExactlyOnceScenarioTest {
         currentGenerationLastK.clear()
 
       case Write(tp, pk, offset) =>
+        // WS6 guard: a (tp, pk) pair in Uploading must be retried via RecommitPending before
+        // new records are buffered. Accepting a Write on top of a failed commit would silently
+        // merge new offsets into the retry batch, masking the Uploading state.
+        assert(
+          !uploading.contains((tp, pk)),
+          s"Write($tp, $pk, $offset) attempted while (tp, pk) is in Uploading state. " +
+            s"Use RecommitPending($tp) to retry the failed commit before writing new records.",
+        )
         val _ = buffers.getOrElseUpdate((tp, pk), mutable.ListBuffer.empty).append(offset)
         val _ = deliveredAll.getOrElseUpdate(tp, mutable.Set.empty).add(offset)
 
@@ -686,24 +884,46 @@ object ExactlyOnceScenarioTest {
         toFlush.foreach { key =>
           val offsets = buffers(key).toList
           buffers.remove(key)
-          if (offsets.nonEmpty) {
-            commitOne(tp, key._2, offsets) match {
-              case Right(_) => ()
-              case Left(err) =>
-                if (!expectCommitErrors)
-                  throw new AssertionError(s"unexpected commit failure for $tp/${key._2}: ${err.message()}")
-            }
-          }
+          if (offsets.nonEmpty) flushOne(tp, key._2, offsets, expectCommitErrors)
+        }
+
+      // selective commit — flush a single (tp, pk) only, siblings remain buffered.
+      case CommitOnly(tp, pk) =>
+        val key     = (tp, pk)
+        val offsets = buffers.get(key).map(_.toList).getOrElse(Nil)
+        buffers.remove(key)
+        if (offsets.nonEmpty) flushOne(tp, pk, offsets, expectCommitErrors)
+
+      // retry writers in Uploading state -- mirrors WriterManager.recommitPending.
+      case RecommitPending(tp) =>
+        val toRetry = uploading.keys.filter(_._1 == tp).toList.sortBy(_._2.getOrElse(""))
+        toRetry.foreach { key =>
+          val offsets = uploading(key)
+          uploading.remove(key)
+          if (offsets.nonEmpty) flushOne(tp, key._2, offsets, expectCommitErrors)
         }
 
       case PreCommit(tp, _) =>
-        // Compute K = max(committed across all writers for tp) + 1, clamped by HWM.
+        // Mirror production WriterManager.getOffsetAndMeta two-arm formula:
+        //   if any writer has buffered (uncommitted) data → K = min(firstBufferedOffset)
+        //   else                                          → K = max(committedOffset) + 1
+        // Both `buffers` (Writing state) and `uploading` (Uploading state) contribute a
+        // firstBufferedOffset equal to their smallest offset. The HWM clamp then ensures
+        // K never regresses.
+        val firstBuffered: Iterable[Long] =
+          buffers.collect { case ((t, _), buf) if t == tp && buf.nonEmpty => buf.head } ++
+            uploading.collect { case ((t, _), offs) if t == tp && offs.nonEmpty => offs.min }
+
         val activeKeys = committed.keys.filter(_._1 == tp).toList
-        val maxCommitted =
-          activeKeys.flatMap(committed.get).reduceOption((a: Long, b: Long) => math.max(a, b)).getOrElse(-1L)
-        val rawK = if (maxCommitted < 0) 0L else maxCommitted + 1L
-        val hwm  = kHighWatermark.getOrElse(tp, 0L)
-        val k    = math.max(rawK, hwm)
+        val maxCommitted = activeKeys.flatMap(committed.get)
+          .reduceOption((a: Long, b: Long) => math.max(a, b))
+
+        val rawK =
+          if (firstBuffered.nonEmpty) firstBuffered.min
+          else maxCommitted.map(_ + 1L).getOrElse(0L)
+
+        val hwm = kHighWatermark.getOrElse(tp, 0L)
+        val k   = math.max(rawK, hwm)
         // Drive the master lock update -- this is what real WriterManager.preCommit does.
         im.updateMasterLock(tp, Offset(k)) match {
           case Right(_) =>
@@ -732,6 +952,10 @@ object ExactlyOnceScenarioTest {
         currentGenerationLastK.clear()
 
       case Crash =>
+        // WS7: uploading is cleared on crash. Production's in-memory Uploading state is lost
+        // on a JVM crash; only the granular/master lock's PendingState survives in storage and
+        // is replayed on recovery via LoadGranularLock / ensureGranularLock.
+        uploading.clear()
         crash()
         bootTask()
 
@@ -767,6 +991,26 @@ object ExactlyOnceScenarioTest {
       case EvictGranularLocks(tp) =>
         evictGranularLocks(tp)
     }
+
+    // WS2: shared helper for Commit / CommitOnly / RecommitPending.
+    // On failure, offsets move to `uploading` (mirroring Writer.Uploading) rather than
+    // being discarded. On success, any stale `uploading` entry for the same key is cleared
+    // because the new commit supersedes the prior failed one.
+    private def flushOne(
+      tp:                 TopicPartition,
+      pk:                 Option[String],
+      offsets:            List[Long],
+      expectCommitErrors: Boolean,
+    ): Unit =
+      commitOne(tp, pk, offsets) match {
+        case Right(_) =>
+          val _ = uploading.remove((tp, pk)) // clear any prior failed attempt for this key
+        case Left(err) =>
+          uploading((tp, pk)) = offsets
+          lastCommitError     = Some(err)
+          if (!expectCommitErrors)
+            throw new AssertionError(s"unexpected commit failure for $tp/$pk: ${err.message()}")
+      }
 
     private def commitOne(tp: TopicPartition, pk: Option[String], offsets: List[Long]): Either[SinkError, Unit] = {
       val tempLocal       = writeLocalTempFile(offsets)
@@ -807,9 +1051,9 @@ object ExactlyOnceScenarioTest {
           Right(())
         case Left(err) =>
           // In production a failure here would NOT advance the writer's committedOffset.
-          // For invariant checking we still want to know which offsets the writer attempted
-          // to commit so we can detect inadvertent persistence; deliveredAll captures that.
-          lastCommitError = Some(err)
+          // The caller (flushOne) is responsible for moving offsets to `uploading` and
+          // recording lastCommitError. commitOne is a pure attempt with no side-effects
+          // on the shadow state beyond `committed` / `delivered` on success.
           Left(err)
       }
     }

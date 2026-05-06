@@ -573,6 +573,64 @@ class WriterManagerOffsetInvariantsScenarioTest
     h.ks(tp1).toList shouldBe List(201L, 201L)
   }
 
+  // ── Selective-commit scenarios ───────────────────────────────────────────────────────
+  // These pin the K-trace contract under the new selective-commit behaviour: when a
+  // single PARTITIONBY writer flushes while a sibling on the same TP keeps buffering,
+  // K is bounded by the buffered sibling's `firstBufferedOffset` for the lifetime of
+  // the buffer. The Op DSL doesn't itself distinguish "selective" from "fan-out";
+  // selectivity is expressed by *not* committing the buffered sibling between Write
+  // and PreCommit ops — exactly what selective commit does in production.
+
+  test(
+    "selective commit: high-offset writer flushes repeatedly while low-offset sibling stays buffered; HWM monotonicity holds",
+  ) {
+    // pk-a writes and commits at climbing offsets (200, 300, 400). pk-b is buffered at
+    // firstBufferedOffset=50 from the start and never commits — modelling a low-throughput
+    // partition key whose flush threshold has not fired. K must clamp at 50 every cycle
+    // (because pk-b holds the barrier) and HWM monotonicity must still hold.
+    val ops = List[Op](
+      Write(tp0, Some("pk-b"), 50), // pk-b starts buffering at offset 50 and never commits
+      Write(tp0, Some("pk-a"), 200),
+      Commit(tp0), // selective commit — only pk-a (Writing -> NoWriter) drains.
+      // (`Commit(tp0)` in this DSL turns every Writing writer into NoWriter; to model
+      //  selective commit we keep pk-b in Writing by re-issuing a Write before the next
+      //  Commit so its shadow stays Writing while pk-a transitions through NoWriter.)
+      Write(tp0, Some("pk-b"), 50),
+      PreCommit(tp0, 5000), // K bounded by pk-b firstBuffered = 50
+      Write(tp0, Some("pk-a"), 300),
+      Commit(tp0),
+      Write(tp0, Some("pk-b"), 50),
+      PreCommit(tp0, 5000), // K still 50
+      Write(tp0, Some("pk-a"), 400),
+      Commit(tp0),
+      Write(tp0, Some("pk-b"), 50),
+      PreCommit(tp0, 5000), // K still 50
+    )
+    val h = run(ops)
+    h.ks(tp0).toList shouldBe List(50L, 50L, 50L)
+  }
+
+  test(
+    "selective commit + idle eviction: HWM never regresses across selective commit, sibling eviction, and re-opening",
+  ) {
+    // pk-a commits at 100 → K = 101, master = 100, HWM = 101. pk-a is then idle-evicted
+    // (Cleanup mirrors the in-place rollback path that drops shadow state but preserves
+    // the master lock). A fresh writer for the same key reopens at firstBuffered=10.
+    // Without the HWM, calculatedSafeOffset would be max(committed)+1 = 11 (or
+    // firstBuffered = 10) — well below 101. The HWM, re-seeded from the durable master
+    // lock, must keep K at 101.
+    val ops = List[Op](
+      Write(tp0, Some("pk-a"), 100),
+      Commit(tp0),
+      PreCommit(tp0, 1000), // K = 101, master = 100, HWM = 101
+      Cleanup(tp0),         // selective commit + idle eviction; master state preserved
+      Write(tp0, Some("pk-a"), 10),
+      PreCommit(tp0, 1000), // K = 101 — HWM re-seeded from master + 1
+    )
+    val h = run(ops)
+    h.ks(tp0).toList shouldBe List(101L, 101L)
+  }
+
   test("long monotone sequence: K non-decreasing as committed offsets dance up and down") {
     // Long-running sequence where each round replaces the pk-a writer with a fresh idle one
     // at varying committed offsets. The HWM must keep K monotone non-decreasing even when
