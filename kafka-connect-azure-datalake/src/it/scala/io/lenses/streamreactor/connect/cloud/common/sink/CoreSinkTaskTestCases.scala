@@ -600,11 +600,14 @@ abstract class CoreSinkTaskTestCases[
   }
 
   /**
-   * As soon as one file is eligible for writing, it will write all those from the same topic partition.  Therefore 4
-   * files are written instead of 2, as there are 2 points at which the write is triggered and the half-full files must
-   * be written as well as those reaching the threshold.
+   * Selective commit (see WriterCommitManager): only writers that hit `FlushCount` commit.
+   * Half-full sibling writers on the same TopicPartition stay open and are discarded by
+   * `task.close()`; their records are re-delivered from Kafka on restart and routed back to
+   * the same partition keys (deterministic PARTITIONBY).
+   * For this 6-record fixture, only `(first, primary)` and `(second, secondary)` reach the
+   * threshold of 2, so exactly 2 files are written.
    */
-  unitUnderTest should "use custom partitioning scheme and flush after two written records" in {
+  unitUnderTest should "use custom partitioning scheme and flush only writers that reach the flush count" in {
 
     val task = createSinkTask()
 
@@ -632,7 +635,8 @@ abstract class CoreSinkTaskTestCases[
     task.close(Seq(new TopicPartition(TopicName, 1)).asJava)
     task.stop()
 
-    listBucketPath(BucketName, "streamReactorBackups/").size should be(4)
+    val files = listBucketPath(BucketName, "streamReactorBackups/")
+    files.size should be(2)
 
     remoteFileAsString(BucketName,
                        "streamReactorBackups/name=first/title=primary/myTopic(1_000000000002).json",
@@ -640,20 +644,17 @@ abstract class CoreSinkTaskTestCases[
       """{"name":"first","title":"primary","salary":null}{"name":"first","title":"primary","salary":100.0}""",
     )
     remoteFileAsString(BucketName,
-                       "streamReactorBackups/name=first/title=secondary/myTopic(1_000000000001).json",
-    ) should be(
-      """{"name":"first","title":"secondary","salary":100.0}""",
-    )
-    remoteFileAsString(BucketName,
                        "streamReactorBackups/name=second/title=secondary/myTopic(1_000000000005).json",
     ) should be(
       """{"name":"second","title":"secondary","salary":200.0}{"name":"second","title":"secondary","salary":100.0}""",
     )
-    remoteFileAsString(BucketName,
-                       "streamReactorBackups/name=second/title=primary/myTopic(1_000000000004).json",
-    ) should be(
-      """{"name":"second","title":"primary","salary":100.0}""",
-    )
+
+    files.map(
+      _.toString,
+    ) should not contain "streamReactorBackups/name=first/title=secondary/myTopic(1_000000000001).json"
+    files.map(
+      _.toString,
+    ) should not contain "streamReactorBackups/name=second/title=primary/myTopic(1_000000000004).json"
 
   }
 
