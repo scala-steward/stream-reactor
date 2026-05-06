@@ -1540,6 +1540,125 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     verify(mockFW, times(1)).write(any[MessageDetail])
   }
 
+  test("selective commit: sibling buffered records replay correctly after crash; no data loss, no duplication") {
+    when(indexManager.indexingEnabled).thenReturn(true)
+
+    // Writer A has flushed offsets up to 105 (committedOffset = 105, granular lock = 105).
+    // Under selective commit, A is now NoWriter and would not be re-touched on the next
+    // commit cycle. Writer B is still in Writing with firstBufferedOffset = 100,
+    // uncommittedOffset = 104 — its flush threshold has not fired.
+    val writerA = new Writer[FileMetadata](topicPartition,
+                                           commitPolicy,
+                                           indexManager,
+                                           stagingFilenameFn,
+                                           objectKeyBuilder,
+                                           formatWriterFn,
+                                           schemaChangeDetector,
+                                           pendingOperationsProcessors,
+                                           partitionKey     = Some("date=12_00"),
+                                           lastSeekedOffset = Some(Offset(105)),
+    )
+    writerA.forceWriteState(NoWriter(CommitState(topicPartition, Some(Offset(105)))))
+
+    val writerB = new Writer[FileMetadata](topicPartition,
+                                           commitPolicy,
+                                           indexManager,
+                                           stagingFilenameFn,
+                                           objectKeyBuilder,
+                                           formatWriterFn,
+                                           schemaChangeDetector,
+                                           pendingOperationsProcessors,
+                                           partitionKey     = Some("date=12_15"),
+                                           lastSeekedOffset = None,
+    )
+    writerB.forceWriteState(
+      Writing(
+        CommitState(topicPartition, None),
+        formatWriter,
+        new File("test"),
+        firstBufferedOffset = Offset(100),
+        uncommittedOffset   = Offset(104),
+        1L,
+        1L,
+      ),
+    )
+
+    // Pre-crash globalSafeOffset must clamp at writer B's firstBuffered = 100, NOT
+    // advance past A's committedOffset = 105. The master lock is therefore written at
+    // 100 (committedOffset = 99 in lock-file terms).
+    val firstBufferedOffsets = Seq(writerA, writerB).flatMap(_.getFirstBufferedOffset)
+    val committedOffsets     = Seq(writerA, writerB).flatMap(_.getCommittedOffset)
+    val globalSafeOffset =
+      if (firstBufferedOffsets.nonEmpty) firstBufferedOffsets.map(_.value).min
+      else committedOffsets.map(_.value).max + 1
+    globalSafeOffset shouldBe 100L
+
+    // Simulated crash: the consumer is rewound to the master lock floor (offset 100).
+    // Records re-delivered for writer B (offsets 100..104) are NOT skipped by its
+    // restart-side `shouldSkip` because B never committed (lastSeekedOffset = None).
+    val replayedB = new Writer[FileMetadata](topicPartition,
+                                             commitPolicy,
+                                             indexManager,
+                                             stagingFilenameFn,
+                                             objectKeyBuilder,
+                                             formatWriterFn,
+                                             schemaChangeDetector,
+                                             pendingOperationsProcessors,
+                                             partitionKey     = Some("date=12_15"),
+                                             lastSeekedOffset = None,
+    )
+    Seq(100L, 101L, 102L, 103L, 104L).foreach { off =>
+      replayedB.shouldSkip(Offset(off)) shouldBe false
+    }
+
+    // Records re-delivered for writer A (anything at or below 105) ARE skipped via the
+    // surviving granular lock — no duplication at A's path even though A's records were
+    // re-delivered alongside B's.
+    val replayedA = new Writer[FileMetadata](topicPartition,
+                                             commitPolicy,
+                                             indexManager,
+                                             stagingFilenameFn,
+                                             objectKeyBuilder,
+                                             formatWriterFn,
+                                             schemaChangeDetector,
+                                             pendingOperationsProcessors,
+                                             partitionKey     = Some("date=12_00"),
+                                             lastSeekedOffset = Some(Offset(105)),
+    )
+    Seq(100L, 101L, 102L, 103L, 104L, 105L).foreach { off =>
+      replayedA.shouldSkip(Offset(off)) shouldBe true
+    }
+    replayedA.shouldSkip(Offset(106)) shouldBe false
+  }
+
+  test("selective commit: rollover still flushes every TP writer (full fan-out preserved for schema changes)") {
+    // Schema rollover routes through `commitForTopicPartition`, the only commit method
+    // that retains full-fan-out behaviour. Both writers on the topic-partition must see
+    // their `commit` invoked so the format boundary is consistent. We exercise this via
+    // mocks (the math/state assertions in the rest of this file already cover real
+    // Writer state transitions; the rollover path is purely a routing question).
+    val mockA = mock[Writer[FileMetadata]]
+    val mockB = mock[Writer[FileMetadata]]
+    when(mockA.commit).thenReturn(Right(()))
+    when(mockB.commit).thenReturn(Right(()))
+    when(mockA.shouldFlush).thenReturn(false)
+    when(mockB.shouldFlush).thenReturn(false)
+    when(mockA.hasPendingUpload).thenReturn(false)
+    when(mockB.hasPendingUpload).thenReturn(false)
+
+    val pf = io.lenses.streamreactor.connect.cloud.common.sink.config.PartitionField(Seq("_value")).value
+    val writers: Map[MapKey, Writer[FileMetadata]] = Map(
+      MapKey(topicPartition, immutable.Map(pf -> "A")) -> mockA,
+      MapKey(topicPartition, immutable.Map(pf -> "B")) -> mockB,
+    )
+    val wcm = new WriterCommitManager[FileMetadata](() => writers)
+
+    wcm.commitForTopicPartition(topicPartition).isRight shouldBe true
+
+    verify(mockA).commit
+    verify(mockB).commit
+  }
+
   test("master lock fallback: globalSafeOffset == 0 produces None, no false skip of offset 0") {
     val mockIM = mock[IndexManager]
     when(mockIM.indexingEnabled).thenReturn(true)

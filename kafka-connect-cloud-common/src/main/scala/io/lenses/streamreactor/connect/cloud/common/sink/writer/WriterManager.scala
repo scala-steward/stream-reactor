@@ -73,8 +73,12 @@ class WriterManager[SM <: FileMetadata](
   connectorTaskId: ConnectorTaskId,
 ) extends StrictLogging {
 
-  private val writers             = mutable.LinkedHashMap.empty[MapKey, Writer[SM]]
-  private val writerCommitManager = new WriterCommitManager[SM](() => writers.toMap)
+  private val writers = mutable.LinkedHashMap.empty[MapKey, Writer[SM]]
+  // Thread the same `metrics` instance through so JMX-visible selective-commit counters
+  // reflect the real production cycle, not a throwaway sink. Tests that build a
+  // WriterManager via the public constructor inherit this wiring automatically; tests
+  // that build a WriterCommitManager standalone fall back to the defaulted metrics.
+  private val writerCommitManager = new WriterCommitManager[SM](() => writers.toMap, metrics)
 
   // High-watermark per TopicPartition: the highest globalSafeOffset ever reported to Kafka Connect.
   // Prevents regression when idle-writer eviction removes the writer that defined the previous
@@ -160,6 +164,14 @@ class WriterManager[SM <: FileMetadata](
     //TODO: fix this; it cannot always be VALUE and it depends on writer requiring a roll over to new file
     message.value.schema() match {
       case Some(value: Schema) if writer.shouldRollover(value) =>
+        // Schema rollover is the explicit full-fan-out path: every writer on the
+        // `TopicPartition` must flush together so the format boundary stays consistent
+        // (a sibling that keeps buffering past a schema change would mix incompatible
+        // records into a single output file). Flush-trigger and pending-retry paths use
+        // the selective commit methods on `WriterCommitManager`; this one deliberately
+        // does not. Do NOT weaken to selective without a separate format-compatibility
+        // review — the regression is pinned by `WriterCommitManagerTest "commitForTopicPartition
+        // should commit all writers for the given topic partition if one is committed"`.
         writerCommitManager.commitForTopicPartition(topicPartition)
       case _ => ().asRight
     }
@@ -270,6 +282,13 @@ class WriterManager[SM <: FileMetadata](
 
     val firstBufferedOffsets = tpWriters.flatMap(_.getFirstBufferedOffset)
     val committedOffsets     = tpWriters.flatMap(_.getCommittedOffset)
+
+    // Operator-facing signal: how many writers are currently holding the safe-offset
+    // barrier (i.e. have buffered but uncommitted data). Under selective commit the
+    // BarrierSet is unchanged from before — every active writer on the TP still bounds
+    // `globalSafeOffset` — but the CommitSet is narrower, so the gauge tells operators
+    // which workloads are pinning consumer-lag growth and need `flush.interval` tuning.
+    metrics.setSafeOffsetBarrierWriters(firstBufferedOffsets.size)
 
     if (committedOffsets.isEmpty) return None
 

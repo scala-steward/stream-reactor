@@ -345,7 +345,7 @@ flowchart LR
 ```
 
 - **Idle writer eviction** keeps the writer map lean: when Writer B or C is created for a given `TopicPartition`, idle writers for that same partition are evicted.
-- **Coordinated commit** ensures all writers for a TopicPartition commit together when any one triggers a flush, keeping the `globalSafeOffset` computation correct.
+- **Selective commit, barrier-bounded `globalSafeOffset`.** Commit selection can be selective (only the writers that satisfied the trigger are committed; sibling writers stay open), but `globalSafeOffset` continues to observe every active writer's `firstBufferedOffset`. Correctness comes from the BarrierSet in `WriterManager.getOffsetAndMeta`, not from fan-out at commit time. Schema rollover remains an explicit full-TP fan-out path (see [Selective commit fan-out](#selective-commit-fan-out)).
 - **Granular lock GC** cleans up old date partition locks once their committed offset falls strictly below `masterOffset` (`globalSafeOffset - 1`), preserving the lock at `masterOffset` for one-record-overlap deduplication on replay.
 
 The number of concurrent writers is not the concern. Multiple writers are architecturally necessary for `PARTITIONBY` and the two-tier lock system handles them correctly. The concern is solely whether the partition key derivation is **deterministic across deliveries**.
@@ -782,11 +782,38 @@ When a zombie task's Phase 2 lock update fails after uploading to `.temp-upload/
 
 **Mitigation**: Operators should run a periodic sweep to delete `.temp-upload/` files older than a configurable threshold (e.g. 2x the longest expected task runtime). For stronger guarantees, consider integration with a table format (Iceberg/Delta/Hudi) where file registration is atomic with the commit.
 
-### Thundering herd commit (Medium)
+### Thundering herd commit (Resolved — selective commit)
 
-`WriterCommitManager.commitWritersWithFilter` commits **all** writers for a `TopicPartition` when any one writer triggers a flush. Under high cardinality, one timer tick can trigger thousands of tiny commits (each writing a granular lock file + uploading a data file). This is correct for the `globalSafeOffset` computation -- bulk commit allows the offset to advance maximally -- but creates a thundering herd of cloud API calls and increases the blast radius of transient errors.
+`WriterCommitManager.commitWritersWithFilter` previously committed **all** writers for a `TopicPartition` when any one writer triggered a flush. Under high cardinality, one timer tick could trigger thousands of tiny commits (each writing a granular lock file + uploading a data file), creating a thundering herd of cloud API calls and inflating the blast radius of transient errors.
 
-**Mitigation**: Operators should size `offset.flush.interval.ms` and commit thresholds (record count, file size) conservatively for high-cardinality workloads to avoid triggering bulk commits with many small files.
+**Resolution**: Commit selection is now selective — only writers whose flush trigger fired (or, for `recommitPending`, only writers in `Uploading`) commit; sibling writers stay open. `globalSafeOffset` correctness no longer depends on fan-out at commit time; it comes from `WriterManager.getOffsetAndMeta` scanning every active writer's `firstBufferedOffset`. Schema rollover remains an explicit full-TP fan-out path (`commitForTopicPartition`) because format-boundary consistency requires it. See [Selective commit fan-out](#selective-commit-fan-out) for the full design and the new metrics that quantify the reduction.
+
+**New operator contract**: With selective commit, `globalSafeOffset` advancement is bounded by the slowest active writer's `flush.interval`. For workloads with low-throughput partition keys, set `flush.interval` conservatively to bound consumer-group lag growth. The `safeOffsetBarrierWriters` JMX gauge reports the number of writers currently holding the barrier; it should fall to zero whenever every active writer has flushed.
+
+### Selective commit fan-out
+
+Commit triggers route through `WriterCommitManager` and now divide cleanly into selective and full-fan-out paths:
+
+| Path | Selection | Used by |
+|------|-----------|---------|
+| `commitFlushableWriters` | Only writers where `shouldFlush == true` | Periodic / threshold-based commits driven from `WriterManager.commit` |
+| `commitFlushableWritersForTopicPartition(tp)` | Only writers on `tp` where `shouldFlush == true` | Per-TP flush hooks |
+| `commitPending` | Only writers where `hasPendingUpload == true` | `recommitPending` retry path after a transient upload failure |
+| `commitForTopicPartition(tp)` | **All** writers on `tp`, regardless of trigger | **Schema rollover only** — preserved as full-TP fan-out so the format boundary is consistent across siblings |
+
+For the selective paths, the BarrierSet — every active writer for the topic-partition — is unchanged: `WriterManager.getOffsetAndMeta` continues to compute `globalSafeOffset` from `min(firstBufferedOffset)` across the BarrierSet, and only falls back to `max(committedOffset) + 1` when no writer has buffered data. This means a sibling that does not commit during a selective cycle still bounds `globalSafeOffset` via its `firstBufferedOffset`, so Kafka offsets cannot run ahead of durable state.
+
+**Metrics** exposed via JMX on `CloudSinkMetrics`:
+
+- `selectiveCommitInvocations` — every selective-commit dispatch (one per `commitFlushableWriters` / `commitPending` call).
+- `selectiveCommitWritersCommitted` — total writers committed through the selective path; cumulative.
+- `selectiveCommitAvoidedSiblingCommits` — `(matching-TP writers − writers selected)` per call, summed; this is the count of sibling commits that would have run under the old fan-out.
+- `selectedWritersPerFlush` — last cycle's selected writer count.
+- `activeWritersPerTopicPartition` — last cycle's matching-TP writer count.
+- `flushFanOutRatio` — last cycle's `selected / matching-TP writers`. With selective commit a typical hot-key fixture should sit well below `1.0`; under fan-out it would be exactly `1.0`.
+- `safeOffsetBarrierWriters` — set every time `getOffsetAndMeta` runs; equals the number of writers contributing a `firstBufferedOffset` to the barrier.
+
+Operators verify the reduction in cloud operations against these counters; safety is enforced by the `BarrierSet` and the safety-proof tests in `WriterManagerPreCommitTest`, `GranularLockScenarioTest`, and `WriterManagerOffsetInvariantsScenarioTest`.
 
 ---
 
@@ -809,6 +836,7 @@ When a zombie task's Phase 2 lock update fails after uploading to `.temp-upload/
 | GC enqueues lock for deletion, but new writer reclaims it before drain runs | `cleanUpObsoleteLocks` removes the cache entry and enqueues the file path. Before the background drain runs, a new writer calls `ensureGranularLock`, which re-reads the file from storage and re-populates the cache. When `drainGcQueue` runs, it checks `granularCache.containsKey(tp, pk)` and finds the reclaimed entry, skipping the delete. The new writer's eTag remains valid. **No data loss, no duplication.** |
 | Crash during orphan sweep | The eTag-conditional write-before-sweep marker file prevents an immediate re-sweep on crash restart and prevents concurrent sweeps after a rebalance (only the task that wins the conditional write proceeds). Items already enqueued into `gcQueue` are subject to the same offset-gated and cache-gated deletion as regular GC items. Partially scanned partitions are deferred to the next sweep cycle. **No impact on correctness.** |
 | Task restarts with higher master lock from previous instance | The high-watermark (`safeOffsetHighWatermarks`) is initialized on first `preCommit` from the master lock's `committedOffset + 1`. Even if the restarted task only sees partition keys with lower offsets, the `globalSafeOffset` floor is set from the persistent master lock, preventing regression. **No data loss, no duplication.** |
+| Crash after selective commit, sibling still buffering | Selective commit advanced only the writers whose trigger fired; sibling writers on the same TP stayed in `Writing` with their `firstBufferedOffset` intact. `getOffsetAndMeta` therefore clamped the master lock at the sibling's `firstBufferedOffset`. On restart, the consumer is rewound to that floor: the committed writer's records are re-delivered alongside the sibling's, the committed writer's granular lock dedupes its already-persisted records (`shouldSkip` returns true for offsets `<= committedOffset`), and the sibling's records are processed for the first time. **No data loss, no duplication.** |
 
 ---
 

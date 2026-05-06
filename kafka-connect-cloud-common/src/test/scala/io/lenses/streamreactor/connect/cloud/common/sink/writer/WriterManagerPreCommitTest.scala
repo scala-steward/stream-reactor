@@ -31,6 +31,7 @@ import io.lenses.streamreactor.connect.cloud.common.sink.config.PartitionField
 import io.lenses.streamreactor.connect.cloud.common.sink.config.PartitionNamePath
 import io.lenses.streamreactor.connect.cloud.common.sink.config.ValuePartitionField
 import io.lenses.streamreactor.connect.cloud.common.sink.conversion.NullSinkData
+import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.KeyNamer
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
@@ -124,7 +125,10 @@ class WriterManagerPreCommitTest
     w
   }
 
-  private def buildWriterManager(indexManager: IndexManager): WriterManager[FileMetadata] =
+  private def buildWriterManager(
+    indexManager: IndexManager,
+    metrics:      CloudSinkMetrics = new CloudSinkMetrics(),
+  ): WriterManager[FileMetadata] =
     new WriterManager[FileMetadata](
       commitPolicyFn              = _ => Right(commitPolicy),
       bucketAndPrefixFn           = _ => Right(CloudLocation("bucket", None)),
@@ -137,6 +141,7 @@ class WriterManagerPreCommitTest
       schemaChangeDetector        = schemaChangeDetector,
       skipNullValues              = false,
       pendingOperationsProcessors = pendingOpsProcessors,
+      metrics                     = metrics,
     )
 
   private def currentOffsets(tp: TopicPartition, offset: Long): immutable.Map[TopicPartition, OffsetAndMetadata] =
@@ -789,6 +794,166 @@ class WriterManagerPreCommitTest
     // The surviving writer is the one for dateB (its granular lock was NOT evicted).
     verify(indexManager).evictGranularLock(tp0, WriterManager.derivePartitionKey(dateA).get)
     verify(indexManager, never).evictGranularLock(tp0, WriterManager.derivePartitionKey(dateB).get)
+  }
+
+  // ── Selective commit (PARTITIONBY) ──────────────────────────────────────────────────
+  // These tests pin the safety contract for selective commit (see "Selective commit
+  // fan-out" in `docs/datalake-exactly-once-partitionby.md`):
+  // selective commit reduces the *CommitSet* but never the *BarrierSet*. preCommit must
+  // continue to scan every active writer on the topic-partition when computing
+  // globalSafeOffset, so the consumer-committable offset is bounded by the slowest active
+  // writer's `firstBufferedOffset`.
+
+  test("commitFlushableWriters commits only flushable writers and leaves non-flushable siblings in Writing") {
+    // WriterManager-level wiring guard: routing `commitFlushableWriters` through
+    // `WriterCommitManager` must invoke `Writer.commit` ONLY on the writer matching the
+    // selective filter; the non-flushable sibling stays untouched.
+    val indexManager = mock[IndexManager]
+    val wm           = buildWriterManager(indexManager)
+
+    val flushableWriter = mock[Writer[FileMetadata]]
+    when(flushableWriter.shouldFlush).thenReturn(true)
+    when(flushableWriter.hasPendingUpload).thenReturn(false)
+    when(flushableWriter.commit).thenReturn(Right(()))
+
+    val siblingWriter = mock[Writer[FileMetadata]]
+    when(siblingWriter.shouldFlush).thenReturn(false)
+    when(siblingWriter.hasPendingUpload).thenReturn(false)
+
+    wm.putWriter(MapKey(tp0, dateA), flushableWriter)
+    wm.putWriter(MapKey(tp0, dateB), siblingWriter)
+
+    wm.commitFlushableWriters().value shouldBe ()
+
+    verify(flushableWriter).commit
+    verify(siblingWriter, never).commit
+  }
+
+  test("preCommit barrier respects unflushed sibling after selective commit (single TP)") {
+    // DoD 4a safety proof. Writer A has just selectively committed (now in NoWriter at
+    // offset 105); Writer B is still buffering offsets 100..104 below its flush threshold.
+    // globalSafeOffset must equal min(firstBufferedOffsets) = 100, NOT max(committed)+1
+    // = 106. The master lock advances to 100, and the safeOffsetBarrierWriters gauge
+    // reports the single barrier-holder so operators can correlate the consumer-lag floor
+    // with the buffering writer.
+    val indexManager = mock[IndexManager]
+    when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(None)
+    when(indexManager.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
+    when(indexManager.cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])).thenReturn(Right(()))
+
+    val metrics = new CloudSinkMetrics()
+    val wm      = buildWriterManager(indexManager, metrics)
+
+    val writerA = writerInNoWriterState(tp0, Some(Offset(105)))
+    val writerB = writerInWritingState(tp0,
+                                       committedOffset     = None,
+                                       firstBufferedOffset = Offset(100),
+                                       uncommittedOffset   = Offset(104),
+    )
+    wm.putWriter(MapKey(tp0, dateA), writerA)
+    wm.putWriter(MapKey(tp0, dateB), writerB)
+
+    val result = wm.preCommit(currentOffsets(tp0, 200))
+    result should contain key tp0
+    result(tp0).offset() shouldBe 100L
+
+    verify(indexManager).updateMasterLock(tp0, Offset(100))
+    metrics.getSafeOffsetBarrierWriters shouldBe 1
+  }
+
+  test("preCommit no-buffer fallback remains max(committed) + 1 after a selective commit drains every active writer") {
+    // After selective commit drained both writers (both now NoWriter), there are no
+    // buffered offsets — the safe-offset formula falls back to `max(committed) + 1`,
+    // unchanged from the legacy fan-out behaviour.
+    val indexManager = mock[IndexManager]
+    when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(None)
+    when(indexManager.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
+    when(indexManager.cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])).thenReturn(Right(()))
+
+    val metrics = new CloudSinkMetrics()
+    val wm      = buildWriterManager(indexManager, metrics)
+
+    val writerA = writerInNoWriterState(tp0, Some(Offset(120)))
+    val writerB = writerInNoWriterState(tp0, Some(Offset(140)))
+    wm.putWriter(MapKey(tp0, dateA), writerA)
+    wm.putWriter(MapKey(tp0, dateB), writerB)
+
+    val result = wm.preCommit(currentOffsets(tp0, 200))
+    result should contain key tp0
+    result(tp0).offset() shouldBe 141L
+
+    metrics.getSafeOffsetBarrierWriters shouldBe 0
+  }
+
+  test("HWM never regresses across selective commit + idle eviction + re-creation of a sibling writer") {
+    // DoD 4a headline regression guard for invariant 3 (safeOffsetHighWatermarks
+    // monotonic floor). Sequence:
+    //   1. Two writers committed at 200 and 300 → globalSafeOffset = 301, HWM caches 301.
+    //   2. The high-offset sibling is evicted (idle); a fresh sibling is created at the
+    //      same key but with a much lower committed offset (50).
+    //   3. The next preCommit must NOT regress below 301 — the HWM keeps the floor even
+    //      though calculated_safeOffset drops to 201.
+    val indexManager = mock[IndexManager]
+    when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(None)
+    when(indexManager.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
+    when(indexManager.cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])).thenReturn(Right(()))
+
+    val wm = buildWriterManager(indexManager)
+
+    val writerA = writerInNoWriterState(tp0, Some(Offset(200)))
+    val writerB = writerInNoWriterState(tp0, Some(Offset(300)))
+    wm.putWriter(MapKey(tp0, dateA), writerA)
+    wm.putWriter(MapKey(tp0, dateB), writerB)
+
+    wm.preCommit(currentOffsets(tp0, 1000))(tp0).offset() shouldBe 301L
+
+    // Simulate idle-writer eviction of the high-offset sibling (writerB) followed by
+    // re-creation at a much lower committed offset (e.g. a fresh partition key reusing
+    // the same MapKey via dateB).
+    writerB.close()
+    val replacementSibling = writerInNoWriterState(tp0, Some(Offset(50)))
+    wm.putWriter(MapKey(tp0, dateB), replacementSibling)
+
+    val result = wm.preCommit(currentOffsets(tp0, 1000))
+    // calculatedSafeOffset = max(200, 50) + 1 = 201; HWM = 301; max -> 301.
+    result(tp0).offset() shouldBe 301L
+  }
+
+  test("preCommit barrier holds across consecutive selective commit cycles") {
+    // Three back-to-back selective flushes of writer A while writer B keeps buffering.
+    // After every cycle the barrier is held by writer B's firstBufferedOffset (100), so
+    // globalSafeOffset must NEVER exceed 100, regardless of how many times A commits a
+    // higher offset. This is the multi-cycle counterpart of the single-cycle barrier
+    // proof above and exercises both invariant 3 (monotonic HWM floor) and invariant 8
+    // (BarrierSet remains the entire active-writer set).
+    val indexManager = mock[IndexManager]
+    when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(None)
+    when(indexManager.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
+    when(indexManager.cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])).thenReturn(Right(()))
+
+    val metrics = new CloudSinkMetrics()
+    val wm      = buildWriterManager(indexManager, metrics)
+
+    val writerB = writerInWritingState(tp0,
+                                       committedOffset     = None,
+                                       firstBufferedOffset = Offset(100),
+                                       uncommittedOffset   = Offset(110),
+    )
+    wm.putWriter(MapKey(tp0, dateB), writerB)
+
+    // Three commit cycles with A landing at increasing offsets. Each cycle replaces the
+    // dateA writer in NoWriter state at progressively higher committed offsets — the
+    // post-selective-commit shape after `Writing -> Uploading -> NoWriter`.
+    Seq(150L, 250L, 350L).foreach { committed =>
+      val newA = writerInNoWriterState(tp0, Some(Offset(committed)))
+      wm.putWriter(MapKey(tp0, dateA), newA)
+      val result = wm.preCommit(currentOffsets(tp0, 5000))
+      result(tp0).offset() shouldBe 100L
+      newA.close()
+    }
+
+    // The barrier-writer count remained 1 across every cycle.
+    metrics.getSafeOffsetBarrierWriters shouldBe 1
   }
 
   test("eviction is scoped to the target TopicPartition and does not evict idle writers from other partitions") {

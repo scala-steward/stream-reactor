@@ -142,6 +142,67 @@ trait CloudSinkMetricsMBean {
    * consistently at the cap, increase the budget or shorten the sweep interval.
    */
   def getSweepGetBudgetUsed: Int
+
+  /**
+   * Cumulative number of [[io.lenses.streamreactor.connect.cloud.common.sink.writer.WriterCommitManager]]
+   * commit-cycle invocations (one per `commitFlushableWriters`, `commitFlushableWritersForTopicPartition`,
+   * `commitPending`, or `commitForTopicPartition` call). Read together with
+   * [[getSelectiveCommitWritersCommitted]] and [[getSelectiveCommitAvoidedSiblingCommits]] to derive
+   * average fan-out per cycle without needing per-record sampling.
+   */
+  def getSelectiveCommitInvocations: Long
+
+  /**
+   * Cumulative number of writers actually committed across all selective-commit cycles
+   * (i.e. the size of the selected set, summed). Combined with [[getSelectiveCommitInvocations]]
+   * this yields the average number of writers committed per trigger.
+   */
+  def getSelectiveCommitWritersCommitted: Long
+
+  /**
+   * Cumulative count of sibling writers NOT committed thanks to selective commit — the
+   * headline benefit counter. Computed per cycle as
+   * `(writers whose topicPartition is in selected.map(_._1.topicPartition).toSet) - selected.size`,
+   * i.e. the number of writers that would have been pulled in by the previous fan-out behaviour
+   * but are now correctly left untouched. A persistently low value on a high-cardinality
+   * PARTITIONBY workload suggests the trigger is firing on most siblings simultaneously
+   * (e.g. time-based flush is too coarse for the partition-key churn rate).
+   */
+  def getSelectiveCommitAvoidedSiblingCommits: Long
+
+  /**
+   * Last-call snapshot of the number of writers selected for commit by the trigger
+   * (i.e. `selected.size`). Together with [[getActiveWritersPerTopicPartition]] this is
+   * a quick visual indicator of the current fan-out shape; reset on every commit cycle.
+   */
+  def getSelectedWritersPerFlush: Int
+
+  /**
+   * Last-call snapshot of the number of writers on the topic-partitions touched by the
+   * most recent commit cycle (the would-have-been-fanned-out set). Reset on every cycle.
+   */
+  def getActiveWritersPerTopicPartition: Int
+
+  /**
+   * Last-call snapshot of `selected.size / (writers in matching topic-partitions)` — the
+   * fraction of writers in the affected topic-partitions that were actually committed.
+   * Defined to be 1.0 when the matching set is empty (degenerate; no benefit to report).
+   * Lower values mean selective commit is avoiding more sibling fan-out; the plan's
+   * benefit-measurement target is a median ≤ 0.35 on a high-cardinality 1-of-N fixture.
+   */
+  def getFlushFanOutRatio: Double
+
+  /**
+   * Last-call snapshot of `firstBufferedOffsets.size` recorded inside
+   * [[io.lenses.streamreactor.connect.cloud.common.sink.writer.WriterManager.preCommit]] —
+   * the number of writers currently holding the safe-offset barrier (i.e. writers in
+   * Writing/Uploading state that have buffered but uncommitted records). With selective
+   * commit, `globalSafeOffset` is bounded by the slowest writer's `firstBufferedOffset`;
+   * this gauge surfaces that hold-back to operators. A persistently non-zero value with
+   * stagnant Kafka offsets indicates a low-throughput partition key whose `flush.interval`
+   * needs tuning (see the Operational Constraints section of `datalake-exactly-once-partitionby`).
+   */
+  def getSafeOffsetBarrierWriters: Int
 }
 
 class CloudSinkMetrics() extends CloudSinkMetricsMBean {
@@ -168,6 +229,21 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   private val sweepOrphansEnqueued = new LongAdder()
   private val sweepGetBudgetUsed   = new AtomicInteger(0)
 
+  // Selective commit: counters accumulate; gauges hold the last-call snapshot. The gauges
+  // intentionally describe one cycle and are not aggregated, so operators can correlate
+  // them directly with a specific flush trigger without averaging-window confusion.
+  private val selectiveCommitInvocations           = new LongAdder()
+  private val selectiveCommitWritersCommitted      = new LongAdder()
+  private val selectiveCommitAvoidedSiblingCommits = new LongAdder()
+
+  private val selectedWritersPerFlush        = new AtomicInteger(0)
+  private val activeWritersPerTopicPartition = new AtomicInteger(0)
+  // flushFanOutRatio is a Double; AtomicLong of doubleToRawLongBits gives lock-free updates.
+  private val flushFanOutRatioBits = new java.util.concurrent.atomic.AtomicLong(
+    java.lang.Double.doubleToRawLongBits(1.0d),
+  )
+  private val safeOffsetBarrierWriters = new AtomicInteger(0)
+
   // --- getters (exposed via JMX) ---
 
   override def getWriterCount:         Int  = writerCount.get()
@@ -192,6 +268,15 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   override def getSweepOrphansEnqueued: Long = sweepOrphansEnqueued.sum()
   override def getSweepGetBudgetUsed:   Int  = sweepGetBudgetUsed.get()
 
+  override def getSelectiveCommitInvocations:           Long = selectiveCommitInvocations.sum()
+  override def getSelectiveCommitWritersCommitted:      Long = selectiveCommitWritersCommitted.sum()
+  override def getSelectiveCommitAvoidedSiblingCommits: Long = selectiveCommitAvoidedSiblingCommits.sum()
+
+  override def getSelectedWritersPerFlush:        Int    = selectedWritersPerFlush.get()
+  override def getActiveWritersPerTopicPartition: Int    = activeWritersPerTopicPartition.get()
+  override def getFlushFanOutRatio:               Double = java.lang.Double.longBitsToDouble(flushFanOutRatioBits.get())
+  override def getSafeOffsetBarrierWriters:       Int    = safeOffsetBarrierWriters.get()
+
   // --- mutators (not exposed via JMX trait) ---
 
   def setWriterCount(count: Int): Unit = writerCount.set(count)
@@ -215,4 +300,24 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   def incrementSweepRuns(): Unit = sweepRuns.increment()
   def incrementSweepOrphansEnqueued(count: Long): Unit = sweepOrphansEnqueued.add(count)
   def setSweepGetBudgetUsed(used:          Int):  Unit = sweepGetBudgetUsed.set(used)
+
+  /**
+   * Record one selective-commit cycle. `selectedSize` is the number of writers actually
+   * committed; `matchingTpWriters` is the number of writers whose `topicPartition` matched
+   * one of the selected writers' topic-partitions (the would-have-been-fanned-out set
+   * under the previous step-2 expansion). Cumulative counters and last-call gauges are
+   * updated together so a single read of the JMX bean is internally consistent.
+   */
+  def recordSelectiveCommit(selectedSize: Int, matchingTpWriters: Int): Unit = {
+    selectiveCommitInvocations.increment()
+    selectiveCommitWritersCommitted.add(selectedSize.toLong)
+    val avoided = math.max(0, matchingTpWriters - selectedSize)
+    selectiveCommitAvoidedSiblingCommits.add(avoided.toLong)
+    selectedWritersPerFlush.set(selectedSize)
+    activeWritersPerTopicPartition.set(matchingTpWriters)
+    val ratio = if (matchingTpWriters <= 0) 1.0d else selectedSize.toDouble / matchingTpWriters.toDouble
+    flushFanOutRatioBits.set(java.lang.Double.doubleToRawLongBits(ratio))
+  }
+
+  def setSafeOffsetBarrierWriters(count: Int): Unit = safeOffsetBarrierWriters.set(count)
 }

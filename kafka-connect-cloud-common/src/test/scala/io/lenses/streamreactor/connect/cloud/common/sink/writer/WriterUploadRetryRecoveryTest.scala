@@ -277,16 +277,17 @@ class WriterUploadRetryRecoveryTest
       partitionKey     = Some(pk2),
       lastSeekedOffset = Some(Offset(99)),
     )
-    // CRITICAL: writerPk2 must be in Writing state, NOT Uploading.
-    // The point of this test is to pin the commitWritersWithFilter step-2 expand-to-all-writers
-    // semantic: step 1 selects only writerPk1 (hasPendingUpload=true); step 2 expands to ALL
-    // writers on that TP, which brings in writerPk2 (Writing, hasPendingUpload=false).
-    // If writerPk2 were pre-set to Uploading, it would match the step-1 filter directly and
-    // the test would pass even under a regression that narrows the filter to direct-match-only.
+    // Selective recommitPending across multiple Uploading writers on the same TP.
+    // writerPk2 is pre-set to `Uploading` (NOT `Writing`) because under selective commit
+    // `recommitPending` filters strictly to `hasPendingUpload == true`; the previous fan-out
+    // behaviour where a Writing-state sibling was force-flushed alongside the Uploading
+    // writer is gone (see "Selective commit fan-out" in `docs/datalake-exactly-once-partitionby.md`).
+    // The customer-facing contract this scenario pins is unchanged: a Fatal in one Uploading
+    // writer must not destroy a successfully-committing sibling. With selective commit the
+    // sibling now matches the step-1 filter directly.
     writerPk2.forceWriteState(
-      Writing(
+      Uploading(
         CommitState(topicPartition, Some(Offset(99))),
-        formatWriter,
         tempFilePk2,
         firstBufferedOffset     = firstBufferedOff,
         uncommittedOffset       = uncommittedOffset,
@@ -443,13 +444,13 @@ class WriterUploadRetryRecoveryTest
         partitionKey     = Some(pk2),
         lastSeekedOffset = Some(Offset(99)),
       )
-      // CRITICAL: writerPk2 starts in `Writing`, NOT `Uploading` -- mirrors the
-      // in-batch-isolation test for the same `commitWritersWithFilter` step-2
-      // expand-to-all-writers reason documented there.
+      // writerPk2 starts in `Uploading` -- mirrors the in-batch-isolation test for the
+      // same selective-commit reason documented there. The end-to-end durability
+      // assertion (granular lock survives `cleanUp`, fresh `IndexManagerV2` reads the
+      // right floor, `shouldSkip` dedups correctly) is unchanged.
       writerPk2.forceWriteState(
-        Writing(
+        Uploading(
           CommitState(topicPartition, Some(Offset(99))),
-          formatWriter,
           tempFilePk2,
           firstBufferedOffset     = firstBufferedOff,
           uncommittedOffset       = uncommittedOffset,
@@ -544,6 +545,125 @@ class WriterUploadRetryRecoveryTest
       } finally restartIm.close()
     } finally try realIm.close()
     catch { case _: Throwable => () }
+  }
+
+  test(
+    "recommitPending re-runs only writers in Uploading; sibling Writing writers are not retried (no starvation, no fan-out)",
+  ) {
+    // Selective-commit behavioural pin (see "Selective commit fan-out" in
+    // `docs/datalake-exactly-once-partitionby.md`):
+    // `recommitPending` filters strictly to `hasPendingUpload == true`. A Writing-state
+    // sibling on the same TopicPartition is left alone — it will commit when its own
+    // flush trigger fires. This test exercises the WriterCommitManager filter path end
+    // to end against a real Writer, complementing the unit-level coverage in
+    // `WriterCommitManagerTest`.
+    val storagePk1  = new InMemoryStorageInterface()
+    val popPk1      = new PendingOperationsProcessors(storagePk1)
+    val tempFilePk1 = createTempFileWithPayload("uploading-pk1-records")
+
+    val storagePk2  = new InMemoryStorageInterface()
+    val popPk2      = new PendingOperationsProcessors(storagePk2)
+    val tempFilePk2 = createTempFileWithPayload("writing-pk2-records")
+
+    val pk1 = "date=2026-05-01"
+    val pk2 = "date=2026-05-02"
+
+    val idxMgr = mock[IndexManager]
+    when(idxMgr.indexingEnabled).thenReturn(true)
+    when(idxMgr.update(any[TopicPartition], any[Option[Offset]], any[Option[PendingState]])).thenReturn(
+      Some(uncommittedOffset).asRight[SinkError],
+    )
+    when(
+      idxMgr.updateForPartitionKey(any[TopicPartition], any[String], any[Option[Offset]], any[Option[PendingState]]),
+    ).thenReturn(Some(uncommittedOffset).asRight[SinkError])
+
+    val formatWriter = mock[FormatWriter]
+    when(formatWriter.complete()).thenReturn(().asRight)
+
+    val finalKeyPk1 =
+      CloudLocation(bucket,
+                    path = Some(s"data/${topicPartition.topic.value}/${topicPartition.partition}/pk1-final.jsonl"),
+      )
+    val okbPk1 = mock[ObjectKeyBuilder]
+    when(okbPk1.build(any[Offset], any[Long], any[Long])).thenReturn(finalKeyPk1.asRight)
+    val okbPk2 = mock[ObjectKeyBuilder]
+
+    // pk1 is in Uploading -> recommitPending must drive `Writer.commit` and the upload
+    // must succeed end-to-end.
+    val writerPk1 = new Writer[FakeFileMetadata](
+      topicPartition,
+      mock[CommitPolicy],
+      idxMgr,
+      stagingFilenameFn = () => tempFilePk1.asRight,
+      okbPk1,
+      formatWriterFn = _ => formatWriter.asRight,
+      mock[SchemaChangeDetector],
+      popPk1,
+      partitionKey     = Some(pk1),
+      lastSeekedOffset = Some(Offset(99)),
+    )
+    writerPk1.forceWriteState(
+      Uploading(
+        CommitState(topicPartition, Some(Offset(99))),
+        tempFilePk1,
+        firstBufferedOffset     = firstBufferedOff,
+        uncommittedOffset       = uncommittedOffset,
+        earliestRecordTimestamp = 1L,
+        latestRecordTimestamp   = 100L,
+      ),
+    )
+
+    // pk2 is in Writing — recommitPending must NOT touch it; nothing should land in
+    // storagePk2 and `commit` must never be invoked. We make sibling commit observable
+    // by using a spy: the writer's underlying state stays Writing and the test asserts
+    // no records were written to its dedicated storage.
+    val writerPk2 = new Writer[FakeFileMetadata](
+      topicPartition,
+      mock[CommitPolicy],
+      idxMgr,
+      stagingFilenameFn = () => tempFilePk2.asRight,
+      okbPk2,
+      formatWriterFn = _ => formatWriter.asRight,
+      mock[SchemaChangeDetector],
+      popPk2,
+      partitionKey     = Some(pk2),
+      lastSeekedOffset = Some(Offset(99)),
+    )
+    writerPk2.forceWriteState(
+      Writing(
+        CommitState(topicPartition, Some(Offset(99))),
+        formatWriter,
+        tempFilePk2,
+        firstBufferedOffset     = firstBufferedOff,
+        uncommittedOffset       = uncommittedOffset,
+        earliestRecordTimestamp = 1L,
+        latestRecordTimestamp   = 100L,
+      ),
+    )
+
+    val wmIdxMgr = mock[IndexManager]
+    when(wmIdxMgr.getSeekedOffsetForTopicPartition(any[TopicPartition])).thenReturn(None)
+    when(wmIdxMgr.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
+    when(wmIdxMgr.cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])).thenReturn(Right(()))
+    when(wmIdxMgr.evictAllGranularLocks(any[TopicPartition])).thenAnswer((_: org.mockito.invocation.InvocationOnMock) =>
+      (),
+    )
+
+    val wm = buildMinimalWriterManager(wmIdxMgr, new PendingOperationsProcessors(new InMemoryStorageInterface()))
+    wm.putWriter(MapKey(topicPartition, Map(TopicPartitionField -> pk1)), writerPk1)
+    wm.putWriter(MapKey(topicPartition, Map(TopicPartitionField -> pk2)), writerPk2)
+    wm.writerCount shouldBe 2
+
+    val result = wm.recommitPending()
+    result.isRight shouldBe true
+
+    // pk1's records were uploaded and final-path object exists.
+    storagePk1.snapshot(bucket).keys should contain(finalKeyPk1.path.get)
+    writerPk1.currentWriteState shouldBe a[NoWriter]
+
+    // pk2 was NOT touched — still in Writing state, no records in its storage.
+    writerPk2.currentWriteState shouldBe a[Writing]
+    storagePk2.snapshot(bucket).keys shouldBe empty
   }
 
   private def runScenario(partitionKey: Option[String]): Unit = {
