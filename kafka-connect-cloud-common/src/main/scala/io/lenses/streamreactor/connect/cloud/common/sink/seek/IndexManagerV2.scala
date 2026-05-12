@@ -785,6 +785,29 @@ class IndexManagerV2(
    * deliberately NOT refreshed on write failure -- this preserves fencing against zombie
    * tasks (see architecture doc).
    */
+  // ==========================================================================================
+  // TEST-ONLY SEAM — DO NOT WIRE FROM PRODUCTION CODE
+  // ==========================================================================================
+  //
+  //
+  // Production wiring constructs `IndexManagerV2` via `writerManagerCreator.from`, which never
+  // touches this field — so the production code path is bit-identical to a no-op barrier. The
+  // end-to-end zombie test sets this barrier on the soon-to-be-zombie task's `IndexManagerV2`
+  // to a `CountDownLatch.await(...)` that releases only after the replacement task has cached
+  // its own eTag and begun processing. Without this seam the test must approximate the zombie
+  // race with timing-based sleeps, which produces flaky tests that do not actually pin the
+  // exactly-once invariant on the rebalance race.
+  //
+  // The barrier fires once per `updateMasterLock` invocation, between (a) the cached-eTag read
+  // and (b) the eTag-conditional storage write. It does NOT fire on success / failure follow-up
+  // code. Tests that exercise the seam must reset it (or instantiate a fresh `IndexManagerV2`)
+  // in their teardown so test ordering cannot leak the hook across cases.
+  //
+  // The accessor for this field is confined to the `IndexManagerV2TestHooks` companion
+  // below — production code has no convenient API surface to discover and mutate it, and any
+  // stray reference to `IndexManagerV2TestHooks` stands out under code review.
+  @volatile private[seek] var testHookPreWriteMasterLockBarrier: () => Unit = () => ()
+
   override def updateMasterLock(
     topicPartition:   TopicPartition,
     globalSafeOffset: Offset,
@@ -807,6 +830,11 @@ class IndexManagerV2(
         IndexFile(lockOwner, committedOffset, None),
         eTag,
       )
+      // Test seam — pre-write barrier. No-op by
+      // default; the end-to-end zombie test uses this to engineer a deterministic rebalance
+      // race that does not depend on timing-based sleeps. See
+      // `testHookPreWriteMasterLockBarrier` above and `IndexManagerV2TestHooks` below.
+      _ = testHookPreWriteMasterLockBarrier()
       // eTag-conditional write to the master lock
       blobFileWrite <- storageInterface.writeBlobToFile(
         bucketAndPrefix.bucket,
@@ -1345,5 +1373,27 @@ object IndexManagerV2 {
     directoryFileName: String,
   ): String =
     s"$directoryFileName/${connectorTaskId.name}/.locks/${topicPartition.topic}/${topicPartition.partition}/sweep-marker.json"
+
+  /**
+   * Test-only access point for the pre-write master-lock barrier seam. The only legitimate
+   * caller is the rebalance-race / zombie scenario test in `ExactlyOnceScenarioTest`. The
+   * accessor lives here (rather than as a method on `IndexManagerV2`) so that a stray
+   * production reference stands out under code review: any production call to
+   * `IndexManagerV2TestHooks.*` is a bug.
+   */
+  object IndexManagerV2TestHooks {
+
+    /**
+     * Install a pre-write barrier function that runs once per `updateMasterLock` invocation,
+     * between the cached-eTag read and the eTag-conditional storage write. Production code
+     * must never call this method — `IndexManagerV2`'s default barrier is a no-op.
+     */
+    def installPreWriteMasterLockBarrier(im: IndexManagerV2, barrier: () => Unit): Unit =
+      im.testHookPreWriteMasterLockBarrier = barrier
+
+    /** Reset the pre-write barrier back to its default no-op. */
+    def clearPreWriteMasterLockBarrier(im: IndexManagerV2): Unit =
+      im.testHookPreWriteMasterLockBarrier = () => ()
+  }
 
 }

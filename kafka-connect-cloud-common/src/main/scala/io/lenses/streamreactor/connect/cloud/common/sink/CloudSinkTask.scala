@@ -334,7 +334,12 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
     // (e.g. during error recovery or non-standard Connect runtimes). WriterManager.close()
     // is idempotent -- on the normal close-then-stop path, writers are already closed and
     // the map is empty, so this is a no-op.
-    Try(Option(writerManager).foreach(_.close())).failed.foreach { t =>
+    //
+    // Use the Stop reason tag so the master-lock force-write counter distinguishes
+    // shutdown-driven forced writes from rebalance-driven forced writes — the
+    // `masterLockWriteForced` counter is tagged by reason so operators can distinguish the
+    // two during triage.
+    Try(Option(writerManager).foreach(_.closeForStop())).failed.foreach { t =>
       logger.warn(s"[$taskIdStr] writerManager.close() failed during stop()", t)
     }
     writerManager = null
@@ -374,6 +379,14 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
       // Mirror the stop() shutdown order (writerManager first, then indexManager)
       // and wrap each close in Try so a throw in one does not prevent the other
       // from running, and so neither masks the original init failure.
+      //
+      // `writerManager.close()` uses the default `Revoke` reason tag. This is technically
+      // an init-failure teardown rather than a real partition revocation, but the tag has
+      // no safety consequence: at this point no partitions have been assigned so
+      // `writerManager` holds no writers, and `closePartition`/`attemptForceMasterLockWrite`
+      // skip immediately when `writers.isEmpty`. The `Revoke` counter may show a spurious
+      // +1 on connector start-up failures; operators should cross-reference with connector
+      // error logs to distinguish a real rebalance from an init failure.
       closeOnFailure = () => {
         Try(writerManager.close())
         Try(indexManager.close())

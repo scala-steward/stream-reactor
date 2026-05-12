@@ -31,6 +31,7 @@ import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.commit.CommitPolicy
 import io.lenses.streamreactor.connect.cloud.common.sink.config.PartitionField
 import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
+import io.lenses.streamreactor.connect.cloud.common.sink.metrics.ForcedWriteReason
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.KeyNamer
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
@@ -43,8 +44,35 @@ import java.io.File
 import java.net.URLEncoder
 import scala.collection.immutable
 import scala.collection.mutable
+import scala.util.control.NonFatal
 
 case class MapKey(topicPartition: TopicPartition, partitionValues: immutable.Map[PartitionField, String])
+
+/**
+ * Classification of a `preCommit` cycle for a single PARTITIONBY topic-partition, used by
+ * the master-lock write-decision helper. The classification is computed inside
+ * `WriterManager.getOffsetAndMeta` from `globalSafeOffset`, `lastWrittenMasterSafeOffset(tp)`,
+ * and the per-cycle force flag.
+ *
+ *  - `Skip` : the dirty flag is clean (`globalSafeOffset == lastWritten`) and no force point
+ *             is active for this cycle. `updateMasterLock` is NOT invoked. The cycle still
+ *             returns the safe offset to Kafka Connect, advancing the in-memory HWM and
+ *             `lastReturnedSafeOffset(tp)` (no-op in value terms on this branch).
+ *  - `WriteRoutine` : the dirty flag is true (`globalSafeOffset > lastWritten`) and no
+ *             force point is active. `updateMasterLock` is invoked once with
+ *             `globalSafeOffset`; GC runs on success, no-op on failure.
+ *  - `WriteForced` : a lifecycle force point is active (revoke / stop / post-`cleanUp`).
+ *             Structurally identical to `WriteRoutine` — same eTag-conditional write, same
+ *             same-value GC threshold, same fail-closed semantics. Carries the reason tag
+ *             solely so the corresponding `masterLockWriteForced*` counter can be
+ *             incremented at the call site.
+ */
+private[writer] sealed trait WriteDecision
+private[writer] object WriteDecision {
+  case object Skip         extends WriteDecision
+  case object WriteRoutine extends WriteDecision
+  final case class WriteForced(reason: ForcedWriteReason) extends WriteDecision
+}
 
 /**
  * Manages the lifecycle of [[Writer]] instances.
@@ -85,6 +113,50 @@ class WriterManager[SM <: FileMetadata](
   // high watermark (see "globalSafeOffset regression" in docs/datalake-exactly-once-partitionby.md).
   private val safeOffsetHighWatermarks = mutable.Map.empty[TopicPartition, Long]
 
+  // Highest `globalSafeOffset` successfully persisted by `updateMasterLock` for this TP within
+  // the current task instance's ownership episode. Mutated ONLY inside the success branch of `updateMasterLock`.
+  // Cleared by both `close(tp)` (rebalance / shutdown) and `cleanUp(tp)` (in-place rollback).
+  // Lazy-seeded on first access from the durable master-lock floor
+  // (`IndexManager.getSeekedOffsetForTopicPartition(tp) + 1`, or 0 if absent), mirroring the
+  // seeding rule used by `safeOffsetHighWatermarks`.
+  //
+  // `dirtyMasterLock(tp)` is a *computed* flag: `globalSafeOffset > lastWrittenMasterSafeOffset(tp)`.
+  // It is not stored as a separate field — that would create two sources of truth for the same
+  // boolean (the comparison vs. a separately set flag) and a future refactor that updates one
+  // without the other would silently break the gate.
+  private val lastWrittenMasterSafeOffset = mutable.Map.empty[TopicPartition, Long]
+
+  // Highest `globalSafeOffset` returned to Kafka Connect for this TP within the current task
+  // instance's ownership episode.
+  // Advances on BOTH the skipped-write and successful-write paths (every cycle that returns
+  // an offset). NEVER advances on cycles where `preCommit` returns `None` for the TP.
+  //
+  // Cleared by `close(tp)` only. PRESERVED across `cleanUp(tp)`.
+  //
+  // Role differs by mode:
+  //
+  //  - Non-PARTITIONBY mode (load-bearing): `preCommit` advances `lastReturnedSafeOffset(tp)`
+  //    independently of `Writer.commit()`, which is the only code path that updates
+  //    `seekedOffsets(tp)` (via `IndexManager.update`). Between flushes, `lastReturned` can
+  //    sit strictly ahead of `getSeekedOffsetForTopicPartition(tp).value + 1`. After a
+  //    `cleanUp(tp)`, the HWM re-seed expression `max(durableFloor + 1, lastReturned)` needs
+  //    the `lastReturned` term to avoid regressing below what Kafka Connect was already told.
+  //
+  //  - PARTITIONBY mode (defence-in-depth): `IndexManagerV2.updateMasterLock` updates
+  //    `seekedOffsets(tp)` atomically with each successful cloud write, so in production the
+  //    two terms in `max(durableFloor + 1, lastReturned)` are equal after every successful
+  //    cycle. The `IndexManager` trait does NOT enforce that contract, however — a future
+  //    implementation that decouples the two would silently break post-`cleanUp` monotonicity
+  //    without this field. Preserving it is the safety net against that drift.
+  private val lastReturnedSafeOffset = mutable.Map.empty[TopicPartition, Long]
+
+  // Force-after-`cleanUp(tp)` flag: when set, the next `preCommit` cycle for this TP MUST be
+  // classified `WriteForced(PostCleanUp)` regardless of whether the routine dirty-flag gate
+  // would also have admitted a write. Cleared on the next master-lock write attempt (success
+  // or failure) — if the forced write fails the dirty bit alone re-admits the next routine
+  // cycle, which is the design's correctness fallback.
+  private val forceWriteAfterCleanUp = mutable.Set.empty[TopicPartition]
+
   def recommitPending(): Either[SinkError, Unit] = {
     logger.debug(s"[{}] Retry Pending", connectorTaskId.show)
     val result = writerCommitManager.commitPending()
@@ -97,30 +169,226 @@ class WriterManager[SM <: FileMetadata](
     writerCommitManager.commitFlushableWriters()
   }
 
-  def close(): Unit = {
-    logger.debug(s"[{}] Received call to WriterManager.close", connectorTaskId.show)
-    val topicPartitions = writers.keys.map(_.topicPartition).toSet
-    writers.values.foreach(_.close())
-    writers.clear()
-    // Safe to clear all watermarks, including for retained partitions on rebalance:
-    // getOffsetAndMeta re-initializes each partition's watermark from the master lock's
-    // seeked offset (committedOffset + 1) on first preCommit after re-opening, which
-    // equals the previous globalSafeOffset. No regression is possible.
-    safeOffsetHighWatermarks.clear()
-    // After closing all writers, evict their granular lock cache entries so that no stale
-    // offsets or eTags linger in memory after the task stops. Writer.close() deliberately
+  /**
+   * Per-TP close routine, used by both `close()` (rebalance) and the stop path.
+   * Implements the locked-in step ordering for force-on-revoke:
+   *
+   *   1. Compute `globalSafeOffset` from this TP's writers and the current HWM.
+   *   2. Attempt `updateMasterLock` if `dirtyMasterLock(tp)` is true; otherwise skip.
+   *   3. On success: update `lastWrittenMasterSafeOffset(tp)`; run GC enqueue against the
+   *      just-persisted value. On failure: leave all state untouched (no eTag refresh, no
+   *      GC, no fatal escalation).
+   *   4. Clear `safeOffsetHighWatermarks(tp)`, `lastWrittenMasterSafeOffset(tp)`,
+   *      `lastReturnedSafeOffset(tp)`, and `forceWriteAfterCleanUp(tp)` for this TP.
+   *   5. Close writers for this TP and remove them from the writers map.
+   *   6. Evict granular-lock cache entries for this TP.
+   *
+   * The reordering invariant (compute → write → clear → close) is mandatory: closing
+   * writers first would compute `globalSafeOffset` against an empty writers map and the
+   * force write would either no-op or persist a value disconnected from the durable
+   * floor at the moment of revocation.
+   */
+  private def closePartition(topicPartition: TopicPartition, reason: ForcedWriteReason): Unit = {
+    val tpWriters = writersForTopicPartition(topicPartition)
+    // Step 1 + 2 + 3: attempt force write if dirty AND we still have writers to compute
+    // a meaningful `globalSafeOffset` from. If the TP has no writers (e.g. close() called
+    // on an instance where this TP was never written to), there is no advancement to
+    // persist and the force-on-revoke path is a no-op for this TP.
+    //
+    // The force-write helper only returns Eithers from `updateMasterLock` / `cleanUpObsoleteLocks`,
+    // so a throw can only come from a programmer error or a JVM-level fault. Wrap defensively
+    // so that on the close path the per-TP state clear, writer close, and granular-cache eviction
+    // (steps 4–6 below) always run — leaving stale writers or HWM entries behind would compound
+    // a fault into an operational outage on the next ownership episode.
+    if (tpWriters.nonEmpty) {
+      try {
+        attemptForceMasterLockWrite(topicPartition, tpWriters, reason)
+      } catch {
+        case NonFatal(t) =>
+          logger.warn(
+            s"[${connectorTaskId.show}] Force-${reason} master-lock write threw unexpectedly for " +
+              s"$topicPartition; proceeding with state cleanup. The next owner / restart will replay " +
+              s"from the durable master floor (deduplicated by granular locks).",
+            t,
+          )
+      }
+    }
+    // Step 4: clear all per-TP state. Use `remove` (not `clear()`) to avoid wiping state
+    // for other partitions that share this WriterManager instance. The lifecycle-table
+    // rule for `close(tp)` is: clear every new field for this TP.
+    safeOffsetHighWatermarks.remove(topicPartition)
+    lastWrittenMasterSafeOffset.remove(topicPartition)
+    lastReturnedSafeOffset.remove(topicPartition)
+    forceWriteAfterCleanUp.remove(topicPartition)
+    // Step 5: close writers for this TP and remove them. The iteration is materialised to
+    // a list first so the mutation does not invalidate the view.
+    val keysToRemove = writers
+      .view.filterKeys(_.topicPartition == topicPartition)
+      .keys
+      .toList
+    keysToRemove.foreach { key =>
+      writers.get(key).foreach(_.close())
+      writers.remove(key)
+    }
+    // Step 6: evict granular lock cache entries for this TP. Writer.close() deliberately
     // does NOT evict cache entries (they are left for cleanUpObsoleteLocks to GC), so this
     // bulk eviction is the sole memory cleanup path on shutdown.
-    //
-    // NOTE: clearTopicPartitionState is deliberately NOT called here. It removes seekedOffsets
-    // entries, which are needed by IndexManagerV2.close() → drainGcQueue() to avoid discarding
-    // queued GC items as "partition no longer owned." Neither CloudSinkTask.close() nor stop()
-    // calls clearTopicPartitionState; the state is GC'd with the indexManager reference when
-    // stop() sets it to null.
-    topicPartitions.foreach { tp =>
-      indexManager.evictAllGranularLocks(tp)
+    indexManager.evictAllGranularLocks(topicPartition)
+  }
+
+  /**
+   * Force-on-revoke / force-on-stop helper. Computes `globalSafeOffset` from the current
+   * writers + HWM, attempts `updateMasterLock` once if `dirtyMasterLock(tp)` is true, and
+   * applies the post-write state updates per the force-on-revoke ordering steps 1–4
+   * documented on `closePartition` above.
+   *
+   * Best-effort, non-blocking: a single synchronous attempt with no in-process retry. A
+   * transient or fencing failure here is acceptable — force-on-revoke failure is not a fatal
+   * path; the next owner / restart replays from the older durable master floor, deduplicated
+   * by granular locks. The forced-write metric counter is incremented on every attempt
+   * regardless of outcome.
+   */
+  private def attemptForceMasterLockWrite(
+    topicPartition: TopicPartition,
+    tpWriters:      Seq[Writer[SM]],
+    reason:         ForcedWriteReason,
+  ): Unit = {
+    val firstBufferedOffsets = tpWriters.flatMap(_.getFirstBufferedOffset)
+    val committedOffsets     = tpWriters.flatMap(_.getCommittedOffset)
+    if (committedOffsets.isEmpty) {
+      // Nothing has been durably committed by these writers yet; there is no
+      // `globalSafeOffset` to persist. Skip the force attempt — the durable master lock
+      // floor (which the next owner will read in `open(tp)`) is already authoritative.
+      logger.debug(
+        s"[${connectorTaskId.show}] Force-${reason} skipped for $topicPartition: " +
+          s"no committed offsets (writers have not yet flushed); durable master-lock floor is authoritative.",
+      )
+    } else {
+      val calculatedSafeOffset =
+        if (firstBufferedOffsets.nonEmpty) firstBufferedOffsets.map(_.value).min
+        else committedOffsets.map(_.value).max + 1
+      val previousHighWatermark = currentHighWatermark(topicPartition)
+      val globalSafeOffset      = math.max(calculatedSafeOffset, previousHighWatermark)
+      val lastWritten           = currentLastWrittenMaster(topicPartition)
+      val dirty                 = globalSafeOffset > lastWritten
+
+      val hasPartitionByWriters =
+        writers.keys.exists(k => k.topicPartition == topicPartition && k.partitionValues.nonEmpty)
+
+      if (hasPartitionByWriters && dirty) {
+        metrics.incrementMasterLockWriteForced(reason)
+        indexManager.updateMasterLock(topicPartition, Offset(globalSafeOffset)) match {
+          case Left(err) =>
+            metrics.incrementMasterLockFailures()
+            logger.warn(
+              s"[${connectorTaskId.show}] Force-${reason} updateMasterLock failed for $topicPartition: " +
+                s"${err.message()} — proceeding without forced persistence. The next owner / restart will " +
+                s"replay from the older durable master floor (deduplicated by granular locks).",
+            )
+          case Right(_) =>
+            metrics.incrementMasterLockUpdates()
+            lastWrittenMasterSafeOffset.put(topicPartition, globalSafeOffset)
+            // Compute the active partition-key set from the *current* writers map (the force
+            // path runs before writers are closed, so the set is still meaningful).
+            val activePartitionKeys: Set[String] = writers
+              .filter { case (key, _) => key.topicPartition == topicPartition }
+              .keys
+              .flatMap(key => WriterManager.derivePartitionKey(key.partitionValues))
+              .toSet
+            indexManager.cleanUpObsoleteLocks(topicPartition, Offset(globalSafeOffset), activePartitionKeys) match {
+              case Left(gcErr) =>
+                logger.warn(
+                  s"[${connectorTaskId.show}] Best-effort GC after force-${reason} failed for $topicPartition: " +
+                    s"${gcErr.message()}",
+                )
+              case Right(_) =>
+            }
+        }
+      } else if (hasPartitionByWriters) {
+        // Nothing to persist — the durable floor already matches the in-memory value.
+        logger.debug(
+          s"[${connectorTaskId.show}] Force-${reason} skipped for $topicPartition: " +
+            s"globalSafeOffset=$globalSafeOffset already persisted (lastWritten=$lastWritten).",
+        )
+      }
+      // else: non-PARTITIONBY mode — master lock is maintained inside `Writer.commit()` via
+      // `IndexManager.update`. There is nothing to force from the WriterManager layer.
     }
   }
+
+  /** Reads the current HWM for the TP without seeding (returns 0 if absent). */
+  private def currentHighWatermark(topicPartition: TopicPartition): Long =
+    safeOffsetHighWatermarks.getOrElse(topicPartition, 0L)
+
+  /**
+   * Reads `lastWrittenMasterSafeOffset(tp)` if already seeded; otherwise lazy-seeds from the
+   * durable master-lock floor (`getSeekedOffsetForTopicPartition + 1`, or 0 if absent).
+   * Mirrors the lazy-seed used by `safeOffsetHighWatermarks` so the dirty-flag gate cannot
+   * fire on a fresh ownership episode before the master lock has been read.
+   */
+  private def currentLastWrittenMaster(topicPartition: TopicPartition): Long =
+    lastWrittenMasterSafeOffset.getOrElseUpdate(
+      topicPartition,
+      indexManager.getSeekedOffsetForTopicPartition(topicPartition)
+        .map(_.value + 1)
+        .getOrElse(0L),
+    )
+
+  /**
+   * `close()` (rebalance / shutdown) — bulk per-TP iteration that runs the force-on-revoke
+   * routine for every owned partition before closing writers. The per-TP routine is the
+   * same regardless of revoke vs. stop; only the reason tag differs for metrics. The
+   * default `Revoke` tag matches the call site `CloudSinkTask.close(partitions)`.
+   */
+  def close(reason: ForcedWriteReason = ForcedWriteReason.Revoke): Unit = {
+    logger.debug(s"[{}] Received call to WriterManager.close", connectorTaskId.show)
+    val topicPartitions = writers.keys.map(_.topicPartition).toSet
+    topicPartitions.foreach(closePartition(_, reason))
+    // Defensive bulk clear: a `cleanUp(tp)` that runs immediately before close with no
+    // intervening `put()` to re-create writers for that TP leaves the TP absent from
+    // `writers.keys`, so `closePartition` above does not visit it. The preserved
+    // `lastReturnedSafeOffset(tp)` and the set `forceWriteAfterCleanUp(tp)` entry would
+    // otherwise survive into the next ownership episode of this task instance.
+    //
+    // Safety argument (PARTITIONBY mode): `lastReturned(tp) <= durableFloor(tp) + 1` is
+    // an invariant provable at the two PARTITIONBY `advanceLastReturned` call sites (Skip
+    // branch and `attemptMasterLockWrite` success). Therefore the HWM re-seed expression
+    // `max(durableFloor+1, lastReturned)` always equals `durableFloor+1` after `open()`
+    // refreshes the seeked offsets — the leaked `lastReturned` entry cannot inflate the
+    // HWM beyond the durable floor.
+    //
+    // Safety argument (non-PARTITIONBY mode): the non-PARTITIONBY `advanceLastReturned`
+    // call site (line 638) CAN sit ahead of the durable floor, because `Writer.commit` is
+    // the master-lock authority in that mode and `preCommit` does not write the master
+    // lock. However, `closePartition`'s `attemptForceMasterLockWrite` short-circuits via
+    // `!hasPartitionByWriters`, so no stale eTag is persisted, and the next ownership
+    // episode reads the authoritative durable floor through `open()`. The bulk clear here
+    // ensures the leaked `lastReturned` does not inject a false HWM on the first
+    // post-reopen `preCommit` for that TP.
+    //
+    // The asymmetry is a hygiene smell and a trap for future refactors that relax either
+    // invariant above — the bulk clear mirrors the pre-Option-A `safeOffsetHighWatermarks
+    // .clear()` semantics and makes the lifecycle table self-consistent: `close()` is a
+    // hard reset of all per-TP state.
+    //
+    // Safe because `closePartition` already drained state for every TP that had writers;
+    // the bulk clear is a no-op for those TPs and the defensive fix for leaked-state TPs.
+    safeOffsetHighWatermarks.clear()
+    lastWrittenMasterSafeOffset.clear()
+    lastReturnedSafeOffset.clear()
+    forceWriteAfterCleanUp.clear()
+    // After every per-TP closePartition has run, refresh the writer-count gauge for the
+    // final value (in the steady-state path writers are now empty).
+    metrics.setWriterCount(writers.size)
+  }
+
+  /**
+   * Equivalent to `close(Stop)` — surfaced as a distinct method so `CloudSinkTask.stop()`
+   * can opt in to the `Stop` reason tag without making the default API
+   * change-controlled. Mirrors the per-TP routine used by `close(Revoke)`; the difference
+   * is purely in which metric counter is incremented.
+   */
+  def closeForStop(): Unit = close(ForcedWriteReason.Stop)
 
   def write(topicPartitionOffset: TopicPartitionOffset, messageDetail: MessageDetail): Either[SinkError, Unit] = {
 
@@ -278,88 +546,264 @@ class WriterManager[SM <: FileMetadata](
     offsetAndMetadata: OffsetAndMetadata,
   ): Option[OffsetAndMetadata] = {
     val tpWriters = writersForTopicPartition(topicPartition)
-    if (tpWriters.isEmpty) return None
-
-    val firstBufferedOffsets = tpWriters.flatMap(_.getFirstBufferedOffset)
-    val committedOffsets     = tpWriters.flatMap(_.getCommittedOffset)
-
-    // Operator-facing signal: how many writers are currently holding the safe-offset
-    // barrier (i.e. have buffered but uncommitted data). Under selective commit the
-    // BarrierSet is unchanged from before — every active writer on the TP still bounds
-    // `globalSafeOffset` — but the CommitSet is narrower, so the gauge tells operators
-    // which workloads are pinning consumer-lag growth and need `flush.interval` tuning.
-    metrics.setSafeOffsetBarrierWriters(firstBufferedOffsets.size)
-
-    if (committedOffsets.isEmpty) return None
-
-    val calculatedSafeOffset =
-      if (firstBufferedOffsets.nonEmpty) {
-        firstBufferedOffsets.map(_.value).min
-      } else {
-        committedOffsets.map(_.value).max + 1
-      }
-
-    val previousHighWatermark = safeOffsetHighWatermarks.getOrElseUpdate(
-      topicPartition,
-      indexManager.getSeekedOffsetForTopicPartition(topicPartition)
-        .map(_.value + 1)
-        .getOrElse(0L),
-    )
-    val globalSafeOffset = math.max(calculatedSafeOffset, previousHighWatermark)
-
-    // Defensive invariants: today these are guaranteed by the math.max above, but a require()
-    // here means any future refactor that drops or reorders the max will fail fast in CI
-    // rather than silently regressing the globalSafeOffset and risking data loss.
-    require(
-      globalSafeOffset >= previousHighWatermark,
-      s"globalSafeOffset regression for $topicPartition: $globalSafeOffset < previousHWM $previousHighWatermark",
-    )
-    require(
-      globalSafeOffset >= calculatedSafeOffset,
-      s"globalSafeOffset below calculated floor for $topicPartition: $globalSafeOffset < $calculatedSafeOffset",
-    )
-
-    val hasPartitionByWriters =
-      writers.keys.exists(k => k.topicPartition == topicPartition && k.partitionValues.nonEmpty)
-
-    if (hasPartitionByWriters) {
-      // PARTITIONBY mode: writers update granular locks, so the master lock needs a separate write.
-      indexManager.updateMasterLock(topicPartition, Offset(globalSafeOffset)) match {
-        case Left(err) =>
-          metrics.incrementMasterLockFailures()
-          logger.error(
-            s"[${connectorTaskId.show}] Master lock update failed for $topicPartition: ${err.message()}. " +
-              s"Returning no offset to prevent consumer advance.",
-          )
-          return None
-        case Right(_) =>
-          metrics.incrementMasterLockUpdates()
-          safeOffsetHighWatermarks.put(topicPartition, globalSafeOffset)
-          logger.debug(
-            s"[${connectorTaskId.show}] Updated master lock for $topicPartition with globalSafeOffset=$globalSafeOffset",
-          )
-          val activePartitionKeys: Set[String] = writers
-            .filter { case (key, _) => key.topicPartition == topicPartition }
-            .keys
-            .flatMap(key => WriterManager.derivePartitionKey(key.partitionValues))
-            .toSet
-          indexManager.cleanUpObsoleteLocks(topicPartition, Offset(globalSafeOffset), activePartitionKeys) match {
-            case Left(err) =>
-              logger.warn(s"[${connectorTaskId.show}] Best-effort GC failed for $topicPartition: ${err.message()}")
-            case Right(_) =>
-          }
-      }
+    if (tpWriters.isEmpty) {
+      None
     } else {
-      // Non-PARTITIONBY mode: Writer.commit() already maintains the master lock via
-      // indexManager.update(), so skip the redundant cloud write.
-      safeOffsetHighWatermarks.put(topicPartition, globalSafeOffset)
-    }
+      val firstBufferedOffsets = tpWriters.flatMap(_.getFirstBufferedOffset)
+      val committedOffsets     = tpWriters.flatMap(_.getCommittedOffset)
 
-    Some(new OffsetAndMetadata(
-      globalSafeOffset,
-      offsetAndMetadata.leaderEpoch(),
-      offsetAndMetadata.metadata(),
-    ))
+      // Operator-facing signal: how many writers are currently holding the safe-offset
+      // barrier (i.e. have buffered but uncommitted data). Under selective commit the
+      // BarrierSet is unchanged from before — every active writer on the TP still bounds
+      // `globalSafeOffset` — but the CommitSet is narrower, so the gauge tells operators
+      // which workloads are pinning consumer-lag growth and need `flush.interval` tuning.
+      metrics.setSafeOffsetBarrierWriters(firstBufferedOffsets.size)
+
+      if (committedOffsets.isEmpty) {
+        None
+      } else {
+        val calculatedSafeOffset =
+          if (firstBufferedOffsets.nonEmpty) {
+            firstBufferedOffsets.map(_.value).min
+          } else {
+            committedOffsets.map(_.value).max + 1
+          }
+
+        // HWM re-seed after `cleanUp(tp)`: the lazy-seed expression combines the durable
+        // master-lock floor with `lastReturnedSafeOffset(tp)`.
+        //
+        // The first term anchors recovery across the ownership-episode boundary.
+        //
+        // The second term's role differs by mode:
+        //  - Non-PARTITIONBY (load-bearing): `preCommit` and `Writer.commit()` advance
+        //    `lastReturned` and `seekedOffsets(tp)` on independent schedules. After a
+        //    `cleanUp(tp)`, `lastReturned` can sit ahead of `durableFloor + 1`, so this
+        //    term is what prevents returning a lower offset than Kafka Connect was already told.
+        //  - PARTITIONBY (defensive): `IndexManagerV2.updateMasterLock` updates `seekedOffsets(tp)`
+        //    atomically on each successful write, so `durableFloor + 1 == lastReturned` in
+        //    production. The `lastReturned` term is redundant in value today but is the safety
+        //    net if a future `IndexManager` implementation decouples the two.
+        //
+        // Both terms must be evaluated together regardless; branching on mode or on whether
+        // `cleanUp(tp)` recently ran would let a future refactor silently drop the guard.
+        val previousHighWatermark = safeOffsetHighWatermarks.getOrElseUpdate(
+          topicPartition,
+          math.max(
+            indexManager.getSeekedOffsetForTopicPartition(topicPartition).map(_.value + 1).getOrElse(0L),
+            lastReturnedSafeOffset.getOrElse(topicPartition, 0L),
+          ),
+        )
+        val globalSafeOffset = math.max(calculatedSafeOffset, previousHighWatermark)
+
+        // Defensive invariants: today these are guaranteed by the math.max above, but a require()
+        // here means any future refactor that drops or reorders the max will fail fast in CI
+        // rather than silently regressing the globalSafeOffset and risking data loss.
+        require(
+          globalSafeOffset >= previousHighWatermark,
+          s"globalSafeOffset regression for $topicPartition: $globalSafeOffset < previousHWM $previousHighWatermark",
+        )
+        require(
+          globalSafeOffset >= calculatedSafeOffset,
+          s"globalSafeOffset below calculated floor for $topicPartition: $globalSafeOffset < $calculatedSafeOffset",
+        )
+
+        val hasPartitionByWriters =
+          writers.keys.exists(k => k.topicPartition == topicPartition && k.partitionValues.nonEmpty)
+
+        val shouldReturnOffset: Boolean =
+          if (hasPartitionByWriters) {
+            // PARTITIONBY mode: classify the cycle (Skip / WriteRoutine / WriteForced) and let the
+            // helper drive the master-lock write decision. The helper reads the just-computed
+            // `globalSafeOffset` from a single local and reuses it for both the `updateMasterLock`
+            // call and the post-success GC call (same-value GC threshold invariant).
+            val lastWritten = currentLastWrittenMaster(topicPartition)
+            val dirty       = globalSafeOffset > lastWritten
+
+            // Dirty-window-cycle counter: incremented every cycle that observes a dirty TP on
+            // entry (whether or not the cycle's write succeeds). Under the dirty-flag gate's
+            // success path this fires at most once per advance; sustained non-zero values
+            // indicate `updateMasterLock` is failing across multiple retries.
+            if (dirty) metrics.incrementMasterLockDirtyWindowCycle()
+
+            val decision: WriteDecision =
+              if (forceWriteAfterCleanUp.contains(topicPartition))
+                WriteDecision.WriteForced(ForcedWriteReason.PostCleanUp)
+              else if (dirty) WriteDecision.WriteRoutine
+              else WriteDecision.Skip
+
+            decision match {
+              case WriteDecision.Skip =>
+                // Structural invariant: on the Skip branch under the dirty-flag-only gate,
+                // `globalSafeOffset == lastWritten` (no advance to persist). The `require` pins this
+                // so a future refactor that loosens the gate (e.g. adds a delta threshold) fails
+                // fast in CI before it can silently change HWM-advance, GC-threshold, or
+                // dirty-window semantics elsewhere in the design.
+                require(
+                  globalSafeOffset == lastWritten,
+                  s"Skip branch invariant violated for $topicPartition: globalSafeOffset=$globalSafeOffset, " +
+                    s"lastWritten=$lastWritten — the dirty-flag gate requires equality here.",
+                )
+                metrics.incrementMasterLockWriteSkipped()
+                // HWM and lastReturned still advance (no-op in value terms on this branch, but
+                // structurally identical to the success branch so the code paths cannot drift).
+                safeOffsetHighWatermarks.put(topicPartition, globalSafeOffset)
+                advanceLastReturned(topicPartition, globalSafeOffset)
+                logger.debug(
+                  s"[${connectorTaskId.show}] Master-lock write skipped for $topicPartition: " +
+                    s"globalSafeOffset=$globalSafeOffset already persisted.",
+                )
+                true
+
+              case WriteDecision.WriteRoutine =>
+                attemptMasterLockWrite(topicPartition, globalSafeOffset, forcedReason = None)
+
+              case WriteDecision.WriteForced(reason) =>
+                // Clear the post-cleanUp force flag *before* attempting the write so a failure
+                // still leaves the routine dirty-flag gate as the next-cycle re-entry path
+                // — if the forced write fails the dirty bit stays true, no GC runs, and the
+                // next eligible cycle re-attempts.
+                if (reason == ForcedWriteReason.PostCleanUp) forceWriteAfterCleanUp.remove(topicPartition)
+                attemptMasterLockWrite(topicPartition, globalSafeOffset, forcedReason = Some(reason))
+            }
+          } else {
+            // Non-PARTITIONBY mode: Writer.commit() already maintains the master lock via
+            // indexManager.update(), so skip the redundant cloud write. HWM and lastReturned
+            // still advance — this is the equivalent of the Skip branch for non-PARTITIONBY
+            // mode (Writer.commit() is the master-lock authority, so preCommit only advances
+            // in-memory state here).
+            safeOffsetHighWatermarks.put(topicPartition, globalSafeOffset)
+            advanceLastReturned(topicPartition, globalSafeOffset)
+            // Defensive: `cleanUp(tp)` sets `forceWriteAfterCleanUp(tp)` unconditionally, but only
+            // the PARTITIONBY branch above consumes it. Connector mode is fixed at runtime, so a
+            // mode flip within a single ownership episode is not expected — clearing the flag
+            // here is a belt-and-braces guard so a future refactor that introduces a mixed mode
+            // cannot leave a stale flag pinned across cycles. In non-PARTITIONBY mode the force
+            // point is a no-op (master lock is maintained inside Writer.commit()), so clearing
+            // the flag here is safe.
+            forceWriteAfterCleanUp.remove(topicPartition)
+            true
+          }
+
+        if (shouldReturnOffset)
+          Some(new OffsetAndMetadata(
+            globalSafeOffset,
+            offsetAndMetadata.leaderEpoch(),
+            offsetAndMetadata.metadata(),
+          ))
+        else
+          None
+      }
+    }
+  }
+
+  /**
+   * Attempt a single `updateMasterLock` write (routine or forced) for the given TP and
+   * `globalSafeOffset`. Returns `true` if the write succeeded (and the caller may return an
+   * advancing offset to Kafka Connect), `false` if the write failed (caller must return
+   * `None` for the TP).
+   *
+   * On success: increment the appropriate counter (routine `masterLockUpdates`, or
+   * `masterLockWriteForced(reason)`), advance `safeOffsetHighWatermarks(tp)`,
+   * `lastReturnedSafeOffset(tp)`, and `lastWrittenMasterSafeOffset(tp)`, then run
+   * `cleanUpObsoleteLocks` against the *same* just-persisted value (same-value GC threshold
+   * invariant — `globalSafeOffset` is read into a single local and reused for both calls).
+   *
+   * On failure: increment `masterLockFailures`, log, and return `false`. Do not touch any
+   * of the new state fields — the dirty bit stays true (computed) for the next retry, and
+   * the orphan-sweep threshold (`seekedOffsets(tp)`) stays pinned to the durable floor.
+   */
+  private def attemptMasterLockWrite(
+    topicPartition:   TopicPartition,
+    globalSafeOffset: Long,
+    forcedReason:     Option[ForcedWriteReason],
+  ): Boolean = {
+    // Defensive entry invariant — matches the monotonic-max math in `getOffsetAndMeta`
+    // (lines 526–533 and 565–569). Every call site classifies the cycle via the WriteDecision
+    // helper, which only routes to `WriteRoutine` / `WriteForced` when the value can validly
+    // be written. A future refactor that introduces a non-monotonic call site (e.g. forcing a
+    // write with a stale local) would fail loudly here rather than driving
+    // `cleanUpObsoleteLocks` past still-needed granular locks and silently regressing the
+    // exactly-once dedup floor.
+    val priorLastWritten = currentLastWrittenMaster(topicPartition)
+    require(
+      globalSafeOffset >= priorLastWritten,
+      s"attemptMasterLockWrite invariant violated for $topicPartition: " +
+        s"globalSafeOffset=$globalSafeOffset < lastWritten=$priorLastWritten — " +
+        s"writing a regression would drive same-value GC past locks the next owner needs.",
+    )
+    forcedReason.foreach(metrics.incrementMasterLockWriteForced)
+    indexManager.updateMasterLock(topicPartition, Offset(globalSafeOffset)) match {
+      case Left(err) =>
+        metrics.incrementMasterLockFailures()
+        logger.error(
+          s"[${connectorTaskId.show}] Master lock update failed for $topicPartition " +
+            s"(forced=${forcedReason.map(_.toString).getOrElse("no")}): ${err.message()}. " +
+            s"Returning no offset to prevent consumer advance.",
+        )
+        false
+      case Right(_) =>
+        // `masterLockUpdates` is the universal "writes that succeeded" counter — incremented on
+        // every successful eTag-conditional persistence regardless of routine vs. forced. Forced
+        // writes additionally incremented `masterLockWriteForced(reason)` at the top of this
+        // method so operators can break the success rate down by reason.
+        metrics.incrementMasterLockUpdates()
+        safeOffsetHighWatermarks.put(topicPartition, globalSafeOffset)
+        advanceLastReturned(topicPartition, globalSafeOffset)
+        lastWrittenMasterSafeOffset.put(topicPartition, globalSafeOffset)
+        logger.debug(
+          s"[${connectorTaskId.show}] Updated master lock for $topicPartition with globalSafeOffset=$globalSafeOffset" +
+            forcedReason.map(r => s" (forced=$r)").getOrElse(""),
+        )
+        val activePartitionKeys: Set[String] = writers
+          .filter { case (key, _) => key.topicPartition == topicPartition }
+          .keys
+          .flatMap(key => WriterManager.derivePartitionKey(key.partitionValues))
+          .toSet
+        // Same-value GC threshold: pass the *just-persisted* `globalSafeOffset` local.
+        indexManager.cleanUpObsoleteLocks(topicPartition, Offset(globalSafeOffset), activePartitionKeys) match {
+          case Left(err) =>
+            logger.warn(s"[${connectorTaskId.show}] Best-effort GC failed for $topicPartition: ${err.message()}")
+          case Right(_) =>
+        }
+        true
+    }
+  }
+
+  /**
+   * Monotonic-max update of `lastReturnedSafeOffset(tp)`. The map stores the highest
+   * `globalSafeOffset` ever returned to Kafka Connect for the TP within the current
+   * ownership episode. Lifecycle table invariant: this field NEVER moves backwards.
+   *
+   * Role: load-bearing in non-PARTITIONBY mode (where `preCommit` and `Writer.commit()`
+   * advance `lastReturned` and `seekedOffsets(tp)` on independent schedules, so `lastReturned`
+   * can sit ahead of `durableFloor + 1` between flushes); defensive in PARTITIONBY mode
+   * (where `IndexManagerV2.updateMasterLock` keeps `seekedOffsets(tp)` in lockstep with
+   * successful writes, making the two terms in `max(durableFloor + 1, lastReturned)` equal
+   * in production — the field is the safety net against a future `IndexManager` implementation
+   * that decouples the two).
+   *
+   * Structural call-ordering invariant (pinned by `require`): every advance MUST be
+   * immediately preceded by a `safeOffsetHighWatermarks.put(tp, globalSafeOffset)` for
+   * the same value. The two fields are intended to advance in lockstep — `HWM(tp)` is
+   * the in-memory monotonicity defence within the current ownership episode,
+   * `lastReturnedSafeOffset(tp)` is the cross-`cleanUp(tp)` survivor used to re-seed
+   * the HWM after rollback. The `close()` bulk-clear safety argument depends on
+   * `lastReturned(tp) == HWM(tp)` at every advance — a future refactor that introduces
+   * a call site that advances `lastReturned` without first advancing `HWM` would
+   * silently break the invariant the bulk-clear comment relies on.
+   */
+  private def advanceLastReturned(topicPartition: TopicPartition, globalSafeOffset: Long): Unit = {
+    require(
+      safeOffsetHighWatermarks.get(topicPartition).contains(globalSafeOffset),
+      s"advanceLastReturned must follow safeOffsetHighWatermarks.put for $topicPartition: " +
+        s"globalSafeOffset=$globalSafeOffset, HWM=${safeOffsetHighWatermarks.get(topicPartition)} — " +
+        s"the two fields must advance in lockstep so the close() bulk-clear safety argument " +
+        s"(lastReturned(tp) <= durableFloor(tp) + 1) survives any future refactor.",
+    )
+    val previous = lastReturnedSafeOffset.getOrElse(topicPartition, 0L)
+    if (globalSafeOffset > previous) {
+      val _ = lastReturnedSafeOffset.put(topicPartition, globalSafeOffset)
+    }
   }
 
   def cleanUp(topicPartition: TopicPartition): Unit = {
@@ -372,6 +816,27 @@ class WriterManager[SM <: FileMetadata](
       writers.remove(key)
     }
     safeOffsetHighWatermarks.remove(topicPartition)
+    // `cleanUp(tp)` must preserve `lastReturnedSafeOffset(tp)`.
+    //
+    // PARTITIONBY mode (defensive): `IndexManagerV2.updateMasterLock` updates `seekedOffsets(tp)`
+    // atomically with each successful write, so `durableFloor + 1 == lastReturned` in production
+    // after every successful cycle. In that steady state the `lastReturned` term in the HWM
+    // re-seed `max(durableFloor + 1, lastReturned)` is redundant in value. It is kept because
+    // the `IndexManager` trait does NOT enforce the lockstep contract — a future implementation
+    // that decouples `updateMasterLock` from `seekedOffsets` would silently break post-`cleanUp`
+    // monotonicity without it. Preserving the field is the safety net against that drift.
+    //
+    // Non-PARTITIONBY mode (load-bearing): `Writer.commit()` (via `indexManager.update(...)`)
+    // and `preCommit` advance `seekedOffsets(tp)` and `lastReturned` on independent schedules.
+    // Between flushes `lastReturned` sits ahead of `durableFloor + 1`, so the HWM re-seed
+    // `max(durableFloor + 1, lastReturned)` genuinely needs the `lastReturned` term to prevent
+    // returning a lower offset to Kafka Connect than this task already returned. The
+    // post-cleanup `preCommit` does NOT invoke a forced master-lock write in this mode (the
+    // `getOffsetAndMeta` non-PARTITIONBY branch clears `forceWriteAfterCleanUp(tp)` and
+    // advances HWM only); `lastReturnedSafeOffset(tp)` is the sole surviving record of what
+    // was previously told to Kafka and is consumed directly by the monotonic HWM seed.
+    lastWrittenMasterSafeOffset.remove(topicPartition)
+    forceWriteAfterCleanUp.add(topicPartition)
     // Evict the granular lock cache so a fresh writer for this partition reloads its
     // dedup floor from storage rather than reading stale cached offsets.
     indexManager.evictAllGranularLocks(topicPartition)
