@@ -64,6 +64,24 @@ private[writer] object WriteDecision {
 }
 
 /**
+ * Observable outcome of a best-effort force master-lock write executed during
+ * `closePartition` (revoke / stop / post-cleanUp lifecycle points).
+ *
+ *  - `NotNeeded` : no committed offsets yet, no PARTITIONBY writers, or dirty flag was false.
+ *                  The durable master-lock floor is already authoritative; nothing to do.
+ *  - `Succeeded` : `updateMasterLock` returned `Right(_)`. Durable floor advanced.
+ *  - `Failed`    : `updateMasterLock` returned `Left(err)`. Next owner replays from older floor.
+ *  - `Threw`     : `updateMasterLock` threw a `NonFatal` exception. Same replay fallback applies.
+ */
+private[writer] sealed trait ForceWriteOutcome
+private[writer] object ForceWriteOutcome {
+  case object NotNeeded extends ForceWriteOutcome
+  case object Succeeded extends ForceWriteOutcome
+  final case class Failed(reason: String) extends ForceWriteOutcome
+  final case class Threw(t: Throwable) extends ForceWriteOutcome
+}
+
+/**
  * Manages the lifecycle of [[Writer]] instances.
  *
  * A given sink may be writing to multiple locations (partitions), and therefore
@@ -90,7 +108,7 @@ class WriterManager[SM <: FileMetadata](
   connectorTaskId: ConnectorTaskId,
 ) extends StrictLogging {
 
-  private val writers = mutable.LinkedHashMap.empty[MapKey, Writer[SM]]
+  private val writers             = mutable.LinkedHashMap.empty[MapKey, Writer[SM]]
   private val writerCommitManager = new WriterCommitManager[SM](() => writers.toMap, metrics)
 
   // Highest globalSafeOffset ever reported to Kafka Connect per TP. Prevents regression on
@@ -132,18 +150,29 @@ class WriterManager[SM <: FileMetadata](
    */
   private def closePartition(topicPartition: TopicPartition, reason: ForcedWriteReason): Unit = {
     val tpWriters = writersForTopicPartition(topicPartition)
-    // Defensive wrap: state clear, writer close, and cache eviction below must always run.
+    // Defensive wrap: state clear, writer close, and cache eviction below must always run
+    // regardless of the forced-write outcome.
     if (tpWriters.nonEmpty) {
-      try {
-        attemptForceMasterLockWrite(topicPartition, tpWriters, reason)
-      } catch {
-        case NonFatal(t) =>
-          logger.warn(
-            s"[${connectorTaskId.show}] Force-${reason} master-lock write threw unexpectedly for " +
-              s"$topicPartition; proceeding with state cleanup. The next owner / restart will replay " +
-              s"from the durable master floor (deduplicated by granular locks).",
-            t,
-          )
+      val outcome: ForceWriteOutcome =
+        try {
+          attemptForceMasterLockWrite(topicPartition, tpWriters, reason)
+        } catch {
+          case NonFatal(t) =>
+            logger.warn(
+              s"[${connectorTaskId.show}] Force-${reason} master-lock write threw unexpectedly for " +
+                s"$topicPartition; proceeding with state cleanup. The next owner / restart will replay " +
+                s"from the durable master floor (deduplicated by granular locks).",
+              t,
+            )
+            ForceWriteOutcome.Threw(t)
+        }
+      outcome match {
+        case ForceWriteOutcome.Threw(_) =>
+          // Left(err) failures are already counted inside attemptForceMasterLockWrite.
+          // Unexpected throws are not, so we increment both counters here.
+          metrics.incrementMasterLockFailures()
+          metrics.incrementMasterLockWriteForcedFailure(reason)
+        case _ =>
       }
     }
     safeOffsetHighWatermarks.remove(topicPartition)
@@ -167,13 +196,14 @@ class WriterManager[SM <: FileMetadata](
   /**
    * Best-effort force write of the master lock for `topicPartition`. Computes `globalSafeOffset`
    * from the current writers + HWM and calls `updateMasterLock` once if `dirtyMasterLock(tp)` is
-   * true. Failure is non-fatal; the next owner replays from the durable floor.
+   * true. Returns a [[ForceWriteOutcome]] that the caller uses to drive observability. Failure is
+   * non-fatal; the next owner replays from the durable floor (deduplicated by granular locks).
    */
   private def attemptForceMasterLockWrite(
     topicPartition: TopicPartition,
     tpWriters:      Seq[Writer[SM]],
     reason:         ForcedWriteReason,
-  ): Unit = {
+  ): ForceWriteOutcome = {
     val firstBufferedOffsets = tpWriters.flatMap(_.getFirstBufferedOffset)
     val committedOffsets     = tpWriters.flatMap(_.getCommittedOffset)
     if (committedOffsets.isEmpty) {
@@ -182,6 +212,7 @@ class WriterManager[SM <: FileMetadata](
         s"[${connectorTaskId.show}] Force-${reason} skipped for $topicPartition: " +
           s"no committed offsets (writers have not yet flushed); durable master-lock floor is authoritative.",
       )
+      ForceWriteOutcome.NotNeeded
     } else {
       val calculatedSafeOffset =
         if (firstBufferedOffsets.nonEmpty) firstBufferedOffsets.map(_.value).min
@@ -199,11 +230,13 @@ class WriterManager[SM <: FileMetadata](
         indexManager.updateMasterLock(topicPartition, Offset(globalSafeOffset)) match {
           case Left(err) =>
             metrics.incrementMasterLockFailures()
+            metrics.incrementMasterLockWriteForcedFailure(reason)
             logger.warn(
               s"[${connectorTaskId.show}] Force-${reason} updateMasterLock failed for $topicPartition: " +
                 s"${err.message()} — proceeding without forced persistence. The next owner / restart will " +
                 s"replay from the older durable master floor (deduplicated by granular locks).",
             )
+            ForceWriteOutcome.Failed(err.message())
           case Right(_) =>
             metrics.incrementMasterLockUpdates()
             lastWrittenMasterSafeOffset.put(topicPartition, globalSafeOffset)
@@ -220,14 +253,18 @@ class WriterManager[SM <: FileMetadata](
                 )
               case Right(_) =>
             }
+            ForceWriteOutcome.Succeeded
         }
       } else if (hasPartitionByWriters) {
         logger.debug(
           s"[${connectorTaskId.show}] Force-${reason} skipped for $topicPartition: " +
             s"globalSafeOffset=$globalSafeOffset already persisted (lastWritten=$lastWritten).",
         )
+        ForceWriteOutcome.NotNeeded
+      } else {
+        // Non-PARTITIONBY — master lock is managed inside Writer.commit(); nothing to force here.
+        ForceWriteOutcome.NotNeeded
       }
-      // else: non-PARTITIONBY — master lock is managed inside Writer.commit(); nothing to force here.
     }
   }
 

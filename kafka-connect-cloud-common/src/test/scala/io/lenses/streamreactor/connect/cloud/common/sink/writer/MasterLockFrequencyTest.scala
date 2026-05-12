@@ -167,7 +167,9 @@ class MasterLockFrequencyTest
     Map(tp -> new OffsetAndMetadata(offset))
 
   // ── Duplicate-write skipping (no-op gate) ──────────────────────────────────────────
-  test("Duplicate-write skipping: N identical preCommit cycles on an idle PARTITIONBY TP produce exactly one master-lock write") {
+  test(
+    "Duplicate-write skipping: N identical preCommit cycles on an idle PARTITIONBY TP produce exactly one master-lock write",
+  ) {
     // The dirty-flag alone deduplicates exact-duplicate writes. After the first cycle
     // establishes the master-lock floor, subsequent idle cycles must skip the write while
     // still returning the same safe offset to Kafka Connect.
@@ -180,7 +182,7 @@ class MasterLockFrequencyTest
     val wm      = buildWriterManager(indexManager, metrics)
     wm.putWriter(MapKey(tp0, dateA), makeIdleWriter(tp0, Some(Offset(50))))
 
-    val cycles = 5
+    val cycles  = 5
     val results = (1 to cycles).map(_ => wm.preCommit(currentOffsets(tp0, 200))(tp0).offset())
 
     // Every cycle returns the same safe offset (no advancement to Kafka).
@@ -236,7 +238,9 @@ class MasterLockFrequencyTest
   }
 
   // ── No-data-loss across a multi-cycle failed master-lock write ─────────────────────
-  test("No data loss: HWM and lastWritten do not advance across K failed master-lock writes, GC never runs on failed cycles") {
+  test(
+    "No data loss: HWM and lastWritten do not advance across K failed master-lock writes, GC never runs on failed cycles",
+  ) {
     val indexManager = mock[IndexManager]
     when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(None)
     when(indexManager.cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])).thenReturn(Right(()))
@@ -294,6 +298,8 @@ class MasterLockFrequencyTest
     // Force-on-revoke metric was incremented (attempt was made).
     metrics.getMasterLockWriteForcedRevoke shouldBe 1L
     metrics.getMasterLockFailures shouldBe 1L
+    // Per-reason forced-failure counter: incremented alongside masterLockFailures on Left(err).
+    metrics.getMasterLockWriteForcedRevokeFailures shouldBe 1L
     // GC did NOT run on the failed forced write — granular locks above the durable floor
     // (51) survive for the next owner to dedup against.
     verify(indexManager, times(1)).cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])
@@ -417,7 +423,9 @@ class MasterLockFrequencyTest
   }
 
   // ── No-regression after cleanup when force-on-revoke earlier failed ───────────────
-  test("Force-after-cleanUp is one-shot: a failure clears the flag and falls back to dirty-flag retry on the next routine cycle") {
+  test(
+    "Force-after-cleanUp is one-shot: a failure clears the flag and falls back to dirty-flag retry on the next routine cycle",
+  ) {
     val indexManager = mock[IndexManager]
     when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(None)
     when(indexManager.cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])).thenReturn(Right(()))
@@ -513,7 +521,9 @@ class MasterLockFrequencyTest
   }
 
   // ── Granular-lock writes occur on every commit regardless of master-lock gating ──────
-  test("Granular-lock-per-commit independence: a skipped master-lock cycle still allows the next Writer.commit to write its granular lock") {
+  test(
+    "Granular-lock-per-commit independence: a skipped master-lock cycle still allows the next Writer.commit to write its granular lock",
+  ) {
     // The dirty-flag gate lives entirely inside `WriterManager.preCommit` and ONLY gates
     // `IndexManager.updateMasterLock`. Granular-lock writes go through a different code
     // path — `Writer.commit` -> `IndexManager.updateForPartitionKey` (PARTITIONBY) /
@@ -543,19 +553,23 @@ class MasterLockFrequencyTest
     (1 to 5).foreach(_ => wm.preCommit(currentOffsets(tp0, 200)))
     metrics.getMasterLockUpdates shouldBe 1L
     metrics.getMasterLockWriteSkipped shouldBe 4L
-    verify(indexManager, never).updateForPartitionKey(any[TopicPartition],
-                                                      any[String],
-                                                      any[Option[Offset]],
-                                                      any[Option[io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState]],
+    verify(indexManager, never).updateForPartitionKey(
+      any[TopicPartition],
+      any[String],
+      any[Option[Offset]],
+      any[Option[io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState]],
     )
-    verify(indexManager, never).update(any[TopicPartition],
-                                       any[Option[Offset]],
-                                       any[Option[io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState]],
+    verify(indexManager, never).update(
+      any[TopicPartition],
+      any[Option[Offset]],
+      any[Option[io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState]],
     )
   }
 
   // ── Buffered writer with min(firstBufferedOffset) bounds globalSafeOffset under the gate ──
-  test("Buffered writer at firstBufferedOffset bounds globalSafeOffset; idle siblings cannot push past the barrier under the dirty-flag gate") {
+  test(
+    "Buffered writer at firstBufferedOffset bounds globalSafeOffset; idle siblings cannot push past the barrier under the dirty-flag gate",
+  ) {
     val indexManager = mock[IndexManager]
     when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(None)
     when(indexManager.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
@@ -564,11 +578,8 @@ class MasterLockFrequencyTest
     val metrics = new CloudSinkMetrics()
     val wm      = buildWriterManager(indexManager, metrics)
 
-    val bufWriter = makeWritingWriter(tp0,
-                                      committedOffset     = None,
-                                      firstBufferedOffset = Offset(100),
-                                      uncommittedOffset   = Offset(104),
-    )
+    val bufWriter =
+      makeWritingWriter(tp0, committedOffset = None, firstBufferedOffset = Offset(100), uncommittedOffset = Offset(104))
     val idleSibling = makeIdleWriter(tp0, Some(Offset(105)))
     wm.putWriter(MapKey(tp0, dateA), bufWriter)
     wm.putWriter(MapKey(tp0, dateB), idleSibling)
@@ -584,8 +595,61 @@ class MasterLockFrequencyTest
     metrics.getMasterLockUpdates shouldBe 1L
   }
 
+  // ── Force-on-revoke unexpected NonFatal throw: cleanup still runs, failure metric increments ──
+  test(
+    "Force-on-revoke unexpected throw: wm.close() does not propagate; cleanup runs; forced-failure metric increments",
+  ) {
+    // This test covers the NonFatal catch path in closePartition. When updateMasterLock
+    // throws (rather than returning Left), the throw must be swallowed, cleanup must
+    // still run (writers closed, cache evicted, per-TP state cleared), and the new
+    // forced-failure counter (not just the aggregate masterLockFailures) must increment.
+    val indexManager = mock[IndexManager]
+    when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(None)
+    when(indexManager.cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])).thenReturn(Right(()))
+
+    // Cycle 1: routine write succeeds, establishing lastWritten = 51.
+    when(indexManager.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
+    val metrics = new CloudSinkMetrics()
+    val wm      = buildWriterManager(indexManager, metrics)
+    wm.putWriter(MapKey(tp0, dateA), makeIdleWriter(tp0, Some(Offset(50))))
+    wm.preCommit(currentOffsets(tp0, 200))(tp0).offset() shouldBe 51L
+    metrics.getMasterLockUpdates shouldBe 1L
+
+    // Add higher-offset writer without a preCommit: dirty flag is true on close.
+    val writerHigh = makeIdleWriter(tp0, Some(Offset(105)))
+    wm.putWriter(MapKey(tp0, dateA), writerHigh)
+
+    // Force-on-revoke: updateMasterLock throws a NonFatal exception instead of returning Left.
+    when(indexManager.updateMasterLock(any[TopicPartition], any[Offset]))
+      .thenThrow(new RuntimeException("unexpected storage exception"))
+
+    // wm.close() must not propagate the exception.
+    noException should be thrownBy wm.close()
+
+    // Forced-attempt counter is incremented inside attemptForceMasterLockWrite BEFORE the
+    // throw, so the attempt is still visible on the metric.
+    metrics.getMasterLockWriteForcedRevoke shouldBe 1L
+    // The new forced-failure counter and the aggregate failure counter are incremented by
+    // the NonFatal catch in closePartition (NOT inside attemptForceMasterLockWrite, which
+    // exited via throw before reaching the Left branch).
+    metrics.getMasterLockWriteForcedRevokeFailures shouldBe 1L
+    metrics.getMasterLockFailures shouldBe 1L
+    // Cycle 1 routine success only — the throw did NOT falsely increment masterLockUpdates.
+    metrics.getMasterLockUpdates shouldBe 1L
+
+    // Cleanup contract: writer close, per-TP state clear, and cache eviction must all
+    // run even when the forced write threw.
+    wm.writerCount shouldBe 0
+    verify(indexManager).evictAllGranularLocks(tp0)
+
+    // GC ran exactly once (cycle 1 routine write success only — not on the throw path).
+    verify(indexManager, times(1)).cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])
+  }
+
   // ── cleanUp(tp) → close() interleaving: leaked state is fully cleared ──────────────
-  test("close() bulk-clears per-TP state for cleanUp-then-close interleaving so the next ownership episode starts fresh") {
+  test(
+    "close() bulk-clears per-TP state for cleanUp-then-close interleaving so the next ownership episode starts fresh",
+  ) {
     // Scenario: cleanUp(tp) runs after a fatal error (preserves lastReturnedSafeOffset and
     // sets forceWriteAfterCleanUp), but before any new writer is created the task is
     // rebalanced (close() called). Without the defensive bulk clear the leaked entries
@@ -618,7 +682,7 @@ class MasterLockFrequencyTest
     when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(None)
     wm.putWriter(MapKey(tp0, dateA), makeIdleWriter(tp0, Some(Offset(5))))
 
-    val result  = wm.preCommit(currentOffsets(tp0, 200))
+    val result = wm.preCommit(currentOffsets(tp0, 200))
     // Without the bulk clear: HWM re-seeds to max(durableFloor+1=0, lastReturned=51) = 51,
     // and WriteForced(PostCleanUp) fires at 51. With the bulk clear: both leaked entries
     // are gone, so HWM re-seeds to max(0, 0) = 0, calculatedSafeOffset=6 wins, and the

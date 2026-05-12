@@ -157,6 +157,27 @@ trait CloudSinkMetricsMBean {
   def getMasterLockWriteForcedPostCleanUp: Long
 
   /**
+   * Cumulative forced `WriteForced(Revoke)` write failures — a strict subset of
+   * [[getMasterLockFailures]]. Incremented for both an expected `Left(err)` return
+   * from `updateMasterLock` and an unexpected `NonFatal` throw on the forced path.
+   */
+  def getMasterLockWriteForcedRevokeFailures: Long
+
+  /**
+   * Cumulative forced `WriteForced(Stop)` write failures — a strict subset of
+   * [[getMasterLockFailures]]. Incremented for both an expected `Left(err)` return
+   * from `updateMasterLock` and an unexpected `NonFatal` throw on the forced path.
+   */
+  def getMasterLockWriteForcedStopFailures: Long
+
+  /**
+   * Cumulative forced `WriteForced(PostCleanUp)` write failures — a strict subset of
+   * [[getMasterLockFailures]]. Incremented for both an expected `Left(err)` return
+   * from `updateMasterLock` and an unexpected `NonFatal` throw on the forced path.
+   */
+  def getMasterLockWriteForcedPostCleanUpFailures: Long
+
+  /**
    * Cumulative `preCommit` cycles where the dirty flag was true on entry. At most one per
    * `globalSafeOffset` advance; sustained elevation indicates `updateMasterLock` failures
    * have widened the dirty window beyond a single cycle.
@@ -264,13 +285,16 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   private val gcDeleteFailures        = new LongAdder()
   private val gcDeleteRetries         = new LongAdder()
 
-  private val masterLockUpdates                = new LongAdder()
-  private val masterLockFailures               = new LongAdder()
-  private val masterLockWriteSkipped           = new LongAdder()
-  private val masterLockWriteForcedRevoke      = new LongAdder()
-  private val masterLockWriteForcedStop        = new LongAdder()
-  private val masterLockWriteForcedPostCleanUp = new LongAdder()
-  private val masterLockDirtyWindowCycles      = new LongAdder()
+  private val masterLockUpdates                        = new LongAdder()
+  private val masterLockFailures                       = new LongAdder()
+  private val masterLockWriteSkipped                   = new LongAdder()
+  private val masterLockWriteForcedRevoke              = new LongAdder()
+  private val masterLockWriteForcedStop                = new LongAdder()
+  private val masterLockWriteForcedPostCleanUp         = new LongAdder()
+  private val masterLockWriteForcedRevokeFailures      = new LongAdder()
+  private val masterLockWriteForcedStopFailures        = new LongAdder()
+  private val masterLockWriteForcedPostCleanUpFailures = new LongAdder()
+  private val masterLockDirtyWindowCycles              = new LongAdder()
 
   private val sweepRuns            = new LongAdder()
   private val sweepOrphansEnqueued = new LongAdder()
@@ -308,13 +332,16 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   override def getGcDeleteFailures:        Long = gcDeleteFailures.sum()
   override def getGcDeleteRetries:         Long = gcDeleteRetries.sum()
 
-  override def getMasterLockUpdates:                Long = masterLockUpdates.sum()
-  override def getMasterLockFailures:               Long = masterLockFailures.sum()
-  override def getMasterLockWriteSkipped:           Long = masterLockWriteSkipped.sum()
-  override def getMasterLockWriteForcedRevoke:      Long = masterLockWriteForcedRevoke.sum()
-  override def getMasterLockWriteForcedStop:        Long = masterLockWriteForcedStop.sum()
-  override def getMasterLockWriteForcedPostCleanUp: Long = masterLockWriteForcedPostCleanUp.sum()
-  override def getMasterLockDirtyWindowCycles:      Long = masterLockDirtyWindowCycles.sum()
+  override def getMasterLockUpdates:                        Long = masterLockUpdates.sum()
+  override def getMasterLockFailures:                       Long = masterLockFailures.sum()
+  override def getMasterLockWriteSkipped:                   Long = masterLockWriteSkipped.sum()
+  override def getMasterLockWriteForcedRevoke:              Long = masterLockWriteForcedRevoke.sum()
+  override def getMasterLockWriteForcedStop:                Long = masterLockWriteForcedStop.sum()
+  override def getMasterLockWriteForcedPostCleanUp:         Long = masterLockWriteForcedPostCleanUp.sum()
+  override def getMasterLockWriteForcedRevokeFailures:      Long = masterLockWriteForcedRevokeFailures.sum()
+  override def getMasterLockWriteForcedStopFailures:        Long = masterLockWriteForcedStopFailures.sum()
+  override def getMasterLockWriteForcedPostCleanUpFailures: Long = masterLockWriteForcedPostCleanUpFailures.sum()
+  override def getMasterLockDirtyWindowCycles:              Long = masterLockDirtyWindowCycles.sum()
 
   override def getSweepRuns:            Long = sweepRuns.sum()
   override def getSweepOrphansEnqueued: Long = sweepOrphansEnqueued.sum()
@@ -355,6 +382,12 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
     case ForcedWriteReason.Revoke      => masterLockWriteForcedRevoke.increment()
     case ForcedWriteReason.Stop        => masterLockWriteForcedStop.increment()
     case ForcedWriteReason.PostCleanUp => masterLockWriteForcedPostCleanUp.increment()
+  }
+
+  def incrementMasterLockWriteForcedFailure(reason: ForcedWriteReason): Unit = reason match {
+    case ForcedWriteReason.Revoke      => masterLockWriteForcedRevokeFailures.increment()
+    case ForcedWriteReason.Stop        => masterLockWriteForcedStopFailures.increment()
+    case ForcedWriteReason.PostCleanUp => masterLockWriteForcedPostCleanUpFailures.increment()
   }
 
   def incrementMasterLockDirtyWindowCycle(): Unit = masterLockDirtyWindowCycles.increment()

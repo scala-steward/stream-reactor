@@ -213,7 +213,7 @@ class WriterManagerZombieIntegrationTest
     val storage = new InMemoryStorageInterface()
     val metrics = new CloudSinkMetrics()
     val im      = buildIndexManager(storage)
-    im.open(Set(tp0)).value  // initialise master lock in storage, seed eTag cache
+    im.open(Set(tp0)).value // initialise master lock in storage, seed eTag cache
 
     val wm = buildWriterManager(im, storage, metrics)
 
@@ -228,7 +228,7 @@ class WriterManagerZombieIntegrationTest
     val fired = new AtomicBoolean(false)
     IndexManagerV2.IndexManagerV2TestHooks.installPreWriteMasterLockBarrier(
       im,
-      () => {
+      () =>
         if (fired.compareAndSet(false, true)) {
           val current = storage.getBlobAsString(bucket, masterLockPath).getOrElse(
             throw new AssertionError(s"zombie barrier: master lock missing at $bucket/$masterLockPath"),
@@ -238,8 +238,7 @@ class WriterManagerZombieIntegrationTest
             masterLockPath,
             UploadableString(current),
           ).left.foreach(err => throw new AssertionError(s"zombie barrier: external write failed: ${err.message()}"))
-        }
-      },
+        },
     )
 
     // Cycle 2 (zombie write): higher-offset writer; barrier fires mid-write → eTag mismatch.
@@ -247,10 +246,10 @@ class WriterManagerZombieIntegrationTest
     wm.putWriter(MapKey(tp0, dateA), writer2)
     try {
       val result2 = wm.preCommit(Map(tp0 -> new OffsetAndMetadata(500)))
-      result2.get(tp0) shouldBe None  // fenced: no advancing offset returned for tp0
+      result2.get(tp0) shouldBe None // fenced: no advancing offset returned for tp0
       fired.get() shouldBe true
       metrics.getMasterLockFailures shouldBe 1L
-      metrics.getMasterLockUpdates shouldBe 1L  // not incremented during the fenced cycle
+      metrics.getMasterLockUpdates shouldBe 1L // not incremented during the fenced cycle
     } finally {
       IndexManagerV2.IndexManagerV2TestHooks.clearPreWriteMasterLockBarrier(im)
     }
@@ -259,14 +258,14 @@ class WriterManagerZombieIntegrationTest
     // storage and seeds its eTag cache with the current value. The new task's preCommit
     // succeeds with K = max(committed) + 1 = 100.
     im.close()
-    val im2     = buildIndexManager(storage)
+    val im2 = buildIndexManager(storage)
     im2.open(Set(tp0)).value
     val metrics2 = new CloudSinkMetrics()
     val wm2      = buildWriterManager(im2, storage, metrics2)
     val writer3  = makeCommittedWriter(tp0, im2, storage, committedOffset = Some(Offset(99)))
     wm2.putWriter(MapKey(tp0, dateA), writer3)
     val result3 = wm2.preCommit(Map(tp0 -> new OffsetAndMetadata(500)))
-    result3(tp0).offset() shouldBe 100L  // K = max(committed) + 1 = 100
+    result3(tp0).offset() shouldBe 100L // K = max(committed) + 1 = 100
     metrics2.getMasterLockUpdates shouldBe 1L
 
     wm2.close()
@@ -303,14 +302,14 @@ class WriterManagerZombieIntegrationTest
       result.get(tp0) shouldBe None
     }
     metrics.getMasterLockFailures shouldBe 3L
-    metrics.getMasterLockUpdates shouldBe 1L  // only the first cycle's success
+    metrics.getMasterLockUpdates shouldBe 1L // only the first cycle's success
 
     // Recovery: all armed failures consumed, next cycle succeeds at K = 101 (same as the
     // first failed attempt — no HWM regression, no skip-ahead).
     val resultRecover = wm.preCommit(Map(tp0 -> new OffsetAndMetadata(200)))
     resultRecover(tp0).offset() shouldBe 101L
     metrics.getMasterLockUpdates shouldBe 2L
-    metrics.getMasterLockFailures shouldBe 3L  // no new failures
+    metrics.getMasterLockFailures shouldBe 3L // no new failures
 
     // GC threshold: the durable master lock now encodes committedOffset = K-1 = 100.
     // This is the same value passed to cleanUpObsoleteLocks (same-value invariant).
@@ -369,13 +368,98 @@ class WriterManagerZombieIntegrationTest
     // current). The Skip branch still returns 51 to Kafka Connect without writing again.
     val result3 = wm.preCommit(Map(tp0 -> new OffsetAndMetadata(200)))
     result3(tp0).offset() shouldBe 51L
-    metrics.getMasterLockWriteForcedPostCleanUp shouldBe 1L  // one-shot, not re-fired
-    metrics.getMasterLockUpdates shouldBe 1L                 // no redundant write on Skip
-    metrics.getMasterLockWriteSkipped shouldBe 1L            // Skip counter incremented
-    metrics.getMasterLockFailures shouldBe 1L                // no new failure
+    metrics.getMasterLockWriteForcedPostCleanUp shouldBe 1L // one-shot, not re-fired
+    metrics.getMasterLockUpdates shouldBe 1L                // no redundant write on Skip
+    metrics.getMasterLockWriteSkipped shouldBe 1L           // Skip counter incremented
+    metrics.getMasterLockFailures shouldBe 1L               // no new failure
 
     wm.close()
     im.close()
+  }
+
+  // ── (e) WriteForced(Revoke) failure: durable floor unchanged; fresh owner replays from older floor ──
+
+  test(
+    "Integrated force-on-revoke failure: durable floor unchanged; metrics tagged; fresh owner replays " +
+      "from older floor; master lock fences replay dedup; granular lock absent (falls back to master floor)",
+  ) {
+    // Shape:
+    //   Cycle 1 (routine write): committed=50 → K=51 persisted (durable floor = Offset(50)).
+    //   Add writer2 with committed=100 and skip preCommit: dirty=true on close.
+    //   Arm one FailWriteAt for the master-lock path.
+    //   wm.close(): force-on-revoke fires → updateMasterLock(Offset(101)) fails → durable floor stays at Offset(50).
+    //   Assert: metrics, writerCount==0 (cleanup ran), durable floor unchanged.
+    //   Assert: no granular lock file was written for dateA (makeCommittedWriter bypasses ensureGranularLock),
+    //     so getSeekedOffsetForPartitionKey returns Right(None) and the master floor is the sole dedup floor.
+    //   Reopen: fresh im2 reads Offset(50) from master lock.
+    //   Verify: fresh wm2 preCommit with committed=50 returns K=51 (older floor, not 101).
+    //   This demonstrates that a failed force-write does not lose the dedup guarantee:
+    //   records at offsets 0-50 are skipped by shouldSkip (master floor), and records 51-100
+    //   are correctly replayed without creating duplicates of the already-committed output.
+    val storage = new InMemoryStorageInterface()
+    val metrics = new CloudSinkMetrics()
+    val im      = buildIndexManager(storage)
+    im.open(Set(tp0)).value
+
+    val wm = buildWriterManager(im, storage, metrics)
+
+    // Cycle 1: routine write establishes lastWritten = 51 (committed offset 50 → K = 51).
+    val writer1 = makeCommittedWriter(tp0, im, storage, committedOffset = Some(Offset(50)))
+    wm.putWriter(MapKey(tp0, dateA), writer1)
+    wm.preCommit(Map(tp0 -> new OffsetAndMetadata(200)))(tp0).offset() shouldBe 51L
+    metrics.getMasterLockUpdates shouldBe 1L
+
+    // Add a higher-offset writer WITHOUT a preCommit between. The dirty bit is now true
+    // (globalSafeOffset = 101 > lastWritten = 51), so the close-path force-write fires.
+    val writer2 = makeCommittedWriter(tp0, im, storage, committedOffset = Some(Offset(100)))
+    wm.putWriter(MapKey(tp0, dateA), writer2)
+
+    // Arm exactly one master-lock write failure: the force-on-revoke will be fenced.
+    storage.arm(FailWriteAt(bucket, masterLockPath))
+
+    wm.close()
+
+    // Forced revoke was attempted but failed; aggregate failure counter also incremented.
+    metrics.getMasterLockWriteForcedRevoke shouldBe 1L
+    metrics.getMasterLockWriteForcedRevokeFailures shouldBe 1L
+    metrics.getMasterLockFailures shouldBe 1L
+    // Cycle 1 routine success; the failed force-write must NOT falsely increment masterLockUpdates.
+    metrics.getMasterLockUpdates shouldBe 1L
+
+    // Cleanup contract: writer close and cache eviction must still run despite the force failure.
+    wm.writerCount shouldBe 0
+
+    // Durable floor stays at Offset(50) — the force-write did not advance it.
+    im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(50))
+
+    // Granular lock: makeCommittedWriter + putWriter bypasses ensureGranularLock, so no
+    // granular lock file was written for dateA. The cache was evicted by closePartition.
+    // getSeekedOffsetForPartitionKey performs a storage read → FileNotFoundError → Right(None).
+    // In production the granular lock for the already-committed partition key would provide
+    // an additional per-key dedup floor; here the master lock floor is the sole fence.
+    val partitionKey = WriterManager.derivePartitionKey(dateA).get
+    im.getSeekedOffsetForPartitionKey(tp0, partitionKey).value shouldBe None
+
+    // Reopen: fresh IndexManagerV2 reads the master lock (Offset(50)) from storage.
+    im.close()
+    val im2      = buildIndexManager(storage)
+    val metrics2 = new CloudSinkMetrics()
+    im2.open(Set(tp0)).value
+    im2.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(50))
+
+    // Fresh owner recovers from the older durable floor (not the uncommitted K=101).
+    // Add a writer whose committedOffset matches the master floor (Offset(50)) to simulate
+    // the first replay cycle. preCommit must return K=51, confirming the floor seeds
+    // shouldSkip correctly: records 0-50 are deduped; 51-100 are re-committed.
+    val wm2     = buildWriterManager(im2, storage, metrics2)
+    val writer3 = makeCommittedWriter(tp0, im2, storage, committedOffset = Some(Offset(50)))
+    wm2.putWriter(MapKey(tp0, dateA), writer3)
+    val result3 = wm2.preCommit(Map(tp0 -> new OffsetAndMetadata(200)))
+    result3(tp0).offset() shouldBe 51L // older floor, not 101
+    metrics2.getMasterLockUpdates shouldBe 1L
+
+    wm2.close()
+    im2.close()
   }
 
   // ── (d) WriteForced(Revoke) success → durable floor advances ─────────────────────────

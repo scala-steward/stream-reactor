@@ -332,7 +332,7 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
 
     // Defensive: idempotent on the normal close-then-stop path. Uses `Stop` reason tag for metrics.
     Try(Option(writerManager).foreach(_.closeForStop())).failed.foreach { t =>
-      logger.warn(s"[$taskIdStr] writerManager.close() failed during stop()", t)
+      logger.warn(s"[$taskIdStr] writerManager.closeForStop() failed during stop()", t)
     }
     writerManager = null
 
