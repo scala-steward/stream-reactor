@@ -120,35 +120,11 @@ trait CloudSinkMetricsMBean {
   // --- Master lock ---
 
   /**
-   * Cumulative successful eTag-conditional master lock writes. Each success advances the
-   * consumer-committable offset (globalSafeOffset) for a Kafka partition.
-   *
-   * This is the UNIVERSAL success counter: every successful write — whether classified as
-   * `WriteRoutine` (dirty-flag gate admitted a normal cycle) or `WriteForced` (lifecycle
-   * force point at revoke / stop / post-`cleanUp`) — increments this counter. Forced writes
-   * ADDITIONALLY increment their per-reason attempt counter (`masterLockWriteForcedRevoke`,
-   * `masterLockWriteForcedStop`, or `masterLockWriteForcedPostCleanUp`).
-   *
-   * IMPORTANT — the per-reason `masterLockWriteForced*` counters track ATTEMPTS, not
-   * successes. A forced write that fails increments the per-reason counter but NOT this
-   * counter (because `masterLockUpdates` is a success-only counter). This means the
-   * decomposition below is exact only when all forced writes succeed. When forced writes
-   * can fail (transient cloud error, eTag mismatch on a rapid rebalance), use
-   * `masterLockFailures` to account for the difference:
-   *
-   *   forced_successes  = masterLockWriteForcedRevoke
-   *                       + masterLockWriteForcedStop
-   *                       + masterLockWriteForcedPostCleanUp
-   *                       - (forced_failures, not directly exposed — infer via masterLockFailures)
-   *   routine_successes ≈ masterLockUpdates - forced_successes
-   *
-   * For an exact split without inference: compare `masterLockUpdates` (all successes) with
-   * `masterLockFailures` (all failures, routine and forced combined) and the per-reason
-   * attempt counters.
-   *
-   * NOTE: do NOT aggregate as `masterLockUpdates + masterLockWriteForced*` — that would
-   * double-count every forced success, since forced writes increment BOTH this counter and
-   * their per-reason counter.
+   * Cumulative successful eTag-conditional master-lock writes (routine and forced combined).
+   * Forced writes additionally increment the per-reason `masterLockWriteForced*` counter;
+   * do NOT sum `masterLockUpdates + masterLockWriteForced*` — that double-counts forced
+   * successes. For decomposition formulas see docs/datalake-exactly-once-partitionby.md
+   * ("Master-Lock Write-Frequency Reduction and Metrics").
    */
   def getMasterLockUpdates: Long
 
@@ -160,53 +136,30 @@ trait CloudSinkMetricsMBean {
   def getMasterLockFailures: Long
 
   /**
-   * Cumulative count of `preCommit` cycles for PARTITIONBY topic-partitions where the
-   * dirty-flag gate suppressed the master-lock write because `globalSafeOffset` had not
-   * advanced beyond the last successfully persisted value. The cycle still returned the
-   * same safe offset to Kafka Connect (no cloud call was attempted). Operators read
-   * this counter alongside `masterLockUpdates` and `masterLockFailures` to verify that
-   * the dirty-flag gate is suppressing the writes they expect. The ratio
+   * Cumulative `preCommit` cycles where the dirty-flag gate suppressed the master-lock write
+   * (`globalSafeOffset` had not advanced). The ratio
    * `masterLockWriteSkipped / (masterLockWriteSkipped + masterLockUpdates + masterLockFailures)`
-   * is the direct measurement of the cost saving from the gate.
+   * measures the cost saving.
    */
   def getMasterLockWriteSkipped: Long
 
-  /**
-   * Cumulative count of master-lock writes attempted via the `WriteForced` classification
-   * triggered by a partition revocation / rebalance close. Forced writes still use the
-   * eTag-conditional path and may fail; this counter records only the attempt, mirroring
-   * `masterLockUpdates` / `masterLockFailures` for the post-success and post-failure paths.
-   */
+  /** Cumulative `WriteForced(Revoke)` attempts (partition revocation / rebalance). Records attempts, not successes. */
   def getMasterLockWriteForcedRevoke: Long
 
-  /**
-   * Cumulative count of master-lock writes attempted via the `WriteForced` classification
-   * triggered by task stop / shutdown. Best-effort and non-blocking: a transient or fencing
-   * failure here is acceptable and the next task instance reads the older durable master
-   * lock on restart.
-   */
+  /** Cumulative `WriteForced(Stop)` attempts (task stop / shutdown). Records attempts, not successes. */
   def getMasterLockWriteForcedStop: Long
 
   /**
-   * Cumulative count of master-lock writes attempted via the `WriteForced` classification
-   * triggered by the post-`cleanUp(tp)` (fatal rollback) re-entry. After the in-place
-   * rollback the next `preCommit` cycle for the still-owned partition forces a write to
-   * persist `globalSafeOffset`, computed as `max(durableMasterFloor + 1, lastReturnedSafeOffset(tp))`.
-   * In PARTITIONBY mode the two terms are equal in production (because `IndexManagerV2.updateMasterLock`
-   * keeps `seekedOffsets(tp)` in lockstep with each successful cloud write); in non-PARTITIONBY
-   * mode the `lastReturnedSafeOffset(tp)` term is load-bearing and can be strictly higher. The
-   * `max` exists as the defence against future `IndexManager` implementations that decouple the two.
+   * Cumulative `WriteForced(PostCleanUp)` attempts: the first `preCommit` after a `cleanUp(tp)`
+   * in-place rollback forces a write to persist `globalSafeOffset`. Records attempts, not
+   * successes. See docs/datalake-exactly-once-partitionby.md ("`lastReturnedSafeOffset` Role by Mode").
    */
   def getMasterLockWriteForcedPostCleanUp: Long
 
   /**
-   * Cumulative count of `preCommit` cycles that observed `dirtyMasterLock(tp) == true` on
-   * entry — i.e. cycles whose previously computed `globalSafeOffset` had not yet been
-   * persisted to the master lock. Under the dirty-flag gate's success path this equals at
-   * most one per advance; sustained non-zero values across many cycles indicate
-   * `updateMasterLock`
-   * is failing across multiple retries and the dirty window has widened beyond a single
-   * cycle.
+   * Cumulative `preCommit` cycles where the dirty flag was true on entry. At most one per
+   * `globalSafeOffset` advance; sustained elevation indicates `updateMasterLock` failures
+   * have widened the dirty window beyond a single cycle.
    */
   def getMasterLockDirtyWindowCycles: Long
 
@@ -396,21 +349,14 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   def incrementMasterLockUpdates():  Unit = masterLockUpdates.increment()
   def incrementMasterLockFailures(): Unit = masterLockFailures.increment()
 
-  /** Increment the skipped-write counter — a `preCommit` cycle whose dirty-flag gate suppressed the attempt. */
   def incrementMasterLockWriteSkipped(): Unit = masterLockWriteSkipped.increment()
 
-  /**
-   * Increment the forced-write counter for the corresponding lifecycle reason. The reason
-   * is a hard-coded enum (`Revoke`, `Stop`, `PostCleanUp`) chosen at the call site;
-   * a free-form tag would let the wrong reason leak into the metric stream .
-   */
   def incrementMasterLockWriteForced(reason: ForcedWriteReason): Unit = reason match {
     case ForcedWriteReason.Revoke      => masterLockWriteForcedRevoke.increment()
     case ForcedWriteReason.Stop        => masterLockWriteForcedStop.increment()
     case ForcedWriteReason.PostCleanUp => masterLockWriteForcedPostCleanUp.increment()
   }
 
-  /** Increment the dirty-window-cycle counter — incremented at the top of `preCommit` whenever `dirtyMasterLock(tp)` was already true. */
   def incrementMasterLockDirtyWindowCycle(): Unit = masterLockDirtyWindowCycles.increment()
 
   def incrementSweepRuns(): Unit = sweepRuns.increment()
