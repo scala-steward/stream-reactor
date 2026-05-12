@@ -449,14 +449,17 @@ class WriterManagerZombieIntegrationTest
 
     // Fresh owner recovers from the older durable floor (not the uncommitted K=101).
     // Add a writer whose committedOffset matches the master floor (Offset(50)) to simulate
-    // the first replay cycle. preCommit must return K=51, confirming the floor seeds
-    // shouldSkip correctly: records 0-50 are deduped; 51-100 are re-committed.
+    // the first replay cycle. preCommit must return K=51 via the Skip path: the durable
+    // master lock already encodes committedOffset=50 → lastWritten seeds to 51, which equals
+    // globalSafeOffset=51, so dirty=false → Skip (no redundant write). Records 0-50 are
+    // deduped by the master floor; records 51-100 are replayed without creating duplicates.
     val wm2     = buildWriterManager(im2, storage, metrics2)
     val writer3 = makeCommittedWriter(tp0, im2, storage, committedOffset = Some(Offset(50)))
     wm2.putWriter(MapKey(tp0, dateA), writer3)
     val result3 = wm2.preCommit(Map(tp0 -> new OffsetAndMetadata(200)))
     result3(tp0).offset() shouldBe 51L // older floor, not 101
-    metrics2.getMasterLockUpdates shouldBe 1L
+    metrics2.getMasterLockUpdates shouldBe 0L    // Skip path: durable floor already matches globalSafeOffset
+    metrics2.getMasterLockWriteSkipped shouldBe 1L // Skip counter incremented
 
     wm2.close()
     im2.close()
