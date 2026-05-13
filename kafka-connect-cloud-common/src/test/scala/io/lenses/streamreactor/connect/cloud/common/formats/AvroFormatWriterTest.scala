@@ -15,7 +15,10 @@
  */
 package io.lenses.streamreactor.connect.cloud.common.formats
 
+import io.lenses.streamreactor.connect.cloud.common.sink.NonFatalCloudSinkError
+import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
 import io.lenses.streamreactor.connect.cloud.common.stream.CloudByteArrayOutputStream
+import io.lenses.streamreactor.connect.cloud.common.stream.CloudOutputStream
 import io.lenses.streamreactor.connect.cloud.common.utils.SampleData
 import io.lenses.streamreactor.connect.cloud.common.utils.SampleData._
 import io.lenses.streamreactor.connect.cloud.common.formats.writer._
@@ -36,6 +39,8 @@ import org.scalatest.EitherValues
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.time.Instant
 import scala.jdk.CollectionConverters.MapHasAsJava
@@ -362,6 +367,45 @@ class AvroFormatWriterTest extends AnyFlatSpec with Matchers with EitherValues {
 
     genericRecords(0).asInstanceOf[ByteBuffer].array() should be("Sausages".getBytes())
     genericRecords(1).asInstanceOf[ByteBuffer].array() should be("Mash".getBytes())
+  }
+
+  "complete" should "call outputStream.complete() even when DataFileWriter.close() throws" in {
+    var completeCalled = 0
+
+    val throwingOnCloseStream: CloudOutputStream = new CloudOutputStream {
+      private val buf = new ByteArrayOutputStream()
+
+      override def write(b: Int): Unit = buf.write(b)
+      override def write(b: Array[Byte], off: Int, len: Int): Unit = buf.write(b, off, len)
+
+      override def close(): Unit = throw new IOException("simulated close failure")
+
+      override def complete(): Either[SinkError, Unit] = {
+        completeCalled += 1
+        Right(())
+      }
+
+      override def getPointer: Long = buf.size().toLong
+    }
+
+    val writer = new AvroFormatWriter(throwingOnCloseStream)
+    writer.write(
+      MessageDetail(
+        NullSinkData(None),
+        StructSinkData(SampleData.Users.head),
+        Map.empty,
+        Some(Instant.now()),
+        topic,
+        0,
+        Offset(0),
+      ),
+    )
+
+    val result = writer.complete()
+
+    result.isLeft shouldBe true
+    result.left.value shouldBe a[NonFatalCloudSinkError]
+    completeCalled shouldBe 1
   }
 
 }

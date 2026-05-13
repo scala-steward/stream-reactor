@@ -61,6 +61,27 @@ object DatalakeSinkConfigDef
         ConfigDef.Width.LONG,
         LOG_METRICS_CONFIG,
       )
+      .define(
+        UPLOAD_PARALLELISM,
+        Type.INT,
+        null,
+        Importance.LOW,
+        UPLOAD_PARALLELISM_DOC,
+      )
+      .define(
+        UPLOAD_BLOCK_SIZE_BYTES,
+        Type.LONG,
+        null,
+        Importance.LOW,
+        UPLOAD_BLOCK_SIZE_BYTES_DOC,
+      )
+      .define(
+        UPLOAD_MAX_SINGLE_UPLOAD_SIZE_BYTES,
+        Type.LONG,
+        null,
+        Importance.LOW,
+        UPLOAD_MAX_SINGLE_UPLOAD_SIZE_BYTES_DOC,
+      )
     addLocalStagingAreaToConfigDef(configDef)
     addPaddingToConfigDef(configDef)
     addIndexSettingsToConfigDef(configDef)

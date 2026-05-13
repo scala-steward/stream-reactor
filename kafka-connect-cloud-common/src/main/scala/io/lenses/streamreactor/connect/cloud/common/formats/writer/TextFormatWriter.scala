@@ -48,16 +48,14 @@ class TextFormatWriter(outputStream: CloudOutputStream) extends FormatWriter {
 
       outputStream.write(dataBytes)
       outputStream.write(LineSeparatorBytes)
-      outputStream.flush()
     }.toEither
 
   override def rolloverFileOnSchemaChange(): Boolean = false
 
   override def complete(): Either[SinkError, Unit] =
     for {
-      closed <- outputStream.complete()
       _      <- Suppress(outputStream.flush())
-      _      <- Suppress(outputStream.close())
+      closed <- outputStream.complete()
     } yield closed
 
   override def getPointer: Long = outputStream.getPointer
