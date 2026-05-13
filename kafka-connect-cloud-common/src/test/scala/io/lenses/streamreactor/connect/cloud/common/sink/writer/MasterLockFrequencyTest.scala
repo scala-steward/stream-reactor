@@ -385,6 +385,8 @@ class MasterLockFrequencyTest
     wm.preCommit(currentOffsets(tp0, 100)) shouldBe empty
     metrics.getMasterLockWriteForcedPostCleanUp shouldBe 1L
     metrics.getMasterLockFailures shouldBe 1L
+    // Per-reason failure counter must be incremented on the Left(err) path.
+    metrics.getMasterLockWriteForcedPostCleanUpFailures shouldBe 1L
 
     // Second post-cleanUp preCommit: still dirty (globalSafeOffset=81 > lastWritten=0
     // because lastWritten lazy seeds from the absent durable floor). WriteRoutine fires.
@@ -392,6 +394,8 @@ class MasterLockFrequencyTest
     wm.preCommit(currentOffsets(tp0, 100))(tp0).offset() shouldBe 81L
     // No second forced-write metric — this was a routine retry.
     metrics.getMasterLockWriteForcedPostCleanUp shouldBe 1L
+    // Per-reason failure counter stays at 1 — the retry succeeded.
+    metrics.getMasterLockWriteForcedPostCleanUpFailures shouldBe 1L
     // Two total successes (initial + retry).
     metrics.getMasterLockUpdates shouldBe 2L
   }

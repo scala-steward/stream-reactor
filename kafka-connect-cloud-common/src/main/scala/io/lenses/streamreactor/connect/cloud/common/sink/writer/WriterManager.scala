@@ -579,6 +579,7 @@ class WriterManager[SM <: FileMetadata](
     indexManager.updateMasterLock(topicPartition, Offset(globalSafeOffset)) match {
       case Left(err) =>
         metrics.incrementMasterLockFailures()
+        forcedReason.foreach(metrics.incrementMasterLockWriteForcedFailure)
         logger.error(
           s"[${connectorTaskId.show}] Master lock update failed for $topicPartition " +
             s"(forced=${forcedReason.map(_.toString).getOrElse("no")}): ${err.message()}. " +
