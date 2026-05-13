@@ -25,10 +25,6 @@ import org.apache.kafka.connect.data._
 import java.time.temporal.ChronoUnit
 import java.time.LocalDate
 import java.time.ZoneId
-import scala.jdk.CollectionConverters.ListHasAsScala
-import scala.jdk.CollectionConverters.MapHasAsJava
-import scala.jdk.CollectionConverters.MapHasAsScala
-import scala.jdk.CollectionConverters.SeqHasAsJava
 
 /**
  * Creates an envelope for the message detail. It is expected the Key and/or Value, if used to have a Connect schema attached.
@@ -123,7 +119,11 @@ object SchemalessEnvelopeTransformer {
     data match {
       case StructSinkData(struct)      => convertStruct(struct)
       case MapSinkData(map, _)         => convertMap(map)
-      case ArraySinkData(array, _)     => array.asScala.map(convert).asJava
+      case ArraySinkData(array, _) =>
+        val out = new java.util.ArrayList[Any](array.size())
+        val it  = array.iterator()
+        while (it.hasNext) out.add(convert(it.next().asInstanceOf[Any]))
+        out
       case ByteArraySinkData(array, _) => array
       case primitive: PrimitiveSinkData => primitive.value
       case _:         NullSinkData      => null
@@ -135,20 +135,34 @@ object SchemalessEnvelopeTransformer {
     }
 
   private def convertStruct(struct: Struct): java.util.Map[String, Any] = {
-    val map = new java.util.HashMap[String, Any]()
-    struct.schema().fields().asScala.foreach { field =>
+    val fields = struct.schema().fields()
+    val map    = new java.util.HashMap[String, Any](fields.size())
+    val it     = fields.iterator()
+    while (it.hasNext) {
+      val field = it.next()
       map.put(field.name(), convert(struct.get(field)))
     }
     map
   }
-  private def convertMap(from: java.util.Map[_, _]): java.util.Map[Any, Any] =
-    from.asScala.map { case (k, v) => convert(k) -> convert(v) }.asJava
+  private def convertMap(from: java.util.Map[_, _]): java.util.Map[Any, Any] = {
+    val out = new java.util.HashMap[Any, Any](from.size())
+    val it  = from.entrySet().iterator()
+    while (it.hasNext) {
+      val e = it.next()
+      out.put(convert(e.getKey.asInstanceOf[Any]), convert(e.getValue.asInstanceOf[Any]))
+    }
+    out
+  }
 
   private def convert(any: Any): Any =
     any match {
       case map:   java.util.Map[_, _] => convertMap(map)
       case array: Array[_]            => array.map(convert)
-      case list:  java.util.List[_]   => list.asScala.map(convert).asJava
+      case list: java.util.List[_] =>
+        val out = new java.util.ArrayList[Any](list.size())
+        val it  = list.iterator()
+        while (it.hasNext) out.add(convert(it.next().asInstanceOf[Any]))
+        out
       case s:     Struct              => convertStruct(s)
       case other => other
     }
