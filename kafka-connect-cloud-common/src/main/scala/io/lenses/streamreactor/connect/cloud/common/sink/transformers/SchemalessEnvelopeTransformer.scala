@@ -117,8 +117,8 @@ object SchemalessEnvelopeTransformer {
 
   def convert(data: SinkData): Any =
     data match {
-      case StructSinkData(struct)      => convertStruct(struct)
-      case MapSinkData(map, _)         => convertMap(map)
+      case StructSinkData(struct) => convertStruct(struct)
+      case MapSinkData(map, _)    => convertMap(map)
       case ArraySinkData(array, _) =>
         val out = new java.util.ArrayList[Any](array.size())
         val it  = array.iterator()
@@ -157,13 +157,13 @@ object SchemalessEnvelopeTransformer {
   private def convert(any: Any): Any =
     any match {
       case map:   java.util.Map[_, _] => convertMap(map)
-      case array: Array[_]            => array.map(convert)
-      case list: java.util.List[_] =>
+      case array: Array[_] => array.map(convert)
+      case list:  java.util.List[_] =>
         val out = new java.util.ArrayList[Any](list.size())
         val it  = list.iterator()
         while (it.hasNext) out.add(convert(it.next().asInstanceOf[Any]))
         out
-      case s:     Struct              => convertStruct(s)
+      case s: Struct => convertStruct(s)
       case other => other
     }
 
