@@ -267,13 +267,18 @@ class WriterManagerPreCommitTest
     result(tp0).offset() shouldBe 51L
   }
 
-  test("preCommit calls updateMasterLock with Offset(0) when globalSafeOffset is 0") {
+  test("preCommit skips updateMasterLock when globalSafeOffset is 0 (idle PARTITIONBY TP on fresh start)") {
+    // Dirty-flag gate: on a fresh ownership episode where nothing has advanced,
+    // `globalSafeOffset == 0` and `lastWrittenMasterSafeOffset(tp)` lazy-seeds to 0 from the
+    // absent durable floor — so the dirty flag is false and the master-lock write is skipped.
+    // The cycle still returns Some(Offset(0)) to Kafka (the consumer cannot advance until
+    // any writer commits). This is the headline cost saving on idle partitions: previously
+    // the code wrote on every cycle regardless of advance; now it only writes on advancement.
     val indexManager = mock[IndexManager]
     when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(None)
-    when(indexManager.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
-    when(indexManager.cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])).thenReturn(Right(()))
 
-    val wm = buildWriterManager(indexManager)
+    val metrics = new CloudSinkMetrics()
+    val wm      = buildWriterManager(indexManager, metrics)
     // Writer A committed offset 5, Writer B is buffering from offset 0.
     // committedOffsets = [5] (non-empty, so preCommit doesn't short-circuit).
     // firstBufferedOffsets = [0], so calculatedSafeOffset = min(0) = 0.
@@ -292,7 +297,9 @@ class WriterManagerPreCommitTest
     result should contain key tp0
     result(tp0).offset() shouldBe 0L
 
-    verify(indexManager).updateMasterLock(tp0, Offset(0))
+    verify(indexManager, never).updateMasterLock(any[TopicPartition], any[Offset])
+    metrics.getMasterLockWriteSkipped shouldBe 1L
+    metrics.getMasterLockUpdates shouldBe 0L
   }
 
   // --- Master lock failure handling ---
@@ -337,13 +344,24 @@ class WriterManagerPreCommitTest
 
   // --- Monotonicity ---
 
-  test("preCommit never regresses globalSafeOffset even when highest-offset writer is removed") {
+  test("preCommit never regresses globalSafeOffset after cleanUp even when the highest-offset writer is removed") {
+    // HWM re-seed after `cleanUp(tp)`: cleanUp clears HWM and `lastWrittenMasterSafeOffset(tp)`
+    // but PRESERVES `lastReturnedSafeOffset(tp)` so the post-rollback preCommit re-seeds
+    // HWM as `max(durableFloor + 1, lastReturned)`. Without this preservation, a routine-
+    // write failure or selective-eviction race could let the same task return a LOWER offset
+    // than it had already returned to Kafka in an earlier cycle, breaking the monotonicity
+    // invariant on globalSafeOffset and ultimately letting a successful master-lock write at
+    // the lower value drive `cleanUpObsoleteLocks` past still-needed granular locks.
+    //
+    // Without the lastReturned preservation this path would drop to calculatedSafeOffset (31);
+    // the preserved value correctly holds the floor at the previously returned 106.
     val indexManager = mock[IndexManager]
     when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(None)
     when(indexManager.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
     when(indexManager.cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])).thenReturn(Right(()))
 
-    val wm = buildWriterManager(indexManager)
+    val metrics = new CloudSinkMetrics()
+    val wm      = buildWriterManager(indexManager, metrics)
 
     // First round: two idle writers, committed to 104 and 105
     val writerA = writerInNoWriterState(tp0, Some(Offset(104)))
@@ -364,11 +382,12 @@ class WriterManagerPreCommitTest
 
     val result2 = wm.preCommit(currentOffsets(tp0, 200))
     result2 should contain key tp0
-    // After cleanUp, high watermark was cleared. On re-assignment, master lock is authoritative.
-    // getSeekedOffsetForTopicPartition returns None, so previousHighWatermark = 0.
-    // calculatedSafeOffset = 31. globalSafeOffset = max(31, 0) = 31.
-    // This is correct: cleanUp clears the watermark because re-assignment means fresh start.
-    result2(tp0).offset() shouldBe 31L
+    // After cleanUp, HWM was cleared but lastReturnedSafeOffset(tp) = 106 was preserved.
+    // HWM re-seed = max(durableFloor=0, lastReturned=106) = 106.
+    // calculatedSafeOffset = 31. globalSafeOffset = max(31, 106) = 106 — no regression.
+    // forceWriteAfterCleanUp(tp) fired, so the write was classified as WriteForced(PostCleanUp).
+    result2(tp0).offset() shouldBe 106L
+    metrics.getMasterLockWriteForcedPostCleanUp shouldBe 1L
   }
 
   test("preCommit high watermark prevents regression within same assignment (no cleanUp)") {

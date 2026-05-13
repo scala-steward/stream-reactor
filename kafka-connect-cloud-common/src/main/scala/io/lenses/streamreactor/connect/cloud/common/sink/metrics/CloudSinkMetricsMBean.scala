@@ -15,8 +15,21 @@
  */
 package io.lenses.streamreactor.connect.cloud.common.sink.metrics
 
+import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
+
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.LongAdder
+
+/**
+ * Reason tag for a forced master-lock write, recorded on the
+ * `masterLockWriteForced*` counters.
+ */
+sealed trait ForcedWriteReason
+object ForcedWriteReason {
+  case object Revoke      extends ForcedWriteReason
+  case object Stop        extends ForcedWriteReason
+  case object PostCleanUp extends ForcedWriteReason
+}
 
 trait CloudSinkMetricsMBean {
 
@@ -109,8 +122,11 @@ trait CloudSinkMetricsMBean {
   // --- Master lock ---
 
   /**
-   * Cumulative successful eTag-conditional master lock writes. Each success advances the
-   * consumer-committable offset (globalSafeOffset) for a Kafka partition.
+   * Cumulative successful eTag-conditional master-lock writes (routine and forced combined).
+   * Forced writes additionally increment the per-reason `masterLockWriteForced*` counter;
+   * do NOT sum `masterLockUpdates + masterLockWriteForced*` — that double-counts forced
+   * successes. For decomposition formulas see docs/datalake-exactly-once-partitionby.md
+   * ("Master-Lock Write-Frequency Reduction and Metrics").
    */
   def getMasterLockUpdates: Long
 
@@ -120,6 +136,65 @@ trait CloudSinkMetricsMBean {
    * indicate a zombie task holding a conflicting eTag or cloud storage issues.
    */
   def getMasterLockFailures: Long
+
+  /**
+   * Cumulative `preCommit` cycles where the dirty-flag gate suppressed the master-lock write
+   * (`globalSafeOffset` had not advanced). The ratio
+   * `masterLockWriteSkipped / (masterLockWriteSkipped + masterLockUpdates + masterLockFailures)`
+   * measures the cost saving.
+   */
+  def getMasterLockWriteSkipped: Long
+
+  /** Cumulative `WriteForced(Revoke)` attempts (partition revocation / rebalance). Records attempts, not successes. */
+  def getMasterLockWriteForcedRevoke: Long
+
+  /** Cumulative `WriteForced(Stop)` attempts (task stop / shutdown). Records attempts, not successes. */
+  def getMasterLockWriteForcedStop: Long
+
+  /**
+   * Cumulative `WriteForced(PostCleanUp)` attempts: the first `preCommit` after a `cleanUp(tp)`
+   * in-place rollback forces a write to persist `globalSafeOffset`. Records attempts, not
+   * successes. See docs/datalake-exactly-once-partitionby.md ("`lastReturnedSafeOffset` Role by Mode").
+   */
+  def getMasterLockWriteForcedPostCleanUp: Long
+
+  /**
+   * Cumulative forced `WriteForced(Revoke)` write failures — a strict subset of
+   * [[getMasterLockFailures]]. Incremented for both an expected `Left(err)` return
+   * from `updateMasterLock` and an unexpected `NonFatal` throw on the forced path.
+   */
+  def getMasterLockWriteForcedRevokeFailures: Long
+
+  /**
+   * Cumulative forced `WriteForced(Stop)` write failures — a strict subset of
+   * [[getMasterLockFailures]]. Incremented for both an expected `Left(err)` return
+   * from `updateMasterLock` and an unexpected `NonFatal` throw on the forced path.
+   */
+  def getMasterLockWriteForcedStopFailures: Long
+
+  /**
+   * Cumulative forced `WriteForced(PostCleanUp)` write failures — a strict subset of
+   * [[getMasterLockFailures]]. Incremented for both an expected `Left(err)` return
+   * from `updateMasterLock` and an unexpected `NonFatal` throw on the forced path.
+   */
+  def getMasterLockWriteForcedPostCleanUpFailures: Long
+
+  /**
+   * Cumulative `preCommit` cycles where the dirty flag was true on entry. At most one per
+   * `globalSafeOffset` advance; sustained elevation indicates `updateMasterLock` failures
+   * have widened the dirty window beyond a single cycle.
+   */
+  def getMasterLockDirtyWindowCycles: Long
+
+  /**
+   * Point-in-time indicator: `true` iff at least one topic-partition was observed
+   * `dirty` (`globalSafeOffset > lastWrittenMaster`) at its most recent `preCommit`
+   * and has not yet had a successful master-lock write or been cleaned up since.
+   * Pairs with [[getMasterLockDirtyWindowCycles]]: the counter is a rate signal,
+   * this gauge is the stuck signal — non-zero across many scrapes means the dirty
+   * window is not closing (e.g. sustained cloud outage, persistent eTag conflict).
+   */
+  def getMasterLockDirty: Boolean
 
   // --- Orphan sweep ---
 
@@ -222,8 +297,18 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   private val gcDeleteFailures        = new LongAdder()
   private val gcDeleteRetries         = new LongAdder()
 
-  private val masterLockUpdates  = new LongAdder()
-  private val masterLockFailures = new LongAdder()
+  private val masterLockUpdates                        = new LongAdder()
+  private val masterLockFailures                       = new LongAdder()
+  private val masterLockWriteSkipped                   = new LongAdder()
+  private val masterLockWriteForcedRevoke              = new LongAdder()
+  private val masterLockWriteForcedStop                = new LongAdder()
+  private val masterLockWriteForcedPostCleanUp         = new LongAdder()
+  private val masterLockWriteForcedRevokeFailures      = new LongAdder()
+  private val masterLockWriteForcedStopFailures        = new LongAdder()
+  private val masterLockWriteForcedPostCleanUpFailures = new LongAdder()
+  private val masterLockDirtyWindowCycles              = new LongAdder()
+  private val dirtyTopicPartitions =
+    java.util.concurrent.ConcurrentHashMap.newKeySet[TopicPartition]()
 
   private val sweepRuns            = new LongAdder()
   private val sweepOrphansEnqueued = new LongAdder()
@@ -261,8 +346,17 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   override def getGcDeleteFailures:        Long = gcDeleteFailures.sum()
   override def getGcDeleteRetries:         Long = gcDeleteRetries.sum()
 
-  override def getMasterLockUpdates:  Long = masterLockUpdates.sum()
-  override def getMasterLockFailures: Long = masterLockFailures.sum()
+  override def getMasterLockUpdates:                        Long    = masterLockUpdates.sum()
+  override def getMasterLockFailures:                       Long    = masterLockFailures.sum()
+  override def getMasterLockWriteSkipped:                   Long    = masterLockWriteSkipped.sum()
+  override def getMasterLockWriteForcedRevoke:              Long    = masterLockWriteForcedRevoke.sum()
+  override def getMasterLockWriteForcedStop:                Long    = masterLockWriteForcedStop.sum()
+  override def getMasterLockWriteForcedPostCleanUp:         Long    = masterLockWriteForcedPostCleanUp.sum()
+  override def getMasterLockWriteForcedRevokeFailures:      Long    = masterLockWriteForcedRevokeFailures.sum()
+  override def getMasterLockWriteForcedStopFailures:        Long    = masterLockWriteForcedStopFailures.sum()
+  override def getMasterLockWriteForcedPostCleanUpFailures: Long    = masterLockWriteForcedPostCleanUpFailures.sum()
+  override def getMasterLockDirtyWindowCycles:              Long    = masterLockDirtyWindowCycles.sum()
+  override def getMasterLockDirty:                          Boolean = !dirtyTopicPartitions.isEmpty
 
   override def getSweepRuns:            Long = sweepRuns.sum()
   override def getSweepOrphansEnqueued: Long = sweepOrphansEnqueued.sum()
@@ -296,6 +390,26 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
 
   def incrementMasterLockUpdates():  Unit = masterLockUpdates.increment()
   def incrementMasterLockFailures(): Unit = masterLockFailures.increment()
+
+  def incrementMasterLockWriteSkipped(): Unit = masterLockWriteSkipped.increment()
+
+  def incrementMasterLockWriteForced(reason: ForcedWriteReason): Unit = reason match {
+    case ForcedWriteReason.Revoke      => masterLockWriteForcedRevoke.increment()
+    case ForcedWriteReason.Stop        => masterLockWriteForcedStop.increment()
+    case ForcedWriteReason.PostCleanUp => masterLockWriteForcedPostCleanUp.increment()
+  }
+
+  def incrementMasterLockWriteForcedFailure(reason: ForcedWriteReason): Unit = reason match {
+    case ForcedWriteReason.Revoke      => masterLockWriteForcedRevokeFailures.increment()
+    case ForcedWriteReason.Stop        => masterLockWriteForcedStopFailures.increment()
+    case ForcedWriteReason.PostCleanUp => masterLockWriteForcedPostCleanUpFailures.increment()
+  }
+
+  def incrementMasterLockDirtyWindowCycle(): Unit = masterLockDirtyWindowCycles.increment()
+
+  def markMasterLockDirty(tp: TopicPartition): Unit = { val _ = dirtyTopicPartitions.add(tp) }
+  def clearMasterLockDirty(tp: TopicPartition): Unit = { val _ = dirtyTopicPartitions.remove(tp) }
+  def clearAllMasterLockDirty(): Unit = dirtyTopicPartitions.clear()
 
   def incrementSweepRuns(): Unit = sweepRuns.increment()
   def incrementSweepOrphansEnqueued(count: Long): Unit = sweepOrphansEnqueued.add(count)

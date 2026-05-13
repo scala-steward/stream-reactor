@@ -840,6 +840,59 @@ Operators verify the reduction in cloud operations against these counters; safet
 
 ---
 
+## `lastReturnedSafeOffset` Role by Mode
+
+`WriterManager` tracks the highest `globalSafeOffset` returned to Kafka Connect for a topic-partition within the current ownership episode in the `lastReturnedSafeOffset(tp)` map. Its role differs by connector mode:
+
+**Non-PARTITIONBY (load-bearing).** `preCommit` and `Writer.commit()` advance `lastReturnedSafeOffset(tp)` and `seekedOffsets(tp)` on independent schedules. Between flushes, `lastReturnedSafeOffset` can sit strictly ahead of `durableFloor + 1` (where `durableFloor = getSeekedOffsetForTopicPartition(tp).value`). After a `cleanUp(tp)` in-place rollback the HWM is re-seeded as `max(durableFloor + 1, lastReturnedSafeOffset(tp))`. The `lastReturnedSafeOffset` term is load-bearing: without it the task could return a lower offset to Kafka Connect than it already reported, violating monotonicity.
+
+**PARTITIONBY (defensive).** `IndexManagerV2.updateMasterLock` updates `seekedOffsets(tp)` atomically with each successful master-lock write, so in production `durableFloor + 1 == lastReturnedSafeOffset(tp)` after every successful cycle. The `lastReturnedSafeOffset` term in the `max(...)` seed is therefore redundant in value. It is preserved because the `IndexManager` trait does not enforce the lockstep contract; a future implementation that decouples the two would silently break post-`cleanUp` monotonicity without it.
+
+The field is **cleared by `close(tp)`** (rebalance / shutdown) and **preserved across `cleanUp(tp)`** (in-place rollback). This asymmetry is intentional: `close(tp)` hands ownership to a new task instance, which re-seeds from the durable master lock; `cleanUp(tp)` keeps the same task instance in ownership, so the previously-reported HWM must survive.
+
+---
+
+## Master-Lock Write-Frequency Reduction and Metrics
+
+### Dirty-flag gate
+
+`WriterManager.preCommit` classifies each PARTITIONBY cycle into one of three `WriteDecision` cases:
+
+- **`Skip`**: `globalSafeOffset == lastWrittenMasterSafeOffset(tp)` — no advancement to persist. The master lock is not written. The safe offset is still returned to Kafka Connect.
+- **`WriteRoutine`**: `globalSafeOffset > lastWrittenMasterSafeOffset(tp)` — the dirty flag is true; `updateMasterLock` is called once.
+- **`WriteForced`**: a lifecycle force point is active (partition revoke, task stop, or the first `preCommit` after a `cleanUp(tp)` in-place rollback). Structurally identical to `WriteRoutine` but tagged with the trigger reason for metrics.
+
+### Forced-write lifecycle points
+
+| Trigger | `ForcedWriteReason` tag | Source |
+|---------|------------------------|--------|
+| Partition revocation / rebalance | `Revoke` | `WriterManager.close()` default |
+| Task stop / shutdown | `Stop` | `WriterManager.closeForStop()` |
+| Post-`cleanUp(tp)` next `preCommit` | `PostCleanUp` | `forceWriteAfterCleanUp` set in `cleanUp(tp)` |
+
+### JMX metric decomposition
+
+The following counters are exposed on `CloudSinkMetrics`:
+
+| Counter | Semantics |
+|---------|-----------|
+| `masterLockUpdates` | **All successful writes** — routine and forced combined. The universal success counter. |
+| `masterLockFailures` | All failed writes — routine and forced combined. |
+| `masterLockWriteSkipped` | Cycles where the dirty-flag gate suppressed the write (`Skip` branch). |
+| `masterLockWriteForcedRevoke` | `WriteForced(Revoke)` attempts (success or failure). |
+| `masterLockWriteForcedStop` | `WriteForced(Stop)` attempts. |
+| `masterLockWriteForcedPostCleanUp` | `WriteForced(PostCleanUp)` attempts. |
+| `masterLockDirtyWindowCycles` | Cycles that entered the dirty window (`globalSafeOffset > lastWritten`). |
+
+**Aggregation rules:**
+
+- `masterLockWriteForced*` counters record **attempts**, not successes. A forced write that fails increments the per-reason counter but NOT `masterLockUpdates`.
+- Do **not** compute `masterLockUpdates + masterLockWriteForced*` — that double-counts every forced success.
+- Cost-saving ratio: `masterLockWriteSkipped / (masterLockWriteSkipped + masterLockUpdates + masterLockFailures)`.
+- Forced successes (approximate): `(masterLockWriteForcedRevoke + masterLockWriteForcedStop + masterLockWriteForcedPostCleanUp) - forced_failures`, where `forced_failures` must be inferred from `masterLockFailures` (no per-reason failure counter is exposed).
+
+---
+
 ## Summary
 
 | Concern | Before (single lock) | After (two-tier locks) |
