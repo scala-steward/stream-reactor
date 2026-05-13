@@ -108,13 +108,18 @@ class AvroFormatWriter(
       fileWriter.append(record)
     }
 
-    def close(): Either[SinkError, Unit] =
-      for {
-        _ <- Try(fileWriter.close()).toEither.leftMap { t =>
+    def close(): Either[SinkError, Unit] = {
+      val closeResult: Either[SinkError, Unit] =
+        Try(fileWriter.close()).toEither.leftMap { t =>
+          logger.error("Failed to close Avro file writer", t)
           NonFatalCloudSinkError(s"Failed to close Avro file writer: ${t.getMessage}", t.some)
         }
-        closed <- outputStream.complete()
-      } yield closed
+      val completeResult: Either[SinkError, Unit] = outputStream.complete()
+      (closeResult, completeResult) match {
+        case (Left(closeErr), _)         => Left(closeErr)
+        case (Right(_), completeOutcome) => completeOutcome
+      }
+    }
 
     def pointer: Long = outputStream.getPointer
 
