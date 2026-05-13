@@ -46,6 +46,7 @@ trait LocalStagingAreaConfigKeys extends WithConnectorPrefix {
         LOCAL_STAGING_WRITE_BUFFER_SIZE,
         Type.INT,
         FileUtils.DefaultStagingWriteBufferSize,
+        ConfigDef.Range.atLeast(1),
         Importance.LOW,
         s"Buffer size in bytes for the staging file output stream (default ${FileUtils.DefaultStagingWriteBufferSize})",
       )

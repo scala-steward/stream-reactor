@@ -15,11 +15,10 @@
  */
 package io.lenses.streamreactor.connect.cloud.common.model.location
 
+import org.scalatest.Assertion
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import java.io.BufferedOutputStream
-import java.lang.reflect.Field
 import java.nio.file.Files
 import scala.util.Using
 
@@ -42,7 +41,7 @@ class FileUtilsTest extends AnyFunSuite with Matchers {
     val tmpFile = Files.createTempFile("FileUtilsTest", ".tmp").toFile
     tmpFile.deleteOnExit()
     Using.resource(FileUtils.toBufferedOutputStream(tmpFile)) { out =>
-      bufSize(out) should be(FileUtils.DefaultStagingWriteBufferSize)
+      verifyBufferSize(out, tmpFile, FileUtils.DefaultStagingWriteBufferSize)
     }
   }
 
@@ -51,14 +50,27 @@ class FileUtilsTest extends AnyFunSuite with Matchers {
     tmpFile.deleteOnExit()
     val customSize = 128 * 1024
     Using.resource(FileUtils.toBufferedOutputStream(tmpFile, customSize)) { out =>
-      bufSize(out) should be(customSize)
+      verifyBufferSize(out, tmpFile, customSize)
     }
   }
 
-  private def bufSize(bos: BufferedOutputStream): Int = {
-    val f: Field = classOf[java.io.BufferedOutputStream].getSuperclass.getDeclaredField("buf")
-    f.setAccessible(true)
-    f.get(bos).asInstanceOf[Array[Byte]].length
+  /**
+   * Verifies buffer size behaviorally without reflection.
+   *
+   * BufferedOutputStream.write(byte[]) writes directly to the underlying stream (bypassing the
+   * buffer) when len >= buf.length, so we stay below that threshold by writing (bufSize - 1)
+   * bytes as a chunk. count becomes bufSize-1, nothing flushed.
+   * Two subsequent single-byte write(int) calls bring count to bufSize (no flush yet) and then
+   * trigger the auto-flush (count >= buf.length), writing exactly bufSize bytes to disk.
+   * A buffer that is smaller than expected causes the chunk write to bypass the buffer and
+   * land on disk immediately; a larger buffer means the flush never fires — both deviate from
+   * the expected file length, making the assertion sensitive to off-by-one buffer mismatches.
+   */
+  private def verifyBufferSize(out: java.io.OutputStream, file: java.io.File, bufSize: Int): Assertion = {
+    out.write(new Array[Byte](bufSize - 1)) // chunk: len < bufSize, copied into buffer
+    out.write(0)                            // count = bufSize, still buffered
+    out.write(0)                            // count >= bufSize → flushBuffer(); bufSize bytes hit disk
+    file.length() should be(bufSize.toLong)
   }
 
 }
