@@ -303,6 +303,7 @@ class WriterManager[SM <: FileMetadata](
     lastWrittenMasterSafeOffset.clear()
     lastReturnedSafeOffset.clear()
     forceWriteAfterCleanUp.clear()
+    metrics.clearAllMasterLockDirty()
     // After every per-TP closePartition has run, refresh the writer-count gauge for the
     // final value (in the steady-state path writers are now empty).
     metrics.setWriterCount(writers.size)
@@ -496,7 +497,12 @@ class WriterManager[SM <: FileMetadata](
             val lastWritten = currentLastWrittenMaster(topicPartition)
             val dirty       = globalSafeOffset > lastWritten
 
-            if (dirty) metrics.incrementMasterLockDirtyWindowCycle()
+            if (dirty) {
+              metrics.incrementMasterLockDirtyWindowCycle()
+              metrics.markMasterLockDirty(topicPartition)
+            } else {
+              metrics.clearMasterLockDirty(topicPartition)
+            }
 
             val decision: WriteDecision =
               if (forceWriteAfterCleanUp.contains(topicPartition))
@@ -530,6 +536,9 @@ class WriterManager[SM <: FileMetadata](
             }
           } else {
             // Non-PARTITIONBY: Writer.commit() maintains the master lock; only advance in-memory state.
+            // Defensively clear any dirty-window entry so a TP that transitions from PARTITIONBY
+            // to non-PARTITIONBY mid-life cannot leak stale dirty state.
+            metrics.clearMasterLockDirty(topicPartition)
             safeOffsetHighWatermarks.put(topicPartition, globalSafeOffset)
             advanceLastReturned(topicPartition, globalSafeOffset)
             forceWriteAfterCleanUp.remove(topicPartition)
@@ -578,6 +587,7 @@ class WriterManager[SM <: FileMetadata](
         false
       case Right(_) =>
         metrics.incrementMasterLockUpdates()
+        metrics.clearMasterLockDirty(topicPartition)
         safeOffsetHighWatermarks.put(topicPartition, globalSafeOffset)
         advanceLastReturned(topicPartition, globalSafeOffset)
         lastWrittenMasterSafeOffset.put(topicPartition, globalSafeOffset)
@@ -634,6 +644,7 @@ class WriterManager[SM <: FileMetadata](
     // ("`lastReturnedSafeOffset` Role by Mode").
     lastWrittenMasterSafeOffset.remove(topicPartition)
     forceWriteAfterCleanUp.add(topicPartition)
+    metrics.clearMasterLockDirty(topicPartition)
     // Evict cache so a fresh writer reloads its dedup floor from storage.
     indexManager.evictAllGranularLocks(topicPartition)
     // `clearTopicPartitionState` is NOT called: the partition is still owned by this task,

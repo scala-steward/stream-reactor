@@ -23,7 +23,6 @@ import io.lenses.streamreactor.connect.cloud.common.formats.writer.schema.Schema
 import io.lenses.streamreactor.connect.cloud.common.model.Offset
 import io.lenses.streamreactor.connect.cloud.common.model.Topic
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
-import io.lenses.streamreactor.connect.cloud.common.model.UploadableString
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocation
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocationValidator
 import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
@@ -50,7 +49,6 @@ import org.scalatest.funsuite.AnyFunSuiteLike
 import org.scalatest.matchers.should.Matchers
 
 import java.io.File
-import java.util.concurrent.atomic.AtomicBoolean
 import scala.collection.immutable
 
 /**
@@ -74,11 +72,6 @@ import scala.collection.immutable
  *
  * Test matrix — one test per failure-arm shape:
  *
- *   (a) Zombie / stale-eTag fencing: the `WriteRoutine` path fails mid-write when an
- *       external eTag bump makes the cached eTag stale. `preCommit` must return an empty
- *       map for the TP. A new task instance that re-opens from storage recovers to the
- *       correct K without duplicating data.
- *
  *   (b) `WriteRoutine` failure-then-recover (multi-cycle dirty window): K consecutive
  *       storage failures must not advance the HWM or the durable master-lock floor.
  *       Recovery on cycle K+1 uses the same `globalSafeOffset` that was first attempted,
@@ -87,6 +80,17 @@ import scala.collection.immutable
  *   (c) `WriteForced(PostCleanUp)` one-shot failure: the force flag is cleared *before*
  *       the write attempt so a failure does not re-arm the forced path on the next cycle.
  *       The next cycle re-enters via the routine dirty-flag path and succeeds.
+ *
+ *   (d) `WriteForced(Revoke)` success: a dirty TP at `close()` persists `globalSafeOffset`
+ *       to the master lock; durable floor advances; metrics tagged Revoke.
+ *
+ *   (e) `WriteForced(Revoke)` failure: durable floor unchanged; metrics tagged; fresh
+ *       owner replays from the older durable floor; granular lock absent.
+ *
+ * Note: the zombie / stale-eTag fencing scenario (formerly labelled (a)) is covered
+ * end-to-end by `ExactlyOnceScenarioTest` ("PARTITIONBY end-to-end zombie: master-lock
+ * write fenced by rebalance race, K does not advance, no duplication at final paths"),
+ * which additionally verifies final-path deduplication after Crash + reopen.
  *
  * Writer construction: writers are created directly with `lastSeekedOffset = committedOffset`
  * so they start in `NoWriter(CommitState(tp, committedOffset))` state — exactly the same
@@ -202,74 +206,6 @@ class WriterManagerZombieIntegrationTest
       partitionKey     = WriterManager.derivePartitionKey(dateA),
       lastSeekedOffset = committedOffset,
     )
-  }
-
-  // ── (a) Zombie / stale-eTag fencing ──────────────────────────────────────────────────
-
-  test(
-    "Integrated zombie: master-lock fenced through real WriterManager.preCommit → empty map, " +
-      "metrics correct (failures=1, updates=1), recovery after reopen succeeds at correct K",
-  ) {
-    val storage = new InMemoryStorageInterface()
-    val metrics = new CloudSinkMetrics()
-    val im      = buildIndexManager(storage)
-    im.open(Set(tp0)).value // initialise master lock in storage, seed eTag cache
-
-    val wm = buildWriterManager(im, storage, metrics)
-
-    // Cycle 1: establish lastWritten = 43 (committed offset 42 → K = 43).
-    val writer1 = makeCommittedWriter(tp0, im, storage, committedOffset = Some(Offset(42)))
-    wm.putWriter(MapKey(tp0, dateA), writer1)
-    wm.preCommit(Map(tp0 -> new OffsetAndMetadata(200)))(tp0).offset() shouldBe 43L
-    metrics.getMasterLockUpdates shouldBe 1L
-
-    // Install the pre-write barrier: atomically bumps the master-lock eTag via a direct
-    // storage write so the zombie's cached eTag is stale the moment its write lands.
-    val fired = new AtomicBoolean(false)
-    IndexManagerV2.IndexManagerV2TestHooks.installPreWriteMasterLockBarrier(
-      im,
-      () =>
-        if (fired.compareAndSet(false, true)) {
-          val current = storage.getBlobAsString(bucket, masterLockPath).getOrElse(
-            throw new AssertionError(s"zombie barrier: master lock missing at $bucket/$masterLockPath"),
-          )
-          storage.writeStringToFile(
-            bucket,
-            masterLockPath,
-            UploadableString(current),
-          ).left.foreach(err => throw new AssertionError(s"zombie barrier: external write failed: ${err.message()}"))
-        },
-    )
-
-    // Cycle 2 (zombie write): higher-offset writer; barrier fires mid-write → eTag mismatch.
-    val writer2 = makeCommittedWriter(tp0, im, storage, committedOffset = Some(Offset(99)))
-    wm.putWriter(MapKey(tp0, dateA), writer2)
-    try {
-      val result2 = wm.preCommit(Map(tp0 -> new OffsetAndMetadata(500)))
-      result2.get(tp0) shouldBe None // fenced: no advancing offset returned for tp0
-      fired.get() shouldBe true
-      metrics.getMasterLockFailures shouldBe 1L
-      metrics.getMasterLockUpdates shouldBe 1L // not incremented during the fenced cycle
-    } finally {
-      IndexManagerV2.IndexManagerV2TestHooks.clearPreWriteMasterLockBarrier(im)
-    }
-
-    // Simulate crash + reopen: a fresh IndexManagerV2 reads the bumped master lock from
-    // storage and seeds its eTag cache with the current value. The new task's preCommit
-    // succeeds with K = max(committed) + 1 = 100.
-    im.close()
-    val im2 = buildIndexManager(storage)
-    im2.open(Set(tp0)).value
-    val metrics2 = new CloudSinkMetrics()
-    val wm2      = buildWriterManager(im2, storage, metrics2)
-    val writer3  = makeCommittedWriter(tp0, im2, storage, committedOffset = Some(Offset(99)))
-    wm2.putWriter(MapKey(tp0, dateA), writer3)
-    val result3 = wm2.preCommit(Map(tp0 -> new OffsetAndMetadata(500)))
-    result3(tp0).offset() shouldBe 100L // K = max(committed) + 1 = 100
-    metrics2.getMasterLockUpdates shouldBe 1L
-
-    wm2.close()
-    im2.close()
   }
 
   // ── (b) WriteRoutine failure-then-recover (multi-cycle dirty window) ──────────────────
@@ -457,8 +393,8 @@ class WriterManagerZombieIntegrationTest
     val writer3 = makeCommittedWriter(tp0, im2, storage, committedOffset = Some(Offset(50)))
     wm2.putWriter(MapKey(tp0, dateA), writer3)
     val result3 = wm2.preCommit(Map(tp0 -> new OffsetAndMetadata(200)))
-    result3(tp0).offset() shouldBe 51L // older floor, not 101
-    metrics2.getMasterLockUpdates shouldBe 0L    // Skip path: durable floor already matches globalSafeOffset
+    result3(tp0).offset() shouldBe 51L             // older floor, not 101
+    metrics2.getMasterLockUpdates shouldBe 0L      // Skip path: durable floor already matches globalSafeOffset
     metrics2.getMasterLockWriteSkipped shouldBe 1L // Skip counter incremented
 
     wm2.close()

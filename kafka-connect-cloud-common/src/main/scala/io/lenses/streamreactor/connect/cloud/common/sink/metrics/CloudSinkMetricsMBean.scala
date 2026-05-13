@@ -15,6 +15,8 @@
  */
 package io.lenses.streamreactor.connect.cloud.common.sink.metrics
 
+import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
+
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.LongAdder
 
@@ -184,6 +186,16 @@ trait CloudSinkMetricsMBean {
    */
   def getMasterLockDirtyWindowCycles: Long
 
+  /**
+   * Point-in-time indicator: `true` iff at least one topic-partition was observed
+   * `dirty` (`globalSafeOffset > lastWrittenMaster`) at its most recent `preCommit`
+   * and has not yet had a successful master-lock write or been cleaned up since.
+   * Pairs with [[getMasterLockDirtyWindowCycles]]: the counter is a rate signal,
+   * this gauge is the stuck signal — non-zero across many scrapes means the dirty
+   * window is not closing (e.g. sustained cloud outage, persistent eTag conflict).
+   */
+  def getMasterLockDirty: Boolean
+
   // --- Orphan sweep ---
 
   /**
@@ -295,6 +307,8 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   private val masterLockWriteForcedStopFailures        = new LongAdder()
   private val masterLockWriteForcedPostCleanUpFailures = new LongAdder()
   private val masterLockDirtyWindowCycles              = new LongAdder()
+  private val dirtyTopicPartitions =
+    java.util.concurrent.ConcurrentHashMap.newKeySet[TopicPartition]()
 
   private val sweepRuns            = new LongAdder()
   private val sweepOrphansEnqueued = new LongAdder()
@@ -332,16 +346,17 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   override def getGcDeleteFailures:        Long = gcDeleteFailures.sum()
   override def getGcDeleteRetries:         Long = gcDeleteRetries.sum()
 
-  override def getMasterLockUpdates:                        Long = masterLockUpdates.sum()
-  override def getMasterLockFailures:                       Long = masterLockFailures.sum()
-  override def getMasterLockWriteSkipped:                   Long = masterLockWriteSkipped.sum()
-  override def getMasterLockWriteForcedRevoke:              Long = masterLockWriteForcedRevoke.sum()
-  override def getMasterLockWriteForcedStop:                Long = masterLockWriteForcedStop.sum()
-  override def getMasterLockWriteForcedPostCleanUp:         Long = masterLockWriteForcedPostCleanUp.sum()
-  override def getMasterLockWriteForcedRevokeFailures:      Long = masterLockWriteForcedRevokeFailures.sum()
-  override def getMasterLockWriteForcedStopFailures:        Long = masterLockWriteForcedStopFailures.sum()
-  override def getMasterLockWriteForcedPostCleanUpFailures: Long = masterLockWriteForcedPostCleanUpFailures.sum()
-  override def getMasterLockDirtyWindowCycles:              Long = masterLockDirtyWindowCycles.sum()
+  override def getMasterLockUpdates:                        Long    = masterLockUpdates.sum()
+  override def getMasterLockFailures:                       Long    = masterLockFailures.sum()
+  override def getMasterLockWriteSkipped:                   Long    = masterLockWriteSkipped.sum()
+  override def getMasterLockWriteForcedRevoke:              Long    = masterLockWriteForcedRevoke.sum()
+  override def getMasterLockWriteForcedStop:                Long    = masterLockWriteForcedStop.sum()
+  override def getMasterLockWriteForcedPostCleanUp:         Long    = masterLockWriteForcedPostCleanUp.sum()
+  override def getMasterLockWriteForcedRevokeFailures:      Long    = masterLockWriteForcedRevokeFailures.sum()
+  override def getMasterLockWriteForcedStopFailures:        Long    = masterLockWriteForcedStopFailures.sum()
+  override def getMasterLockWriteForcedPostCleanUpFailures: Long    = masterLockWriteForcedPostCleanUpFailures.sum()
+  override def getMasterLockDirtyWindowCycles:              Long    = masterLockDirtyWindowCycles.sum()
+  override def getMasterLockDirty:                          Boolean = !dirtyTopicPartitions.isEmpty
 
   override def getSweepRuns:            Long = sweepRuns.sum()
   override def getSweepOrphansEnqueued: Long = sweepOrphansEnqueued.sum()
@@ -391,6 +406,10 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   }
 
   def incrementMasterLockDirtyWindowCycle(): Unit = masterLockDirtyWindowCycles.increment()
+
+  def markMasterLockDirty(tp: TopicPartition): Unit = { val _ = dirtyTopicPartitions.add(tp) }
+  def clearMasterLockDirty(tp: TopicPartition): Unit = { val _ = dirtyTopicPartitions.remove(tp) }
+  def clearAllMasterLockDirty(): Unit = dirtyTopicPartitions.clear()
 
   def incrementSweepRuns(): Unit = sweepRuns.increment()
   def incrementSweepOrphansEnqueued(count: Long): Unit = sweepOrphansEnqueued.add(count)
