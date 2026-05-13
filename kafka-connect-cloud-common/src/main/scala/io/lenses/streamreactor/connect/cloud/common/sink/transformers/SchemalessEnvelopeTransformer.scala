@@ -136,7 +136,7 @@ object SchemalessEnvelopeTransformer {
 
   private def convertStruct(struct: Struct): java.util.Map[String, Any] = {
     val fields = struct.schema().fields()
-    val map    = new java.util.HashMap[String, Any](fields.size())
+    val map    = new java.util.HashMap[String, Any](fields.size(), 1.0f)
     val it     = fields.iterator()
     while (it.hasNext) {
       val field = it.next()
@@ -145,7 +145,7 @@ object SchemalessEnvelopeTransformer {
     map
   }
   private def convertMap(from: java.util.Map[_, _]): java.util.Map[Any, Any] = {
-    val out = new java.util.HashMap[Any, Any](from.size())
+    val out = new java.util.HashMap[Any, Any](from.size(), 1.0f)
     val it  = from.entrySet().iterator()
     while (it.hasNext) {
       val e = it.next()
