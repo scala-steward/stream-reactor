@@ -46,6 +46,11 @@ class S3SinkTaskJsonEnvelopeTest
   private val PrefixName = "streamReactorBackups"
   private val TopicName  = "myTopic"
 
+  private val jsonMapper = new ObjectMapper()
+
+  private def assertJsonEquals(actual: String, expected: String): Unit =
+    jsonMapper.readTree(actual) shouldBe jsonMapper.readTree(expected)
+
   private def toSinkRecord(
     user:      Struct,
     topic:     String,
@@ -204,18 +209,21 @@ class S3SinkTaskJsonEnvelopeTest
     jsonRecords.size should be(3)
 
     val actual1 = jsonRecords.head
-    actual1 should be(
-      """{"headers":{"h1":"record1-header1","h2":1},"metadata":{"partition":1,"offset":1,"topic":"myTopic","timestamp":10001},"value":{"name":"sam","salary":100.43,"title":"mr"},"key":{"name":"sam","salary":100.43,"title":"mr"}}""",
+    assertJsonEquals(
+      actual1,
+      """{"headers":{"h1":"record1-header1","h2":1},"metadata":{"partition":1,"offset":1,"topic":"myTopic","timestamp":10001},"value":{"name":"sam","title":"mr","salary":100.43},"key":{"name":"sam","title":"mr","salary":100.43}}""",
     )
 
     val actual2 = jsonRecords(1)
-    actual2 should be(
-      """{"headers":{"h1":"record1-header2","h2":2},"metadata":{"partition":1,"offset":2,"topic":"myTopic","timestamp":10002},"value":{"name":"laura","salary":429.06,"title":"ms"},"key":{"name":"laura","salary":429.06,"title":"ms"}}""",
+    assertJsonEquals(
+      actual2,
+      """{"headers":{"h1":"record1-header2","h2":2},"metadata":{"partition":1,"offset":2,"topic":"myTopic","timestamp":10002},"value":{"name":"laura","title":"ms","salary":429.06},"key":{"name":"laura","title":"ms","salary":429.06}}""",
     )
 
     val actual3 = jsonRecords(2)
-    actual3 should be(
-      """{"headers":{"h1":"record1-header3","h2":3},"metadata":{"partition":1,"offset":3,"topic":"myTopic","timestamp":10003},"value":{"name":"tom","salary":395.44,"title":null},"key":{"name":"tom","salary":395.44,"title":null}}""",
+    assertJsonEquals(
+      actual3,
+      """{"headers":{"h1":"record1-header3","h2":3},"metadata":{"partition":1,"offset":3,"topic":"myTopic","timestamp":10003},"value":{"name":"tom","title":null,"salary":395.44},"key":{"name":"tom","title":null,"salary":395.44}}""",
     )
   }
 
@@ -278,18 +286,21 @@ class S3SinkTaskJsonEnvelopeTest
 
     val actual1 = jsonRecords.head
 
-    actual1 should be(
-      """{"headers":{"h1":"record1-header1","h2":1},"metadata":{"partition":1,"offset":1,"topic":"myTopic","timestamp":10001},"value":{"name":"samuel\n jackson","salary":"100.43","title":"mr"},"key":{"name":"samuel\n jackson","salary":"100.43","title":"mr"}}""",
+    assertJsonEquals(
+      actual1,
+      """{"headers":{"h1":"record1-header1","h2":1},"metadata":{"partition":1,"offset":1,"topic":"myTopic","timestamp":10001},"value":{"name":"samuel\n jackson","title":"mr","salary":"100.43"},"key":{"name":"samuel\n jackson","title":"mr","salary":"100.43"}}""",
     )
 
     val actual2 = jsonRecords(1)
-    actual2 should be(
-      """{"headers":{"h1":"record1-header2","h2":2},"metadata":{"partition":1,"offset":2,"topic":"myTopic","timestamp":10002},"value":{"name":"anna\nkarenina","salary":"429.06","title":"ms"},"key":{"name":"anna\nkarenina","salary":"429.06","title":"ms"}}""",
+    assertJsonEquals(
+      actual2,
+      """{"headers":{"h1":"record1-header2","h2":2},"metadata":{"partition":1,"offset":2,"topic":"myTopic","timestamp":10002},"value":{"name":"anna\nkarenina","title":"ms","salary":"429.06"},"key":{"name":"anna\nkarenina","title":"ms","salary":"429.06"}}""",
     )
 
     val actual3 = jsonRecords(2)
-    actual3 should be(
-      """{"headers":{"h1":"record1-header3","h2":3},"metadata":{"partition":1,"offset":3,"topic":"myTopic","timestamp":10003},"value":{"name":"tom\nhardy","salary":"395.44","title":null},"key":{"name":"tom\nhardy","salary":"395.44","title":null}}""",
+    assertJsonEquals(
+      actual3,
+      """{"headers":{"h1":"record1-header3","h2":3},"metadata":{"partition":1,"offset":3,"topic":"myTopic","timestamp":10003},"value":{"name":"tom\nhardy","title":null,"salary":"395.44"},"key":{"name":"tom\nhardy","title":null,"salary":"395.44"}}""",
     )
   }
 
