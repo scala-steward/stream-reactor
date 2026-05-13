@@ -24,6 +24,7 @@ import org.apache.kafka.connect.json.JsonConverterConfig
 import org.scalatest.funsuite.AnyFunSuiteLike
 import org.scalatest.matchers.should.Matchers
 
+import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.util.Date
@@ -56,6 +57,13 @@ class ToJsonDataConverterTest extends AnyFunSuiteLike with Matchers {
     val date      = Date.from(Instant.now())
     val converted = ToJsonDataConverter.convertMessageValueToByteArray(Converter, ExampleTopic, TimestampSinkData(date))
     checkValueAndSchema(converted, date.getTime.toString)
+  }
+
+  test("should serialise MapSinkData (no Struct values) as UTF-8 JSON bytes") {
+    val map     = Map[String, AnyRef]("greeting" -> "naïve café 日本").asJava
+    val result  = ToJsonDataConverter.convertMessageValueToByteArray(Converter, ExampleTopic, MapSinkData(map))
+    val decoded = new String(result, StandardCharsets.UTF_8)
+    decoded should include("naïve café 日本")
   }
 
   private def checkValueAndSchema(converted: Any, expectedValue: String): Any =
