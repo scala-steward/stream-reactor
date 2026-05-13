@@ -37,7 +37,7 @@ class BuildLocalOutputStream(outputStream: BufferedOutputStream, topicPartition:
       require(
         startOffset >= 0 &&
           numberOfBytes > 0 &&
-          startOffset + numberOfBytes <= bytes.length,
+          numberOfBytes <= bytes.length - startOffset,
       )
 
       outputStream.write(bytes, startOffset, numberOfBytes)

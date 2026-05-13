@@ -78,6 +78,13 @@ class BuildLocalOutputStreamTest extends AnyFlatSpec with Matchers with Using wi
     target.getPointer should be(0)
   }
 
+  "write" should "throw IllegalArgumentException when startOffset overflows Int on addition with numberOfBytes" in new TestContext() {
+    val bytes: Array[Byte] = Array(1, 2, 3, 4)
+    an[IllegalArgumentException] should be thrownBy {
+      target.write(bytes, Int.MaxValue, 1)
+    }
+  }
+
   private def readFileContents =
     using(Source.fromFile(testFile)) {
       _.getLines().mkString
