@@ -111,8 +111,8 @@ class AvroFormatWriter(
     def close(): Either[SinkError, Unit] =
       for {
         _ <- Try(fileWriter.close()).toEither.leftMap { t =>
-               NonFatalCloudSinkError(s"Failed to close Avro file writer: ${t.getMessage}", t.some)
-             }
+          NonFatalCloudSinkError(s"Failed to close Avro file writer: ${t.getMessage}", t.some)
+        }
         closed <- outputStream.complete()
       } yield closed
 

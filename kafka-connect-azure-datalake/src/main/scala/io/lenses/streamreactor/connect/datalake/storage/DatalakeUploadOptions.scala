@@ -26,9 +26,9 @@ import com.azure.storage.common.ParallelTransferOptions
  * `maxConcurrency * blockSizeBytes`. Increase carefully in memory-constrained deployments.
  */
 case class DatalakeUploadOptions(
-  maxConcurrency:         Option[Int],
-  blockSizeBytes:         Option[Long],
-  maxSingleUploadBytes:   Option[Long],
+  maxConcurrency:       Option[Int],
+  blockSizeBytes:       Option[Long],
+  maxSingleUploadBytes: Option[Long],
 ) {
 
   def toParallelTransferOptions: ParallelTransferOptions = {

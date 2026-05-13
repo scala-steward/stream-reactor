@@ -57,10 +57,10 @@ class CsvFormatWriter(
 
   override def complete(): Either[SinkError, Unit] =
     for {
-      _ <- Suppress(csvWriter.flush())
-      _ <- Suppress(csvWriter.close())
-      _ <- Suppress(outputStreamWriter.close())
-      _ <- Suppress(outputStream.flush())
+      _      <- Suppress(csvWriter.flush())
+      _      <- Suppress(csvWriter.close())
+      _      <- Suppress(outputStreamWriter.close())
+      _      <- Suppress(outputStream.flush())
       closed <- outputStream.complete()
     } yield closed
 
