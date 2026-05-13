@@ -53,8 +53,9 @@ class LocalStagingAreaTest extends AnyFlatSpec with Matchers with EitherValues w
     val result  = TestConfig().getLocalStagingArea()
     result.isRight should be(true)
     result.value match {
-      case LocalStagingArea(file) => file.toString should startWith(s"$tempDir/superSleekSinkName".replace("//", "/"))
-      case _                      => fail("Wrong")
+      case LocalStagingArea(file, _) =>
+        file.toString should startWith(s"$tempDir/superSleekSinkName".replace("//", "/"))
+      case _ => fail("Wrong")
     }
   }
 

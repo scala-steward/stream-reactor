@@ -18,7 +18,10 @@ package io.lenses.streamreactor.connect.cloud.common.model.location
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import java.io.BufferedOutputStream
+import java.lang.reflect.Field
 import java.nio.file.Files
+import scala.util.Using
 
 class FileUtilsTest extends AnyFunSuite with Matchers {
 
@@ -33,6 +36,29 @@ class FileUtilsTest extends AnyFunSuite with Matchers {
 
     file.exists should be(true)
     file.isFile should be(true)
+  }
+
+  test("toBufferedOutputStream uses default 64 KB buffer") {
+    val tmpFile = Files.createTempFile("FileUtilsTest", ".tmp").toFile
+    tmpFile.deleteOnExit()
+    Using.resource(FileUtils.toBufferedOutputStream(tmpFile)) { out =>
+      bufSize(out) should be(FileUtils.DefaultStagingWriteBufferSize)
+    }
+  }
+
+  test("toBufferedOutputStream uses supplied custom buffer size") {
+    val tmpFile = Files.createTempFile("FileUtilsTest", ".tmp").toFile
+    tmpFile.deleteOnExit()
+    val customSize = 128 * 1024
+    Using.resource(FileUtils.toBufferedOutputStream(tmpFile, customSize)) { out =>
+      bufSize(out) should be(customSize)
+    }
+  }
+
+  private def bufSize(bos: BufferedOutputStream): Int = {
+    val f: Field = classOf[java.io.BufferedOutputStream].getSuperclass.getDeclaredField("buf")
+    f.setAccessible(true)
+    f.get(bos).asInstanceOf[Array[Byte]].length
   }
 
 }

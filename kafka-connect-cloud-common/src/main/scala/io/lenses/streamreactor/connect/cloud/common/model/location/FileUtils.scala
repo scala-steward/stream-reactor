@@ -23,7 +23,10 @@ import java.io.FileOutputStream
 
 object FileUtils extends LazyLogging {
 
-  def toBufferedOutputStream(file: File): BufferedOutputStream = new BufferedOutputStream(new FileOutputStream(file))
+  val DefaultStagingWriteBufferSize: Int = 64 * 1024
+
+  def toBufferedOutputStream(file: File, bufferSize: Int = DefaultStagingWriteBufferSize): BufferedOutputStream =
+    new BufferedOutputStream(new FileOutputStream(file), bufferSize)
 
   def createFileAndParents(file: File): Boolean = {
     Option(file.getParentFile)
