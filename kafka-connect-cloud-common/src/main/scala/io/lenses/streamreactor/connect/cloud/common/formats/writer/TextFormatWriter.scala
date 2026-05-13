@@ -21,6 +21,8 @@ import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.conversion.PrimitiveSinkData
 import io.lenses.streamreactor.connect.cloud.common.stream.CloudOutputStream
 
+import java.nio.charset.StandardCharsets
+
 import scala.util.Failure
 import scala.util.Success
 import scala.util.Try
@@ -32,7 +34,7 @@ class TextFormatWriter(outputStream: CloudOutputStream) extends FormatWriter {
 
       val dataBytes: Array[Byte] = Try {
         messageDetail.value match {
-          case data: PrimitiveSinkData => data.safeValue.toString.getBytes
+          case data: PrimitiveSinkData => data.safeValue.toString.getBytes(StandardCharsets.UTF_8)
           case _ => throw FormatWriterException("Not a string")
         }
       } match {
