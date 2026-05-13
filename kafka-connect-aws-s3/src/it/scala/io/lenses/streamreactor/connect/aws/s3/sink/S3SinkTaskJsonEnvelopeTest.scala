@@ -29,6 +29,7 @@ import org.apache.kafka.connect.data.SchemaAndValue
 import org.apache.kafka.connect.data.Struct
 import org.apache.kafka.connect.sink.SinkRecord
 import org.mockito.MockitoSugar
+import org.scalatest.Assertion
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -48,7 +49,7 @@ class S3SinkTaskJsonEnvelopeTest
 
   private val jsonMapper = new ObjectMapper()
 
-  private def assertJsonEquals(actual: String, expected: String): Unit =
+  private def assertJsonEquals(actual: String, expected: String): Assertion =
     jsonMapper.readTree(actual) shouldBe jsonMapper.readTree(expected)
 
   private def toSinkRecord(
