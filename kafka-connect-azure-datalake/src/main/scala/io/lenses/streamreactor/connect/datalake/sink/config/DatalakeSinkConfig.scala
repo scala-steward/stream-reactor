@@ -25,8 +25,14 @@ import io.lenses.streamreactor.connect.cloud.common.model.CompressionCodec
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocationValidator
 import io.lenses.streamreactor.connect.cloud.common.sink.config.CloudSinkBucketOptions
 import io.lenses.streamreactor.connect.cloud.common.sink.config.IndexOptions
+import io.lenses.streamreactor.connect.cloud.common.config.ConfigParse.getInt
+import io.lenses.streamreactor.connect.cloud.common.config.ConfigParse.getLong
 import io.lenses.streamreactor.connect.datalake.config.AzureConnectionConfig
 import io.lenses.streamreactor.connect.datalake.config.AzureConfigSettings.LOG_METRICS_CONFIG
+import io.lenses.streamreactor.connect.datalake.config.AzureConfigSettings.UPLOAD_PARALLELISM
+import io.lenses.streamreactor.connect.datalake.config.AzureConfigSettings.UPLOAD_BLOCK_SIZE_BYTES
+import io.lenses.streamreactor.connect.datalake.config.AzureConfigSettings.UPLOAD_MAX_SINGLE_UPLOAD_SIZE_BYTES
+import io.lenses.streamreactor.connect.datalake.storage.DatalakeUploadOptions
 
 object DatalakeSinkConfig extends PropsToConfigConverter[DatalakeSinkConfig] {
 
@@ -53,8 +59,14 @@ object DatalakeSinkConfig extends PropsToConfigConverter[DatalakeSinkConfig] {
       logMetrics              = s3ConfigDefBuilder.getBoolean(LOG_METRICS_CONFIG)
       schemaChangeDetector    = s3ConfigDefBuilder.schemaChangeDetector()
       useLatestSchemaForWrite = s3ConfigDefBuilder.getEnableLatestSchemaOptimization()
+      parsedValues            = s3ConfigDefBuilder.getParsedValues
+      uploadOptions = DatalakeUploadOptions(
+        maxConcurrency       = getInt(parsedValues, UPLOAD_PARALLELISM),
+        blockSizeBytes       = getLong(parsedValues, UPLOAD_BLOCK_SIZE_BYTES),
+        maxSingleUploadBytes = getLong(parsedValues, UPLOAD_MAX_SINGLE_UPLOAD_SIZE_BYTES),
+      )
     } yield DatalakeSinkConfig(
-      AzureConnectionConfig(s3ConfigDefBuilder.getParsedValues, authMode),
+      AzureConnectionConfig(parsedValues, authMode),
       sinkBucketOptions,
       indexOptions,
       s3ConfigDefBuilder.getCompressionCodec(),
@@ -64,6 +76,7 @@ object DatalakeSinkConfig extends PropsToConfigConverter[DatalakeSinkConfig] {
       schemaChangeDetector,
       skipNullValues              = s3ConfigDefBuilder.skipNullValues(),
       latestSchemaForWriteEnabled = useLatestSchemaForWrite,
+      uploadOptions               = uploadOptions,
     )
 
 }
@@ -79,4 +92,5 @@ case class DatalakeSinkConfig(
   schemaChangeDetector:        SchemaChangeDetector,
   skipNullValues:              Boolean,
   latestSchemaForWriteEnabled: Boolean                     = false,
+  uploadOptions:               DatalakeUploadOptions       = DatalakeUploadOptions.default,
 ) extends CloudSinkConfig[AzureConnectionConfig]

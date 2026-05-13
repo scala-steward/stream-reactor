@@ -19,6 +19,7 @@ import cats.implicits._
 import com.typesafe.scalalogging.LazyLogging
 import io.lenses.streamreactor.connect.cloud.common.model.CompressionCodec
 import io.lenses.streamreactor.connect.cloud.common.model.CompressionCodecName._
+import io.lenses.streamreactor.connect.cloud.common.sink.NonFatalCloudSinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.conversion.SinkData
 import io.lenses.streamreactor.connect.cloud.common.sink.conversion.ToAvroDataConverter
@@ -105,14 +106,14 @@ class AvroFormatWriter(
       // This prevents issues when records have been adapted by AttachLatestSchemaOptimizer
       val record: Any = ToAvroDataConverter.convertToGenericRecordWithSchema(valueStruct, schema)
       fileWriter.append(record)
-      fileWriter.flush()
     }
 
     def close(): Either[SinkError, Unit] =
       for {
-        _      <- Suppress(fileWriter.flush())
+        _ <- Try(fileWriter.close()).toEither.leftMap { t =>
+               NonFatalCloudSinkError(s"Failed to close Avro file writer: ${t.getMessage}", t.some)
+             }
         closed <- outputStream.complete()
-        _      <- Suppress(fileWriter.close())
       } yield closed
 
     def pointer: Long = outputStream.getPointer

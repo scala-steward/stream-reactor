@@ -51,19 +51,17 @@ class CsvFormatWriter(
           adaptErrorResponse(SinkDataExtractor.extractPathFromSinkData(messageDetail.value)(Some(path))).orNull,
         )
       csvWriter.writeNext(nextRow)
-      csvWriter.flush()
     }.toEither
 
   override def rolloverFileOnSchemaChange(): Boolean = true
 
   override def complete(): Either[SinkError, Unit] =
     for {
+      _ <- Suppress(csvWriter.flush())
+      _ <- Suppress(csvWriter.close())
+      _ <- Suppress(outputStreamWriter.close())
+      _ <- Suppress(outputStream.flush())
       closed <- outputStream.complete()
-      _      <- Suppress(csvWriter.flush())
-      _      <- Suppress(outputStream.flush())
-      _      <- Suppress(csvWriter.close())
-      _      <- Suppress(outputStreamWriter.close())
-      _      <- Suppress(outputStream.close())
     } yield closed
 
   override def getPointer: Long = outputStream.getPointer

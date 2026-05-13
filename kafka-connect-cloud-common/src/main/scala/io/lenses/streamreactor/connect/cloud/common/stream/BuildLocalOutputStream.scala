@@ -34,15 +34,14 @@ class BuildLocalOutputStream(outputStream: BufferedOutputStream, topicPartition:
     if (bytes == null || bytes.isEmpty) {
       ()
     } else {
-      val endOffset = startOffset + numberOfBytes
       require(
-        validateRange(startOffset, bytes.length) &&
+        startOffset >= 0 &&
           numberOfBytes > 0 &&
-          validateRange(endOffset, bytes.length),
+          startOffset + numberOfBytes <= bytes.length,
       )
 
-      outputStream.write(bytes.slice(startOffset, endOffset))
-      pointer += endOffset - startOffset
+      outputStream.write(bytes, startOffset, numberOfBytes)
+      pointer += numberOfBytes
     }
 
   override def write(b: Int): Unit = {
@@ -59,8 +58,6 @@ class BuildLocalOutputStream(outputStream: BufferedOutputStream, topicPartition:
     case to: Throwable =>
       FatalCloudSinkError(to.getMessage, topicPartition)
   }
-
-  private def validateRange(startOffset: Int, numberOfBytes: Int) = startOffset >= 0 && startOffset <= numberOfBytes
 
   override def getPointer: Long = pointer.toLong
 
