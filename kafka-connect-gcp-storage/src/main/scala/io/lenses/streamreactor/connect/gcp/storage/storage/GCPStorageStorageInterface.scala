@@ -55,7 +55,6 @@ import io.lenses.streamreactor.connect.cloud.common.storage.FileTouchError
 
 import java.io.InputStream
 import java.nio.channels.Channels
-import java.nio.file.Files
 import java.time.Instant
 import scala.annotation.tailrec
 import scala.jdk.CollectionConverters.IterableHasAsScala
@@ -64,10 +63,9 @@ import scala.util.Success
 import scala.util.Try
 
 class GCPStorageStorageInterface(
-  connectorTaskId:     ConnectorTaskId,
-  storage:             Storage,
-  avoidReumableUpload: Boolean,
-  extensionFilter:     Option[ExtensionFilter],
+  connectorTaskId: ConnectorTaskId,
+  storage:         Storage,
+  extensionFilter: Option[ExtensionFilter],
 ) extends StorageInterface[GCPStorageFileMetadata]
     with LazyLogging {
   override def uploadFile(source: UploadableFile, bucket: String, path: String): Either[UploadError, String] = {
@@ -77,12 +75,7 @@ class GCPStorageStorageInterface(
       eTag <- Try {
         val blobId   = BlobId.of(bucket, path)
         val blobInfo = BlobInfo.newBuilder(blobId).build()
-        val blob =
-          if (avoidReumableUpload) {
-            storage.create(blobInfo, Files.readAllBytes(file.toPath))
-          } else {
-            storage.createFrom(blobInfo, file.toPath)
-          }
+        val blob     = storage.createFrom(blobInfo, file.toPath)
         logger.debug(s"[{}] Completed upload from local {} to Storage {}:{}",
                      connectorTaskId.show,
                      source,

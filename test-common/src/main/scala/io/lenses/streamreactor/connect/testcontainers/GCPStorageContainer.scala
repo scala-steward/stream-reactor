@@ -53,7 +53,7 @@ class GCPStorageContainer(
 
 object GCPStorageContainer {
   private val dockerImage         = DockerImageName.parse("fsouza/fake-gcs-server")
-  private val defaultTag          = "1.47.6"
+  private val defaultTag          = "1.54.0"
   private val defaultNetworkAlias = "gstore"
   private val defaultPort         = 4443
 

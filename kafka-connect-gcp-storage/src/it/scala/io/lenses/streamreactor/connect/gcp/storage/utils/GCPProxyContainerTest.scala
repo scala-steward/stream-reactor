@@ -12,7 +12,6 @@ import io.lenses.streamreactor.connect.gcp.common.config.AuthModeSettings
 import io.lenses.streamreactor.connect.gcp.common.config.GCPSettings
 import io.lenses.streamreactor.connect.gcp.storage.auth.GCPStorageClientCreator
 import io.lenses.streamreactor.connect.gcp.storage.config.GCPConfigSettings._
-import io.lenses.streamreactor.connect.gcp.storage.config.UploadConfigKeys
 import io.lenses.streamreactor.connect.gcp.storage.sink.GCPStorageSinkTask
 import io.lenses.streamreactor.connect.gcp.storage.sink.config.GCPStorageSinkConfig
 import io.lenses.streamreactor.connect.gcp.storage.storage.GCPStorageFileMetadata
@@ -35,7 +34,6 @@ trait GCPProxyContainerTest
       GCPStorageSinkTask,
     ]
     with TaskIndexKey
-    with UploadConfigKeys
     with LazyLogging {
 
   private val gcpSettings    = new GCPSettings(javaConnectorPrefix)
@@ -49,7 +47,7 @@ trait GCPProxyContainerTest
 
   override def createStorageInterface(client: Storage): Either[Throwable, GCPStorageStorageInterface] =
     Try(
-      new GCPStorageStorageInterface(connectorTaskId, client, true, Option.empty),
+      new GCPStorageStorageInterface(connectorTaskId, client, Option.empty),
     ).toEither
 
   override def createClient(): Either[Throwable, Storage] = {
@@ -72,7 +70,6 @@ trait GCPProxyContainerTest
       gcpSettings.getHostKey         -> container.getEndpointUrl(),
       "name"                         -> "gcpSinkTaskTest",
       TASK_INDEX                     -> "1:1",
-      AVOID_RESUMABLE_UPLOAD         -> "true",
     )
 
   val localRoot: File = Files.createTempDirectory("blah").toFile

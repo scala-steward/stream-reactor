@@ -44,11 +44,7 @@ class GCPStorageSourceTask
     config:          GCPStorageSourceConfig,
     client:          Storage,
   ): GCPStorageStorageInterface =
-    new GCPStorageStorageInterface(connectorTaskId,
-                                   storage             = client,
-                                   avoidReumableUpload = false,
-                                   extensionFilter     = config.extensionFilter,
-    )
+    new GCPStorageStorageInterface(connectorTaskId, storage = client, extensionFilter = config.extensionFilter)
 
   override def createClient(config: GCPStorageSourceConfig): Either[Throwable, Storage] =
     GCPStorageClientCreator.make(config.connectionConfig)
