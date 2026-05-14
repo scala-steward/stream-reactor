@@ -21,18 +21,17 @@ import io.lenses.streamreactor.connect.cloud.common.formats.writer.FormatWriter
 import io.lenses.streamreactor.connect.cloud.common.formats.writer.schema.SchemaChangeDetector
 import io.lenses.streamreactor.connect.cloud.common.model.Offset
 import io.lenses.streamreactor.connect.cloud.common.model.Topic
+import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
 import io.lenses.streamreactor.connect.cloud.common.sink.BatchCloudSinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.FatalCloudSinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.commit.CommitContext
 import io.lenses.streamreactor.connect.cloud.common.sink.commit.CommitPolicy
 import io.lenses.streamreactor.connect.cloud.common.sink.config.PartitionField
-import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingOperationsProcessors
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState
-import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocation
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocationValidator
 import io.lenses.streamreactor.connect.cloud.common.storage.FileMetadata
@@ -129,11 +128,19 @@ class WriterCommitManagerTest
     writer
   }
 
-  private def createManager(
-    writers: Map[MapKey, Writer[FileMetadata]],
-    metrics: CloudSinkMetrics = new CloudSinkMetrics(),
-  ) =
-    new WriterCommitManager(() => writers, metrics)
+  /**
+   * Builds a `WriterSource` from a plain `Map` for use in tests. The global `iterator`
+   * iterates the whole map; `iteratorForTopicPartition` filters by TP.
+   */
+  private def sourceFromMap(writers: Map[MapKey, Writer[FileMetadata]]): WriterSource[FileMetadata] =
+    new WriterSource[FileMetadata] {
+      override def iterator: Iterator[(MapKey, Writer[FileMetadata])] = writers.iterator
+      override def iteratorForTopicPartition(tp: TopicPartition): Iterator[(MapKey, Writer[FileMetadata])] =
+        writers.iterator.filter { case (k, _) => k.topicPartition == tp }
+    }
+
+  private def createManager(writers: Map[MapKey, Writer[FileMetadata]]): WriterCommitManager[FileMetadata] =
+    new WriterCommitManager(sourceFromMap(writers))
 
   // commitPending is selective: only writers in Uploading state are picked up.
   // A sibling in Writing state on the same topic-partition is left open and will
@@ -155,7 +162,7 @@ class WriterCommitManagerTest
     writingWriter.hasPendingUpload shouldBe false
   }
 
-  // All four public methods route through the same private commitWritersWithFilter helper,
+  // All four public methods route through the same private commitFromIterator helper,
   // so error aggregation only needs one test. Pins: (a) a failure in one writer does not
   // roll back a successful commit in the same batch; (b) BatchCloudSinkError round-trips
   // the error identity correctly.
@@ -246,58 +253,42 @@ class WriterCommitManagerTest
     flushableB.hasPendingUpload shouldBe false
   }
 
-  // With 1-of-4 writers committed, the counters must reflect exactly how many sibling
-  // commits were avoided and what fraction of the TP set was selected.
+  // STRUCTURAL GUARD: commitFlushableWritersForTopicPartition must NOT call the global
+  // `iterator` (which would scan all writers). It must use `iteratorForTopicPartition`
+  // exclusively.  A `WriterSource` that throws on `iterator` is used to enforce this.
 
-  test("selective-commit metrics: avoidedSiblingCommits and flushFanOutRatio reflect 1-of-4 fixture") {
-    val metrics         = new CloudSinkMetrics()
-    val flushableWriter = makeWriter(writingState, shouldFlushResult = true)
-    val sibling1        = makeWriter(writingState, shouldFlushResult = false)
-    val sibling2        = makeWriter(writingState, shouldFlushResult = false)
-    val sibling3        = makeWriter(writingState, shouldFlushResult = false)
+  test("commitFlushableWritersForTopicPartition does not iterate writers on other TPs") {
+    val flushableA = makeWriter(writingState, shouldFlushResult = true)
+    // Many writers on TP-B — if the global iterator were called these would be visited.
+    val siblingB1 = makeWriter(writingState, shouldFlushResult = true)
+    val siblingB2 = makeWriter(writingState, shouldFlushResult = true)
+    val siblingB3 = makeWriter(writingState, shouldFlushResult = true)
 
-    val manager = createManager(
-      Map(
-        MapKey(topicPartition, Map(partitionField -> "v1")) -> flushableWriter,
-        MapKey(topicPartition, Map(partitionField -> "v2")) -> sibling1,
-        MapKey(topicPartition, Map(partitionField -> "v3")) -> sibling2,
-        MapKey(topicPartition, Map(partitionField -> "v4")) -> sibling3,
-      ),
-      metrics,
+    val backingMap: Map[MapKey, Writer[FileMetadata]] = Map(
+      MapKey(topicPartition, Map(partitionField -> "a")) -> flushableA,
+      MapKey(topicPartitionB, Map(partitionField -> "b1")) -> siblingB1,
+      MapKey(topicPartitionB, Map(partitionField -> "b2")) -> siblingB2,
+      MapKey(topicPartitionB, Map(partitionField -> "b3")) -> siblingB3,
     )
 
+    val guardedSource: WriterSource[FileMetadata] = new WriterSource[FileMetadata] {
+      override def iterator: Iterator[(MapKey, Writer[FileMetadata])] =
+        throw new AssertionError(
+          "commitFlushableWritersForTopicPartition must not call the global iterator",
+        )
+      override def iteratorForTopicPartition(tp: TopicPartition): Iterator[(MapKey, Writer[FileMetadata])] =
+        backingMap.iterator.filter { case (k, _) => k.topicPartition == tp }
+    }
+
+    val manager = new WriterCommitManager(guardedSource)
+    // Must succeed without throwing (i.e. the guarded global iterator is never called)
     manager.commitFlushableWritersForTopicPartition(topicPartition).value shouldBe ()
 
-    flushableWriter.isIdle shouldBe true
-    Seq(sibling1, sibling2, sibling3).foreach { s =>
+    flushableA.isIdle shouldBe true
+    // TP-B siblings must be untouched
+    Seq(siblingB1, siblingB2, siblingB3).foreach { s =>
       s.isIdle shouldBe false
       s.hasPendingUpload shouldBe false
     }
-
-    metrics.getSelectiveCommitInvocations shouldBe 1L
-    metrics.getSelectiveCommitWritersCommitted shouldBe 1L
-    metrics.getSelectiveCommitAvoidedSiblingCommits shouldBe 3L
-    metrics.getSelectedWritersPerFlush shouldBe 1
-    metrics.getActiveWritersPerTopicPartition shouldBe 4
-    metrics.getFlushFanOutRatio shouldBe (1.0d / 4.0d) +- 1e-9
-  }
-
-  // When the trigger matches no writers the invocation is still recorded and the fan-out
-  // ratio falls back to 1.0 (empty selection, no benefit to quantify).
-
-  test("selective-commit metrics: zero-match cycle records invocation; fan-out ratio defaults to 1.0") {
-    val metrics = new CloudSinkMetrics()
-    val writer  = makeWriter(writingState, shouldFlushResult = false) // Writing, not Uploading
-    val manager = createManager(Map(MapKey(topicPartition, Map.empty) -> writer), metrics)
-
-    manager.commitPending().value shouldBe ()
-
-    writer.isIdle shouldBe false
-    writer.hasPendingUpload shouldBe false
-
-    metrics.getSelectiveCommitInvocations shouldBe 1L
-    metrics.getSelectiveCommitWritersCommitted shouldBe 0L
-    metrics.getSelectiveCommitAvoidedSiblingCommits shouldBe 0L
-    metrics.getFlushFanOutRatio shouldBe 1.0d
   }
 }
