@@ -42,24 +42,9 @@ class UploadSettingsTest extends AnyFunSuite with Matchers with UploadConfigKeys
     override def getLong(key: String): lang.Long = ???
   }
 
-  test("isAvoidResumableUpload should default to false") {
-    val settings = new TestUploadSettings()
-    settings.isAvoidResumableUpload should be(false)
-  }
-
-  test("isAvoidResumableUpload should be true when set to true") {
+  test("AVOID_RESUMABLE_UPLOAD config key should be accepted without error (deprecated no-op)") {
     val settings = new TestUploadSettings(Map(AVOID_RESUMABLE_UPLOAD -> "true"))
-    settings.isAvoidResumableUpload should be(true)
-  }
-
-  test("isAvoidResumableUpload should be false when set to false") {
-    val settings = new TestUploadSettings(Map(AVOID_RESUMABLE_UPLOAD -> "false"))
-    settings.isAvoidResumableUpload should be(false)
-  }
-
-  test("isAvoidResumableUpload should be false when not explicitly set") {
-    val settings = new TestUploadSettings()
-    settings.isAvoidResumableUpload should be(false)
+    settings should not be null
   }
 
   override def connectorPrefix: String = "test"

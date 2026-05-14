@@ -15,14 +15,28 @@
  */
 package io.lenses.streamreactor.connect.cloud.common.sink.writer
 
-import cats.implicits._
-import com.typesafe.scalalogging.LazyLogging
-import io.lenses.streamreactor.connect.cloud.common.config.ConnectorTaskId
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
 import io.lenses.streamreactor.connect.cloud.common.sink.BatchCloudSinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
-import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
 import io.lenses.streamreactor.connect.cloud.common.storage.FileMetadata
+
+/**
+ * Abstraction over the writer map that lets [[WriterCommitManager]] iterate writers without
+ * ever materialising a full immutable snapshot.  The two methods return live iterators backed
+ * directly by the mutable data structures held in [[WriterManager]]:
+ *
+ *  - `iterator`                       — all writers (used by the TP-agnostic paths).
+ *  - `iteratorForTopicPartition(tp)`  — only writers keyed to `tp` (used by the per-TP paths,
+ *                                       O(siblings on TP) rather than O(all writers)).
+ *
+ * Callers must not mutate the underlying structures while consuming an iterator.  This is safe
+ * because [[WriterManager]] is documented as non-thread-safe and all mutations happen on the
+ * same thread as commit calls.
+ */
+private[writer] trait WriterSource[SM <: FileMetadata] {
+  def iterator: Iterator[(MapKey, Writer[SM])]
+  def iteratorForTopicPartition(tp: TopicPartition): Iterator[(MapKey, Writer[SM])]
+}
 
 /**
  * Manages the commit operations for writers.
@@ -39,30 +53,20 @@ import io.lenses.streamreactor.connect.cloud.common.storage.FileMetadata
  *     trigger and is the deliberate amendment to the prior plan version.
  *   - `commitForTopicPartition` is the only path that still fans out across every writer
  *     for a `TopicPartition`. It is reserved for schema rollover, where every sibling must
- *     flush together to preserve format-boundary semantics. Do NOT weaken this method to
- *     selective; the regression is pinned by `WriterCommitManagerTest "commitForTopicPartition
- *     should commit all writers for the given topic partition if one is committed"`.
+ *     flush together to preserve format-boundary semantics. Do NOT replace this with a selective filter.
  *
  * Safety: `WriterManager.getOffsetAndMeta` continues to scan EVERY active writer on the
  * topic-partition when computing `globalSafeOffset`, so the consumer-committable offset
  * is bounded by the slowest active writer's `firstBufferedOffset` even when only a subset
  * of writers commit. Selective commit reduces the *CommitSet* but never the *BarrierSet*.
  *
- * @param fnGetWriters    Function to retrieve the current map of writers.
- * @param metrics         Metrics sink for selective-commit observability. Defaults to a
- *                        fresh instance so test helpers compile without wiring; production
- *                        callers thread the WriterManager-level metrics through so the JMX
- *                        bean reflects real activity.
+ * @param source          Provides live iterators over the writer map without snapshot allocation.
  * @param connectorTaskId Implicit task ID for logging purposes.
  * @tparam SM Type parameter for file metadata.
  */
 class WriterCommitManager[SM <: FileMetadata](
-  fnGetWriters: () => Map[MapKey, Writer[SM]],
-  metrics:      CloudSinkMetrics = new CloudSinkMetrics(),
-)(
-  implicit
-  connectorTaskId: ConnectorTaskId,
-) extends LazyLogging {
+  source: WriterSource[SM],
+) {
 
   /**
    * Commits writers that have pending uploads (state == `Uploading`).
@@ -73,9 +77,7 @@ class WriterCommitManager[SM <: FileMetadata](
    * no starvation.
    */
   def commitPending(): Either[SinkError, Unit] =
-    commitWritersWithFilter {
-      case (_, writer) => writer.hasPendingUpload
-    }
+    commitFromIterator(source.iterator.filter { case (_, w) => w.hasPendingUpload })
 
   /**
    * Commits every writer for `topicPartition`, irrespective of state or flush threshold.
@@ -85,71 +87,40 @@ class WriterCommitManager[SM <: FileMetadata](
    * the format boundary is consistent. Do NOT replace this with a selective filter.
    */
   def commitForTopicPartition(topicPartition: TopicPartition): Either[BatchCloudSinkError, Unit] =
-    commitWritersWithFilter {
-      case (mapKey, _) =>
-        mapKey.topicPartition == topicPartition
-    }
+    commitFromIterator(source.iteratorForTopicPartition(topicPartition))
 
   /**
    * Commits writers that should be flushed, across all topic-partitions. Selective:
    * non-flushable siblings keep buffering.
    */
   def commitFlushableWriters(): Either[BatchCloudSinkError, Unit] =
-    commitWritersWithFilter {
-      case (_, writer) => writer.shouldFlush
-    }
+    commitFromIterator(source.iterator.filter { case (_, w) => w.shouldFlush })
 
   /**
    * Commits writers that should be flushed for a specific topic partition. Selective:
    * non-flushable siblings on the same topic-partition keep buffering.
+   *
+   * Uses `iteratorForTopicPartition` so only the O(siblings on TP) entries are visited;
+   * no full-map scan or snapshot allocation occurs.
    */
   def commitFlushableWritersForTopicPartition(topicPartition: TopicPartition): Either[BatchCloudSinkError, Unit] =
-    commitWritersWithFilter {
-      case (MapKey(tp, _), writer) => tp == topicPartition && writer.shouldFlush
-    }
-
-  /**
-   * Selective commit: commit exactly the writers matching `keyValueFilterFn`.
-   *
-   * The previous implementation expanded the selected set to every sibling on the same
-   * `TopicPartition`. That step has been removed: each cycle observes a single snapshot
-   * of the writer map, picks the matching entries, commits them, and reports metrics
-   * describing how much fan-out was avoided versus the legacy behaviour.
-   *
-   * Errors are aggregated as `BatchCloudSinkError` over the selected set, preserving the
-   * pre-existing classification semantics (`fatal` vs `nonFatal`, `rollBack()`,
-   * `topicPartitions()`).
-   */
-  private def commitWritersWithFilter(
-    keyValueFilterFn: ((MapKey, Writer[SM])) => Boolean,
-  ): Either[BatchCloudSinkError, Unit] = {
-
-    val snapshot = fnGetWriters()
-    val selected = snapshot.filter(keyValueFilterFn)
-
-    // Benefit metric: count of writers that the legacy "expand to every sibling on the
-    // matching TPs" step would have committed. With selective commit, anything in this
-    // matching-TP set that is NOT in `selected` is a sibling we successfully avoided.
-    val matchingTopicPartitions = selected.keysIterator.map(_.topicPartition).toSet
-    val matchingTpWriters =
-      if (matchingTopicPartitions.isEmpty) 0
-      else snapshot.count { case (MapKey(tp, _), _) => matchingTopicPartitions.contains(tp) }
-
-    metrics.recordSelectiveCommit(selectedSize = selected.size, matchingTpWriters = matchingTpWriters)
-
-    logger.debug(
-      s"[{}] Selective commit: selected={} matchingTpWriters={} avoided={}",
-      connectorTaskId.show,
-      selected.size,
-      matchingTpWriters,
-      math.max(0, matchingTpWriters - selected.size),
+    commitFromIterator(
+      source.iteratorForTopicPartition(topicPartition).filter { case (_, w) => w.shouldFlush },
     )
 
-    val errors = selected.iterator
+  /**
+   * Drives commits for every entry in `iter`, collects errors, and returns a single
+   * `BatchCloudSinkError` if any writer failed (preserving the pre-existing classification
+   * semantics: `fatal` vs `nonFatal`, `rollBack()`, `topicPartitions()`).
+   * A failure in one writer does not prevent the remaining writers from being committed.
+   */
+  private def commitFromIterator(
+    iter: Iterator[(MapKey, Writer[SM])],
+  ): Either[BatchCloudSinkError, Unit] = {
+    val errors = iter
       .map { case (_, w) => w.commit }
       .collect { case Left(err) => err }
       .toSet
-
     Either.cond(errors.isEmpty, (), BatchCloudSinkError(errors))
   }
 }

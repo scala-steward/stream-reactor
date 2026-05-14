@@ -805,12 +805,6 @@ For the selective paths, the BarrierSet — every active writer for the topic-pa
 
 **Metrics** exposed via JMX on `CloudSinkMetrics`:
 
-- `selectiveCommitInvocations` — every selective-commit dispatch (one per `commitFlushableWriters` / `commitPending` call).
-- `selectiveCommitWritersCommitted` — total writers committed through the selective path; cumulative.
-- `selectiveCommitAvoidedSiblingCommits` — `(matching-TP writers − writers selected)` per call, summed; this is the count of sibling commits that would have run under the old fan-out.
-- `selectedWritersPerFlush` — last cycle's selected writer count.
-- `activeWritersPerTopicPartition` — last cycle's matching-TP writer count.
-- `flushFanOutRatio` — last cycle's `selected / matching-TP writers`. With selective commit a typical hot-key fixture should sit well below `1.0`; under fan-out it would be exactly `1.0`.
 - `safeOffsetBarrierWriters` — set every time `getOffsetAndMeta` runs; equals the number of writers contributing a `firstBufferedOffset` to the barrier.
 
 Operators verify the reduction in cloud operations against these counters; safety is enforced by the `BarrierSet` and the safety-proof tests in `WriterManagerPreCommitTest`, `GranularLockScenarioTest`, and `WriterManagerOffsetInvariantsScenarioTest`.

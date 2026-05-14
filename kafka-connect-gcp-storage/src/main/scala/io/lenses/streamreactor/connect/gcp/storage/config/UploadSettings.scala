@@ -23,13 +23,8 @@ import org.apache.kafka.common.config.ConfigDef.Type
 trait UploadConfigKeys extends WithConnectorPrefix {
 
   /**
-   * Resumable upload is a feature in Google Cloud Storage that allows the interruption and continuation of large file uploads, improving the reliability and efficiency of the upload process. When uploading large files, network issues or interruptions can occur, causing traditional uploads to fail and requiring the entire file to be re-uploaded.
-   *
-   * The resumable upload feature addresses this challenge by breaking the file into smaller, manageable chunks. If an interruption occurs, only the affected chunk needs to be re-uploaded, rather than the entire file. This not only reduces the likelihood of upload failures but also saves bandwidth and time.
-   *
-   * Disabling the resumable upload feature might be necessary in certain scenarios where the benefits of reduced bandwidth usage and upload efficiency are outweighed by specific application requirements. For instance, in environments with highly stable and uninterrupted network connections, or when dealing with small files, disabling resumable uploads could simplify the upload process without significant drawbacks. It provides flexibility for users to tailor the upload behavior based on their specific use case and network conditions.
-   *
-   * We enable this setting in the integration tests as the stubs we use are incapable of accepting such uploads.
+   * Deprecated. Uploads are now always streamed via resumable sessions using `storage.createFrom`, which keeps heap
+   * usage bounded regardless of file size. This setting is accepted for backwards compatibility but has no effect.
    */
   protected val AVOID_RESUMABLE_UPLOAD: String = s"$connectorPrefix.avoid.resumable.upload"
 
@@ -38,10 +33,8 @@ trait UploadConfigKeys extends WithConnectorPrefix {
       AVOID_RESUMABLE_UPLOAD,
       Type.BOOLEAN,
       "false",
-      Importance.HIGH,
-      "Avoid resumable uploads. Resumable upload in Google Cloud Storage enables the seamless continuation of large file uploads, preventing the need to re-upload the entire file in case of interruptions. Disabling this feature may be preferred in stable network conditions or when dealing with small files, streamlining the upload process based on specific application requirements. Default: Resumable uploads allowed.",
+      Importance.LOW,
+      "[Deprecated, ignored] Previously used to switch from resumable to single-request uploads. Uploads are now always streamed via resumable sessions and this setting has no effect.",
     )
 }
-trait UploadSettings extends BaseSettings with UploadConfigKeys {
-  def isAvoidResumableUpload: Boolean = getBoolean(AVOID_RESUMABLE_UPLOAD)
-}
+trait UploadSettings extends BaseSettings with UploadConfigKeys
