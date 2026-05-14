@@ -32,6 +32,7 @@ import io.lenses.streamreactor.connect.elastic.common.bulk.DeleteOp
 import io.lenses.streamreactor.connect.elastic.common.bulk.InsertOp
 import io.lenses.streamreactor.connect.elastic.common.bulk.KBulkClient
 import io.lenses.streamreactor.connect.elastic.common.bulk.UpsertOp
+import io.lenses.streamreactor.connect.elastic.common.config.ElasticCommonConfigConstants
 import io.lenses.streamreactor.connect.elastic.common.config.ElasticCommonSettings
 import io.lenses.streamreactor.connect.elastic.common.indexname.CreateIndex
 import org.apache.kafka.connect.errors.ConnectException
@@ -53,8 +54,6 @@ class JsonBulkWriter(client: KBulkClient, val settings: ElasticCommonSettings) e
   // failures (e.g. pointing at an Elasticsearch cluster) are surfaced at SinkTask.start,
   // not on the first batch of records.
   client.start().fold(throw _, identity)
-
-  private val BEHAVIOR_ON_NULL_VALUES_PROPERTY = "behavior.on.null.values"
 
   // Warn about WITHDOCTYPE clauses only when the backend does not honour them.
   // Elasticsearch 6 uses document types and will honour the clause; ES7 and OpenSearch dropped
@@ -115,7 +114,7 @@ class JsonBulkWriter(client: KBulkClient, val settings: ElasticCommonSettings) e
 
   private def fetchNullValueBehaviorProperty(kcql: Kcql): String =
     kcql.getProperties.asScala.keys
-      .find(_.toLowerCase == BEHAVIOR_ON_NULL_VALUES_PROPERTY)
+      .find(_.toLowerCase == ElasticCommonConfigConstants.BEHAVIOR_ON_NULL_VALUES_PROPERTY)
       .map(kcql.getProperties.get)
       .orNull
 
