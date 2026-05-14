@@ -32,7 +32,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
   private val filesLimit = 4
 
   "lister" should "list from root" in {
-    val bucketName = "listRootLevel"
+    val bucketName = "list-root-level"
     val mockClient: Storage =
       setUpMockClient(bucketName, "1.txt", "2.txt", "3.txt", "4.txt")
 
@@ -48,7 +48,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
   }
 
   "lister" should "list all directories" in {
-    val bucketName = "listAllDirectories"
+    val bucketName = "list-all-directories"
     val mockClient: Storage =
       setUpMockClient(bucketName, "prefix1/1.txt", "prefix2/2.txt", "prefix3/3.txt", "prefix4/4.txt")
 
@@ -65,7 +65,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
 
   "lister" should "list directories recursively" in {
 
-    val bucketName = "listDirectoriesRecursively"
+    val bucketName = "list-directories-recursively"
     val mockClient: Storage = setUpMockClient(
       bucketName,
       "prefix1/sub1/file1.txt",
@@ -87,7 +87,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
 
   "lister" should "exclude directories" in {
 
-    val bucketName = "excludeDirectories"
+    val bucketName = "exclude-directories"
     val mockClient: Storage = setUpMockClient(
       bucketName,
       "prefix1/file1.txt",
@@ -107,7 +107,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
   }
 
   "lister" should "consider the connector task owning the partition" in {
-    val bucketName = "connectorTaskIdOwnership"
+    val bucketName = "connector-task-id-ownership"
     val taskId1    = ConnectorTaskId("sinkName", 2, 1)
     val taskId2    = ConnectorTaskId("sinkName", 2, 0)
 
@@ -182,7 +182,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
 
   "lister" should "exclude indexes directory when configured as wildcard exclude" in {
 
-    val bucketName = "excludeIndexesDirectory"
+    val bucketName = "exclude-indexes-directory"
     val mockClient: Storage = setUpMockClient(
       bucketName,
       ".indexes/sinkName/myTopic/00005/00000000000000000050",
@@ -230,7 +230,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
 
   "lister" should "typical topic/partition/offset scenario" in {
 
-    val bucketName = "typicalTopicPartitionOffsetScenario"
+    val bucketName = "typical-topic-partition-offset-scenario"
     val mockClient: Storage = setUpMockClient(
       bucketName,
       ".indexes/sinkName/myTopic/00005/00000000000000000050",
@@ -258,7 +258,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
   }
   "lister" should "typical topic/partition/offset scenario without trailing slash" in {
 
-    val bucketName = "typicalTopicPartitionOffsetScenarioWithoutTrailingSlash"
+    val bucketName = "typical-topic-partition-offset-no-slash"
     val mockClient: Storage = setUpMockClient(
       bucketName,
       ".indexes/sinkName/myTopic/00005/00000000000000000050",
