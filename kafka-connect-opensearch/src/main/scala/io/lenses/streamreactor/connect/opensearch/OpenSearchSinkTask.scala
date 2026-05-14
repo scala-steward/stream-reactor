@@ -35,8 +35,8 @@ class OpenSearchSinkTask extends AbstractElasticSinkTask with StrictLogging {
 
   override protected def createWriter(conf: Map[String, String]): JsonBulkWriter = {
     OpenSearchConfig.config.parse(conf.asJava)
-    val osConfig  = OpenSearchConfig(conf.asJava)
-    val settings  = OpenSearchSettings(osConfig)
+    val osConfig = OpenSearchConfig(conf.asJava)
+    val settings = OpenSearchSettings(osConfig)
 
     logger.info(
       "OpenSearch Sink Task starting: host(s)={}, port={}, protocol={}, awsSigning={}, " +

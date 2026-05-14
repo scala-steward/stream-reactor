@@ -50,9 +50,8 @@ class OpenSearchErrorPolicyIT extends AnyFunSuite with Matchers with BeforeAndAf
     wireMock.start()
   }
 
-  override def afterAll(): Unit = {
+  override def afterAll(): Unit =
     wireMock.stop()
-  }
 
   private val schema: Schema = SchemaBuilder.struct()
     .field("id", Schema.STRING_SCHEMA)
@@ -65,10 +64,10 @@ class OpenSearchErrorPolicyIT extends AnyFunSuite with Matchers with BeforeAndAf
 
   private def makeWriter(host: String, port: Int, kcql: String, errorPolicy: String): JsonBulkWriter = {
     val props = Map(
-      HOSTS      -> host,
-      ES_PORT    -> port.toString,
-      KCQL       -> kcql,
-      ERROR_POLICY -> errorPolicy,
+      HOSTS          -> host,
+      ES_PORT        -> port.toString,
+      KCQL           -> kcql,
+      ERROR_POLICY   -> errorPolicy,
       NBR_OF_RETRIES -> "2",
     )
     val config    = OpenSearchConfig(props)

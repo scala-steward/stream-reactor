@@ -25,17 +25,17 @@ class JwtBearerInterceptorTest extends AnyFunSuite with Matchers {
   private def newRequest: BasicHttpRequest = new BasicHttpRequest(Method.POST, "/_bulk")
 
   test("injects Authorization: Bearer <token> header") {
-    val source = new StaticJwtTokenSource("test-token-123")
+    val source      = new StaticJwtTokenSource("test-token-123")
     val interceptor = new JwtBearerInterceptor(source)
-    val request = newRequest
+    val request     = newRequest
     interceptor.process(request, null, null)
     request.getFirstHeader("Authorization").getValue shouldBe "Bearer test-token-123"
   }
 
   test("replaces a pre-existing Authorization header (setHeader, not addHeader)") {
-    val source = new StaticJwtTokenSource("new-token")
+    val source      = new StaticJwtTokenSource("new-token")
     val interceptor = new JwtBearerInterceptor(source)
-    val request = newRequest
+    val request     = newRequest
     request.setHeader("Authorization", "Bearer old-token")
     interceptor.process(request, null, null)
     // exactly one Authorization header after processing

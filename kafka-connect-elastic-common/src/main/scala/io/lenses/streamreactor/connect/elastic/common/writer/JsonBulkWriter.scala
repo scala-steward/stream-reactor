@@ -43,9 +43,7 @@ import scala.util.Success
 import scala.jdk.CollectionConverters._
 import scala.jdk.CollectionConverters.ListHasAsScala
 
-class JsonBulkWriter(client: KBulkClient, val settings: ElasticCommonSettings)
-    extends ErrorHandler
-    with StrictLogging {
+class JsonBulkWriter(client: KBulkClient, val settings: ElasticCommonSettings) extends ErrorHandler with StrictLogging {
 
   logger.info("Initialising Json bulk writer")
 
@@ -98,8 +96,12 @@ class JsonBulkWriter(client: KBulkClient, val settings: ElasticCommonSettings)
       m.put(
         kcql,
         KcqlValues(
-          kcql.getFields.asScala.map(f => Field(f.getName, f.getAlias, Option(f.getParentFields).map(_.asScala.toVector).orNull)).toSeq,
-          kcql.getIgnoredFields.asScala.map(f => Field(f.getName, f.getAlias, Option(f.getParentFields).map(_.asScala.toVector).orNull)).toSeq,
+          kcql.getFields.asScala.map(f =>
+            Field(f.getName, f.getAlias, Option(f.getParentFields).map(_.asScala.toVector).orNull),
+          ).toSeq,
+          kcql.getIgnoredFields.asScala.map(f =>
+            Field(f.getName, f.getAlias, Option(f.getParentFields).map(_.asScala.toVector).orNull),
+          ).toSeq,
           kcql.getPrimaryKeys.asScala.map { pk =>
             val path = Option(pk.getParentFields).map(_.asScala.toVector).getOrElse(Vector.empty)
             path :+ pk.getName
@@ -180,7 +182,7 @@ class JsonBulkWriter(client: KBulkClient, val settings: ElasticCommonSettings)
     kcqlValue: KcqlValues,
     r:         SinkRecord,
   ): Option[BulkOp] = {
-    val i = CreateIndex.getIndexName(kcql, r).leftMap(throw _).merge
+    val i            = CreateIndex.getIndexName(kcql, r).leftMap(throw _).merge
     val documentType = Option(kcql.getDocType)
     val (rawJson: Option[JsonNode], pks: Seq[Any]) =
       if (kcqlValue.primaryKeysPath.isEmpty) {

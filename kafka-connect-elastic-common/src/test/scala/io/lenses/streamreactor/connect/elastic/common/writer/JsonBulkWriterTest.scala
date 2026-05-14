@@ -64,14 +64,19 @@ import scala.util.Try
  *  - Unsupported write mode is rejected at construction
  *  - WITHDOCTYPE warning is logged (not rejected)
  */
-class JsonBulkWriterTest extends AnyFunSuite with Matchers with StrictLogging with MockitoSugar with ArgumentMatchersSugar {
+class JsonBulkWriterTest
+    extends AnyFunSuite
+    with Matchers
+    with StrictLogging
+    with MockitoSugar
+    with ArgumentMatchersSugar {
 
   // ---- Test helpers ----
 
   /** Accumulates bulk ops received by the writer. */
   class RecordingBulkClient extends KBulkClient {
     val ops:     mutable.Buffer[Seq[BulkOp]] = mutable.Buffer.empty
-    val created: mutable.Buffer[String]       = mutable.Buffer.empty
+    val created: mutable.Buffer[String]      = mutable.Buffer.empty
 
     override def bulk(ops: Seq[BulkOp]): Try[BulkResult] = {
       this.ops += ops
@@ -93,15 +98,15 @@ class JsonBulkWriterTest extends AnyFunSuite with Matchers with StrictLogging wi
   private def kcqlSettings(kcqlExpr: String, batchSize: Int = 100): ElasticCommonSettings = {
     val kcqls = kcqlExpr.split(";").filter(_.nonEmpty).map(io.lenses.kcql.Kcql.parse).toSeq
     ElasticCommonSettings(
-      kcqls                = kcqls,
-      errorPolicy          = new NoopErrorPolicy(),
-      taskRetries          = 1,
-      writeTimeout         = 300000,
-      batchSize            = batchSize,
-      pkJoinerSeparator    = ".",
+      kcqls                 = kcqls,
+      errorPolicy           = new NoopErrorPolicy(),
+      taskRetries           = 1,
+      writeTimeout          = 300000,
+      batchSize             = batchSize,
+      pkJoinerSeparator     = ".",
       httpBasicAuthUsername = "",
       httpBasicAuthPassword = "",
-      storesInfo           = defaultStoresInfo,
+      storesInfo            = defaultStoresInfo,
     )
   }
 
@@ -191,7 +196,7 @@ class JsonBulkWriterTest extends AnyFunSuite with Matchers with StrictLogging wi
 
     val op = recording.allOps.head.asInstanceOf[InsertOp]
     op.json.has("name") shouldBe false
-    op.json.has("id")   shouldBe true
+    op.json.has("id") shouldBe true
   }
 
   test("tombstone with NOOP behavior (DELETE) generates a DeleteOp") {
@@ -243,7 +248,8 @@ class JsonBulkWriterTest extends AnyFunSuite with Matchers with StrictLogging wi
 
   test("batch size groups records into multiple bulk calls") {
     val recording = new RecordingBulkClient
-    val writer    = new JsonBulkWriter(recording, kcqlSettings("INSERT INTO batch-idx SELECT * FROM batch-topic", batchSize = 2))
+    val writer =
+      new JsonBulkWriter(recording, kcqlSettings("INSERT INTO batch-idx SELECT * FROM batch-topic", batchSize = 2))
 
     val records = (1 to 5).map(i => record("batch-topic", s"k$i", struct(i, s"user-$i"), offset = i.toLong)).toVector
     writer.write(records)
@@ -301,7 +307,8 @@ class JsonBulkWriterTest extends AnyFunSuite with Matchers with StrictLogging wi
 
   test("tombstone with no null-value property configured defaults to IGNORE (thunk quirk)") {
     val recording = new RecordingBulkClient
-    val writer    = new JsonBulkWriter(recording, kcqlSettings("INSERT INTO ts-default-idx SELECT * FROM ts-default-topic"))
+    val writer =
+      new JsonBulkWriter(recording, kcqlSettings("INSERT INTO ts-default-idx SELECT * FROM ts-default-topic"))
 
     writer.write(Vector(tombstone("ts-default-topic", "k1")))
 
@@ -318,7 +325,9 @@ class JsonBulkWriterTest extends AnyFunSuite with Matchers with StrictLogging wi
 
     class CapturingClient extends KBulkClient {
       var lastOps: Seq[BulkOp] = Seq.empty
-      override def bulk(ops: Seq[BulkOp]): Try[BulkResult] = { lastOps = ops; Success(BulkResult(1L, false, Seq.empty)) }
+      override def bulk(ops: Seq[BulkOp]): Try[BulkResult] = {
+        lastOps = ops; Success(BulkResult(1L, false, Seq.empty))
+      }
       override def createIndex(name: String): Try[Unit] = Success(())
       override def close(): Unit = ()
     }
@@ -330,7 +339,7 @@ class JsonBulkWriterTest extends AnyFunSuite with Matchers with StrictLogging wi
     )
 
     val int64Struct = new Struct(int64Schema).put("id", 123L).put("name", "Alice")
-    val r = new SinkRecord("topic", 0, Schema.STRING_SCHEMA, "k", int64Schema, int64Struct, 0L)
+    val r           = new SinkRecord("topic", 0, Schema.STRING_SCHEMA, "k", int64Schema, int64Struct, 0L)
     writer.write(Vector(r))
 
     capturing.lastOps.head.asInstanceOf[InsertOp].id shouldBe "123"
@@ -344,7 +353,9 @@ class JsonBulkWriterTest extends AnyFunSuite with Matchers with StrictLogging wi
 
     class CapturingClient extends KBulkClient {
       var lastOps: Seq[BulkOp] = Seq.empty
-      override def bulk(ops: Seq[BulkOp]): Try[BulkResult] = { lastOps = ops; Success(BulkResult(1L, false, Seq.empty)) }
+      override def bulk(ops: Seq[BulkOp]): Try[BulkResult] = {
+        lastOps = ops; Success(BulkResult(1L, false, Seq.empty))
+      }
       override def createIndex(name: String): Try[Unit] = Success(())
       override def close(): Unit = ()
     }
@@ -364,9 +375,12 @@ class JsonBulkWriterTest extends AnyFunSuite with Matchers with StrictLogging wi
 
   test("AUTOCREATE calls createIndex at construction (deduplication test)") {
     val recording = new RecordingBulkClient
-    val _         = new JsonBulkWriter(recording, kcqlSettings(
-      "INSERT INTO idx1 SELECT * FROM t AUTOCREATE;INSERT INTO idx1 SELECT * FROM t2 AUTOCREATE",
-    ))
+    val _ =
+      new JsonBulkWriter(recording,
+                         kcqlSettings(
+                           "INSERT INTO idx1 SELECT * FROM t AUTOCREATE;INSERT INTO idx1 SELECT * FROM t2 AUTOCREATE",
+                         ),
+      )
     recording.created.count(_ == "idx1") shouldBe 1
   }
 
@@ -397,8 +411,8 @@ class JsonBulkWriterTest extends AnyFunSuite with Matchers with StrictLogging wi
     val client = new NoDocTypeClient
 
     // Attach a ListAppender to the JsonBulkWriter logger to capture WARN lines.
-    val writerLogger  = LoggerFactory.getLogger(classOf[JsonBulkWriter]).asInstanceOf[LogbackLogger]
-    val listAppender  = new ListAppender[ILoggingEvent]()
+    val writerLogger = LoggerFactory.getLogger(classOf[JsonBulkWriter]).asInstanceOf[LogbackLogger]
+    val listAppender = new ListAppender[ILoggingEvent]()
     listAppender.start()
     writerLogger.addAppender(listAppender)
 
@@ -443,7 +457,8 @@ class JsonBulkWriterTest extends AnyFunSuite with Matchers with StrictLogging wi
     val expected  = s"${baseIndex}_$today"
 
     val recording = new RecordingBulkClient
-    val kcqlExpr  = s"INSERT INTO $baseIndex SELECT * FROM dyn-topic PK id WITHINDEXSUFFIX=_{YYYY-MM-dd} PROPERTIES('behavior.on.null.values'='DELETE')"
+    val kcqlExpr =
+      s"INSERT INTO $baseIndex SELECT * FROM dyn-topic PK id WITHINDEXSUFFIX=_{YYYY-MM-dd} PROPERTIES('behavior.on.null.values'='DELETE')"
 
     val writer = new JsonBulkWriter(recording, kcqlSettings(kcqlExpr))
 

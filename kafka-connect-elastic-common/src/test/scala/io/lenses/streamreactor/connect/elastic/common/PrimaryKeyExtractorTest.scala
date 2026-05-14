@@ -42,7 +42,7 @@ class PrimaryKeyExtractorTest extends AnyFunSuite with Matchers {
   }
 
   test("extract should throw exception if path does not exist in JsonNode") {
-    val jsonNode  = parseJson("""{"field": "value"}""")
+    val jsonNode = parseJson("""{"field": "value"}""")
     val exception = intercept[IllegalArgumentException] {
       PrimaryKeyExtractor.extract(jsonNode, Vector("nonexistent"))
     }
@@ -50,7 +50,7 @@ class PrimaryKeyExtractorTest extends AnyFunSuite with Matchers {
   }
 
   test("extract should throw exception if path leads to non-primitive field in JsonNode") {
-    val jsonNode  = parseJson("""{"field": {"subfield": "value"}}""")
+    val jsonNode = parseJson("""{"field": {"subfield": "value"}}""")
     val exception = intercept[IllegalArgumentException] {
       PrimaryKeyExtractor.extract(jsonNode, Vector("field"))
     }
@@ -58,7 +58,7 @@ class PrimaryKeyExtractorTest extends AnyFunSuite with Matchers {
   }
 
   test("extract should throw exception when encountering an array in JsonNode") {
-    val jsonNode  = parseJson("""{"field": [1, 2, 3]}""")
+    val jsonNode = parseJson("""{"field": [1, 2, 3]}""")
     val exception = intercept[IllegalArgumentException] {
       PrimaryKeyExtractor.extract(jsonNode, Vector("field"))
     }
@@ -92,8 +92,8 @@ class PrimaryKeyExtractorTest extends AnyFunSuite with Matchers {
   }
 
   test("extract should throw exception if path does not exist in Struct") {
-    val schema    = SchemaBuilder.struct().field("field", Schema.STRING_SCHEMA).build()
-    val struct    = new Struct(schema).put("field", "value")
+    val schema = SchemaBuilder.struct().field("field", Schema.STRING_SCHEMA).build()
+    val struct = new Struct(schema).put("field", "value")
     val exception = intercept[IllegalArgumentException] {
       PrimaryKeyExtractor.extract(struct, Vector("nonexistent"))
     }
@@ -101,8 +101,8 @@ class PrimaryKeyExtractorTest extends AnyFunSuite with Matchers {
   }
 
   test("extract should throw exception if field in Struct is null") {
-    val schema    = SchemaBuilder.struct().field("field", Schema.OPTIONAL_STRING_SCHEMA).build()
-    val struct    = new Struct(schema).put("field", null)
+    val schema = SchemaBuilder.struct().field("field", Schema.OPTIONAL_STRING_SCHEMA).build()
+    val struct = new Struct(schema).put("field", null)
     val exception = intercept[IllegalArgumentException] {
       PrimaryKeyExtractor.extract(struct, Vector("field"))
     }
@@ -150,7 +150,8 @@ class PrimaryKeyExtractorTest extends AnyFunSuite with Matchers {
   }
 
   test("extract should throw exception when encountering unsupported schema type in Struct (MAP)") {
-    val schema   = SchemaBuilder.struct().field("mapField", SchemaBuilder.map(Schema.STRING_SCHEMA, Schema.INT32_SCHEMA)).build()
+    val schema =
+      SchemaBuilder.struct().field("mapField", SchemaBuilder.map(Schema.STRING_SCHEMA, Schema.INT32_SCHEMA)).build()
     val mapValue = Map("key" -> 123).asJava
     val struct   = new Struct(schema).put("mapField", mapValue)
 

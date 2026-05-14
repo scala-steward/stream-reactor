@@ -52,12 +52,12 @@ abstract class AbstractElasticSinkTask extends SinkTask with StrictLogging with 
   protected def createWriter(conf: Map[String, String]): JsonBulkWriter
 
   protected def errorRetryIntervalKey: String
-  protected def progressEnabledKey: String
+  protected def progressEnabledKey:    String
 
   override def start(props: util.Map[String, String]): Unit = {
     printAsciiHeader(manifest, asciiArtResource)
 
-    val conf = if (context.configs().isEmpty) props else context.configs()
+    val conf    = if (context.configs().isEmpty) props else context.configs()
     val confMap = conf.asScala.toMap
 
     val w = createWriter(confMap)
@@ -65,13 +65,15 @@ abstract class AbstractElasticSinkTask extends SinkTask with StrictLogging with 
     // Wire the retry interval into the context timeout when policy is RETRY
     w.settings.errorPolicy match {
       case RetryErrorPolicy() =>
-        val retryInterval = conf.asScala.get(errorRetryIntervalKey).map(_.toLong).getOrElse(ElasticCommonConfigConstants.ERROR_RETRY_INTERVAL_DEFAULT.toLong)
+        val retryInterval = conf.asScala.get(errorRetryIntervalKey).map(_.toLong).getOrElse(
+          ElasticCommonConfigConstants.ERROR_RETRY_INTERVAL_DEFAULT.toLong,
+        )
         context.timeout(retryInterval)
       case _ =>
     }
 
     enableProgress = conf.asScala.get(progressEnabledKey).exists(_.toBoolean)
-    writer = Some(w)
+    writer         = Some(w)
   }
 
   override def put(records: util.Collection[SinkRecord]): Unit = {

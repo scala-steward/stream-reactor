@@ -18,8 +18,8 @@ package io.lenses.streamreactor.connect.elastic.common.bulk
 import com.fasterxml.jackson.databind.JsonNode
 
 sealed trait BulkOp {
-  def index: String
-  def id:    String
+  def index:        String
+  def id:           String
   def documentType: Option[String]
 }
 

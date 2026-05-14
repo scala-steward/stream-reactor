@@ -36,15 +36,15 @@ object ElasticSettings {
     val batchSize             = config.getInt(ElasticConfigConstants.BATCH_SIZE_CONFIG)
 
     ElasticCommonSettings(
-      kcqls                = kcql,
-      errorPolicy          = errorPolicy,
-      taskRetries          = retries,
-      writeTimeout         = writeTimeout,
-      batchSize            = batchSize,
-      pkJoinerSeparator    = pkJoinerSeparator,
+      kcqls                 = kcql,
+      errorPolicy           = errorPolicy,
+      taskRetries           = retries,
+      writeTimeout          = writeTimeout,
+      batchSize             = batchSize,
+      pkJoinerSeparator     = pkJoinerSeparator,
       httpBasicAuthUsername = httpBasicAuthUsername,
       httpBasicAuthPassword = httpBasicAuthPassword,
-      storesInfo           = unpackOrThrow(StoresInfo.fromConfig(config)),
+      storesInfo            = unpackOrThrow(StoresInfo.fromConfig(config)),
     )
   }
 }

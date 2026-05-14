@@ -41,6 +41,6 @@ trait KBulkClient extends AutoCloseable {
    */
   def supportsDocumentType: Boolean = false
 
-  def bulk(ops: Seq[BulkOp]): Try[BulkResult]
-  def createIndex(name: String): Try[Unit]
+  def bulk(ops:         Seq[BulkOp]): Try[BulkResult]
+  def createIndex(name: String):      Try[Unit]
 }

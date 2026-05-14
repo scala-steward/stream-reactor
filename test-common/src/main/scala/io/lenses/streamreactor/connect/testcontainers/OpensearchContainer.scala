@@ -37,7 +37,8 @@ class OpensearchContainer(
   dockerImage:      DockerImageName,
   dockerTag:        String = defaultTag,
   val networkAlias: String = defaultNetworkAlias,
-) extends SingleContainer[JavaOpensearchContainer[_]] with StrictLogging {
+) extends SingleContainer[JavaOpensearchContainer[_]]
+    with StrictLogging {
 
   val port: Int = 9200
 
@@ -46,7 +47,7 @@ class OpensearchContainer(
 
   container.withNetworkAliases(networkAlias)
 
-  private var securityEnabled: Boolean         = false
+  private var securityEnabled: Boolean                    = false
   private var pkiFixture:      Option[SecurityPkiFixture] = None
 
   lazy val hostNetwork = new HostNetwork()
@@ -162,12 +163,18 @@ class OpensearchContainer(
     logger.info("SecurityPlugin: running securityadmin.sh to apply security configuration")
     val result = container.execInContainer(
       "/usr/share/opensearch/plugins/opensearch-security/tools/securityadmin.sh",
-      "-cd", "/usr/share/opensearch/config/opensearch-security/",
-      "-icl", "-nhnv",
-      "-cacert", "/usr/share/opensearch/config/root-ca.pem",
-      "-cert", "/usr/share/opensearch/config/admin.pem",
-      "-key", "/usr/share/opensearch/config/admin-key.pem",
-      "-h", "localhost",
+      "-cd",
+      "/usr/share/opensearch/config/opensearch-security/",
+      "-icl",
+      "-nhnv",
+      "-cacert",
+      "/usr/share/opensearch/config/root-ca.pem",
+      "-cert",
+      "/usr/share/opensearch/config/admin.pem",
+      "-key",
+      "/usr/share/opensearch/config/admin-key.pem",
+      "-h",
+      "localhost",
     )
     if (result.getExitCode != 0) {
       logger.error(s"securityadmin.sh failed:\nstdout: ${result.getStdout}\nstderr: ${result.getStderr}")

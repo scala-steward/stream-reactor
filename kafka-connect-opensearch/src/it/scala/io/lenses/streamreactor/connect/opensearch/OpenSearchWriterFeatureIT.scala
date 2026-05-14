@@ -34,7 +34,7 @@ import java.time.LocalDate
  */
 class OpenSearchWriterFeatureIT extends ITBase {
 
-  private val host = "localhost"
+  private val host      = "localhost"
   private lazy val port = container.hostNetwork.httpHostAddress.split(":").last.toInt
 
   // ---- UPSERT idempotency ----
@@ -138,15 +138,16 @@ class OpenSearchWriterFeatureIT extends ITBase {
 
   test("Date-suffix: WITHINDEXSUFFIX appends today's date to the index name") {
     val baseIndex = "suffix-base"
-    val today     = LocalDate.now().toString            // "YYYY-MM-dd"
+    val today     = LocalDate.now().toString // "YYYY-MM-dd"
     val expected  = s"${baseIndex}_$today"
 
     val kClient = makeKClient(baseProps(
-      host, port,
+      host,
+      port,
       s"INSERT INTO $baseIndex SELECT * FROM topic WITHINDEXSUFFIX=_{YYYY-MM-dd}",
     ))
 
-    val doc = JsonNodeFactory.instance.objectNode().put("msg", "dated")
+    val doc    = JsonNodeFactory.instance.objectNode().put("msg", "dated")
     val result = kClient.bulk(Seq(InsertOp(expected, "s1", doc, None, None)))
     result.isSuccess shouldBe true
     result.get.errors shouldBe false

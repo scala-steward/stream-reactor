@@ -31,23 +31,24 @@ import scala.util.Try
  * OpenSearch-specific settings, extending [[ElasticCommonSettings]].
  */
 case class OpenSearchSettings(
-  common:                  ElasticCommonSettings,
-  hosts:                   Seq[String],
-  port:                    Int,
-  tablePrefix:             Option[String],
-  protocol:                String,
-  awsSigningEnabled:       Boolean,
-  awsRegion:               String,
-  awsSigningService:       String,
-  awsCredentialsProvider:  String,
-  awsAccessKeyId:          String,
-  awsSecretAccessKey:      String,
-  awsSessionToken:         String,
-  jwtTokenSource:          Option[JwtTokenSource],
-  strictItemErrors:        Boolean,
-  maxConnectionsPerRoute:  Int,
-  maxConnectionsTotal:     Int,
+  common:                 ElasticCommonSettings,
+  hosts:                  Seq[String],
+  port:                   Int,
+  tablePrefix:            Option[String],
+  protocol:               String,
+  awsSigningEnabled:      Boolean,
+  awsRegion:              String,
+  awsSigningService:      String,
+  awsCredentialsProvider: String,
+  awsAccessKeyId:         String,
+  awsSecretAccessKey:     String,
+  awsSessionToken:        String,
+  jwtTokenSource:         Option[JwtTokenSource],
+  strictItemErrors:       Boolean,
+  maxConnectionsPerRoute: Int,
+  maxConnectionsTotal:    Int,
 ) {
+
   /** The SigV4 host string: bare hostname when port == 9200, else `host:port`. */
   def sigV4Host: String = {
     val host = hosts.head
@@ -61,18 +62,18 @@ object OpenSearchSettings extends StrictLogging {
     // Parity row 53: split on "," without trim — mirrors ElasticWriter.endpoints in elastic7.
     // Whitespace inside the comma-separated list is preserved verbatim on the REST path.
     // The SigV4 path enforces a single-host + no-scheme constraint separately (lines below).
-    val hostsRaw = config.getString(HOSTS).split(",").toSeq
-    val port     = config.getInt(ES_PORT)
-    val protocol = config.getString(PROTOCOL)
+    val hostsRaw    = config.getString(HOSTS).split(",").toSeq
+    val port        = config.getInt(ES_PORT)
+    val protocol    = config.getString(PROTOCOL)
     val tablePrefix = Option(config.getString(ES_PREFIX)).filter(_.nonEmpty)
 
-    val awsSigningEnabled    = config.getBoolean(AWS_SIGNING_ENABLED_KEY)
-    val awsRegion            = config.getString(AWS_REGION_KEY)
-    val awsSigningService    = config.getString(AWS_SIGNING_SERVICE_KEY)
-    val awsCredProvider      = config.getString(AWS_CREDENTIALS_PROVIDER_KEY)
-    val awsAccessKeyId       = config.getString(AWS_ACCESS_KEY_ID_KEY)
-    val awsSecretAccessKey   = config.getPassword(AWS_SECRET_ACCESS_KEY_KEY).value()
-    val awsSessionToken      = config.getPassword(AWS_SESSION_TOKEN_KEY).value()
+    val awsSigningEnabled  = config.getBoolean(AWS_SIGNING_ENABLED_KEY)
+    val awsRegion          = config.getString(AWS_REGION_KEY)
+    val awsSigningService  = config.getString(AWS_SIGNING_SERVICE_KEY)
+    val awsCredProvider    = config.getString(AWS_CREDENTIALS_PROVIDER_KEY)
+    val awsAccessKeyId     = config.getString(AWS_ACCESS_KEY_ID_KEY)
+    val awsSecretAccessKey = config.getPassword(AWS_SECRET_ACCESS_KEY_KEY).value()
+    val awsSessionToken    = config.getPassword(AWS_SESSION_TOKEN_KEY).value()
 
     val jwtToken     = config.getPassword(JWT_TOKEN_KEY).value()
     val jwtTokenFile = config.getString(JWT_TOKEN_FILE_KEY)
@@ -207,8 +208,9 @@ object OpenSearchSettings extends StrictLogging {
     }
 
     // Warn: protocol=http with TLS material
-    val sslKeystoreLocation   = Try(Option(config.getString("ssl.keystore.location"))).toOption.flatten.filter(_.nonEmpty)
-    val sslTruststoreLocation = Try(Option(config.getString("ssl.truststore.location"))).toOption.flatten.filter(_.nonEmpty)
+    val sslKeystoreLocation = Try(Option(config.getString("ssl.keystore.location"))).toOption.flatten.filter(_.nonEmpty)
+    val sslTruststoreLocation =
+      Try(Option(config.getString("ssl.truststore.location"))).toOption.flatten.filter(_.nonEmpty)
     if (protocol == "http" && (sslKeystoreLocation.nonEmpty || sslTruststoreLocation.nonEmpty) && !awsSigningEnabled) {
       logger.warn(
         s"connect.opensearch.protocol=http but TLS material is configured " +
@@ -233,45 +235,46 @@ object OpenSearchSettings extends StrictLogging {
     val kcqls = config.getString(KCQL).split(";").filter(_.trim.nonEmpty).map(io.lenses.kcql.Kcql.parse).toIndexedSeq
 
     val common = ElasticCommonSettings(
-      kcqls                = kcqls,
-      errorPolicy          = config.getErrorPolicy,
-      taskRetries          = config.getNumberRetries,
-      writeTimeout         = config.getWriteTimeout,
-      batchSize            = config.getInt(BATCH_SIZE),
-      pkJoinerSeparator    = config.getString(PK_JOINER_SEPARATOR),
+      kcqls                 = kcqls,
+      errorPolicy           = config.getErrorPolicy,
+      taskRetries           = config.getNumberRetries,
+      writeTimeout          = config.getWriteTimeout,
+      batchSize             = config.getInt(BATCH_SIZE),
+      pkJoinerSeparator     = config.getString(PK_JOINER_SEPARATOR),
       httpBasicAuthUsername = username,
       httpBasicAuthPassword = password,
-      storesInfo           = storesInfo,
+      storesInfo            = storesInfo,
     )
 
-    val jwtTokenSource = if (jwtToken.nonEmpty) {
-      Some(JwtTokenSource.fromStaticToken(jwtToken))
-    } else if (jwtTokenFile.nonEmpty) {
-      Some(JwtTokenSource.fromFile(jwtTokenFile, jwtRefreshMs))
-    } else {
-      None
-    }
+    val jwtTokenSource =
+      if (jwtToken.nonEmpty) {
+        Some(JwtTokenSource.fromStaticToken(jwtToken))
+      } else if (jwtTokenFile.nonEmpty) {
+        Some(JwtTokenSource.fromFile(jwtTokenFile, jwtRefreshMs))
+      } else {
+        None
+      }
 
     val maxConnectionsPerRoute = config.getInt(MAX_CONNECTIONS_PER_ROUTE_KEY)
     val maxConnectionsTotal    = config.getInt(MAX_CONNECTIONS_TOTAL_KEY)
 
     OpenSearchSettings(
-      common                  = common,
-      hosts                   = hostsRaw,
-      port                    = port,
-      tablePrefix             = tablePrefix,
-      protocol                = protocol,
-      awsSigningEnabled       = awsSigningEnabled,
-      awsRegion               = awsRegion,
-      awsSigningService       = awsSigningService,
-      awsCredentialsProvider  = awsCredProvider,
-      awsAccessKeyId          = awsAccessKeyId,
-      awsSecretAccessKey      = awsSecretAccessKey,
-      awsSessionToken         = awsSessionToken,
-      jwtTokenSource          = jwtTokenSource,
-      strictItemErrors        = strictItemErrors,
-      maxConnectionsPerRoute  = maxConnectionsPerRoute,
-      maxConnectionsTotal     = maxConnectionsTotal,
+      common                 = common,
+      hosts                  = hostsRaw,
+      port                   = port,
+      tablePrefix            = tablePrefix,
+      protocol               = protocol,
+      awsSigningEnabled      = awsSigningEnabled,
+      awsRegion              = awsRegion,
+      awsSigningService      = awsSigningService,
+      awsCredentialsProvider = awsCredProvider,
+      awsAccessKeyId         = awsAccessKeyId,
+      awsSecretAccessKey     = awsSecretAccessKey,
+      awsSessionToken        = awsSessionToken,
+      jwtTokenSource         = jwtTokenSource,
+      strictItemErrors       = strictItemErrors,
+      maxConnectionsPerRoute = maxConnectionsPerRoute,
+      maxConnectionsTotal    = maxConnectionsTotal,
     )
   }
 }

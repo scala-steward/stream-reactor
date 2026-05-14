@@ -178,10 +178,12 @@ object OpenSearchTransportFactory extends StrictLogging {
       // (1) No-op redirect strategy — prevents credential replay via 30x redirects.
       //     Applied unconditionally so future config changes (adding auth) do not silently
       //     become a redirect-following path.
-      httpClientBuilder.setRedirectStrategy(new RedirectStrategy {
-        override def isRedirected(request: HttpRequest, response: HttpResponse, context: HttpContext): Boolean = false
-        override def getLocationURI(request: HttpRequest, response: HttpResponse, context: HttpContext): URI   = null
-      })
+      httpClientBuilder.setRedirectStrategy(
+        new RedirectStrategy {
+          override def isRedirected(request:   HttpRequest, response: HttpResponse, context: HttpContext): Boolean = false
+          override def getLocationURI(request: HttpRequest, response: HttpResponse, context: HttpContext): URI     = null
+        },
+      )
 
       // (2) HTTP-layer timeouts.  The plan's intentional difference #2 pins write.timeout as
       //     milliseconds on the OpenSearch path (unlike elastic7's legacy seconds interpretation).

@@ -28,7 +28,6 @@ import org.apache.hc.core5.http.protocol.HttpContext
  */
 class JwtBearerInterceptor(tokenSource: JwtTokenSource) extends HttpRequestInterceptor {
 
-  override def process(request: HttpRequest, entityDetails: EntityDetails, context: HttpContext): Unit = {
+  override def process(request: HttpRequest, entityDetails: EntityDetails, context: HttpContext): Unit =
     request.setHeader("Authorization", s"Bearer ${tokenSource.getToken}")
-  }
 }

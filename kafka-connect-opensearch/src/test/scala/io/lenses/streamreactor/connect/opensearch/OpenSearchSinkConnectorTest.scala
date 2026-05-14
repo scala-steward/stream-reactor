@@ -62,8 +62,8 @@ class OpenSearchSinkConnectorTest extends AnyFunSuite with Matchers {
     // Helpers.checkInputTopics validates that each topic in 'topics' has a corresponding KCQL source.
     val ex = intercept[Exception](
       startConnector(Map(
-        KCQL   -> "INSERT INTO idx SELECT * FROM topic-a",
-        "topics" -> "topic-a,topic-b",  // topic-b has no KCQL source
+        KCQL     -> "INSERT INTO idx SELECT * FROM topic-a",
+        "topics" -> "topic-a,topic-b", // topic-b has no KCQL source
       )),
     )
     ex should not be null
@@ -73,7 +73,7 @@ class OpenSearchSinkConnectorTest extends AnyFunSuite with Matchers {
   test("A9: matching topics and KCQL sources — connector starts successfully") {
     noException shouldBe thrownBy {
       startConnector(Map(
-        KCQL   -> "INSERT INTO a SELECT * FROM topic-a;INSERT INTO b SELECT * FROM topic-b",
+        KCQL     -> "INSERT INTO a SELECT * FROM topic-a;INSERT INTO b SELECT * FROM topic-b",
         "topics" -> "topic-a,topic-b",
       ))
     }
@@ -88,10 +88,12 @@ class OpenSearchSinkConnectorTest extends AnyFunSuite with Matchers {
     // Reverse of the previous case: all 'topics' have a KCQL source, but the KCQL also mentions
     // a source that is not in 'topics'. This should also be rejected.
     val ex = intercept[Exception](
-      startConnector(Map(
-        KCQL   -> "INSERT INTO a SELECT * FROM topic-a;INSERT INTO orphan SELECT * FROM topic-orphan",
-        "topics" -> "topic-a",  // topic-orphan is in KCQL but not in 'topics'
-      )),
+      startConnector(
+        Map(
+          KCQL     -> "INSERT INTO a SELECT * FROM topic-a;INSERT INTO orphan SELECT * FROM topic-orphan",
+          "topics" -> "topic-a", // topic-orphan is in KCQL but not in 'topics'
+        ),
+      ),
     )
     ex should not be null
     ex.getMessage.toLowerCase should (include("topic-orphan") or include("topics") or include("kcql"))

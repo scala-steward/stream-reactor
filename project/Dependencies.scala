@@ -459,10 +459,11 @@ object Dependencies {
   def jna(v: String): ModuleID = "net.java.dev.jna" % "jna" % v
 
   // OpenSearch
-  lazy val openSearchJava           = "org.opensearch.client"              % "opensearch-java"          % Versions.openSearchVersion
-  lazy val openSearchRestClient     = "org.opensearch.client"              % "opensearch-rest-client"   % Versions.openSearchVersion
-  lazy val openSearchTestcontainers = "org.opensearch"                     % "opensearch-testcontainers" % Versions.openSearchTestcontainersVersion
-  lazy val httpclient5              = "org.apache.httpcomponents.client5"  % "httpclient5"              % Versions.httpclient5Version
+  lazy val openSearchJava       = "org.opensearch.client" % "opensearch-java"        % Versions.openSearchVersion
+  lazy val openSearchRestClient = "org.opensearch.client" % "opensearch-rest-client" % Versions.openSearchVersion
+  lazy val openSearchTestcontainers =
+    "org.opensearch" % "opensearch-testcontainers" % Versions.openSearchTestcontainersVersion
+  lazy val httpclient5 = "org.apache.httpcomponents.client5" % "httpclient5" % Versions.httpclient5Version
 
   // AWS SDK v2 extras (auth/regions/apache-client)
   lazy val awsSdkAuth         = "software.amazon.awssdk" % "auth"          % Versions.awsSdkVersion

@@ -39,9 +39,8 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
     wireMock.start()
   }
 
-  override def afterAll(): Unit = {
+  override def afterAll(): Unit =
     if (wireMock != null) wireMock.stop()
-  }
 
   private val baseProps = Map(
     HOSTS   -> "localhost",
@@ -79,12 +78,14 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
   }
 
   test("SigV4 creates an AwsSdk2Transport") {
-    val transport = OpenSearchTransportFactory.create(settings(
-      AWS_SIGNING_ENABLED_KEY       -> "true",
-      AWS_REGION_KEY                 -> "us-east-1",
-      HOSTS                          -> "my-cluster.us-east-1.es.amazonaws.com",
-      "connect.opensearch.protocol"  -> "https",
-    ))
+    val transport = OpenSearchTransportFactory.create(
+      settings(
+        AWS_SIGNING_ENABLED_KEY       -> "true",
+        AWS_REGION_KEY                -> "us-east-1",
+        HOSTS                         -> "my-cluster.us-east-1.es.amazonaws.com",
+        "connect.opensearch.protocol" -> "https",
+      ),
+    )
     try {
       transport shouldBe a[AwsSdk2Transport]
     } finally transport.close()
@@ -95,12 +96,12 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
     // to test the transport factory's own defence check
     val baseSettings = settings(
       AWS_SIGNING_ENABLED_KEY       -> "true",
-      AWS_REGION_KEY                 -> "us-east-1",
-      HOSTS                          -> "my-cluster.us-east-1.es.amazonaws.com",
-      "connect.opensearch.protocol"  -> "https",
+      AWS_REGION_KEY                -> "us-east-1",
+      HOSTS                         -> "my-cluster.us-east-1.es.amazonaws.com",
+      "connect.opensearch.protocol" -> "https",
     )
     val withPrefix = baseSettings.copy(tablePrefix = Some("myprefix"))
-    val ex = intercept[IllegalStateException](OpenSearchTransportFactory.create(withPrefix))
+    val ex         = intercept[IllegalStateException](OpenSearchTransportFactory.create(withPrefix))
     ex.getMessage should include("tableprefix")
   }
 
@@ -147,29 +148,31 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
     import java.security.KeyStore
     import java.nio.file.Files
     // Create a minimal in-memory PKCS12 keystore for the test
-    val ks       = KeyStore.getInstance("PKCS12")
+    val ks = KeyStore.getInstance("PKCS12")
     ks.load(null, "test".toCharArray)
-    val ksFile   = Files.createTempFile("unit-ks", ".p12")
-    val ksOut    = new java.io.FileOutputStream(ksFile.toFile)
+    val ksFile = Files.createTempFile("unit-ks", ".p12")
+    val ksOut  = new java.io.FileOutputStream(ksFile.toFile)
     ks.store(ksOut, "test".toCharArray)
     ksOut.close()
 
-    val ts       = KeyStore.getInstance("PKCS12")
+    val ts = KeyStore.getInstance("PKCS12")
     ts.load(null, "test".toCharArray)
-    val tsFile   = Files.createTempFile("unit-ts", ".p12")
-    val tsOut    = new java.io.FileOutputStream(tsFile.toFile)
+    val tsFile = Files.createTempFile("unit-ts", ".p12")
+    val tsOut  = new java.io.FileOutputStream(tsFile.toFile)
     ts.store(tsOut, "test".toCharArray)
     tsOut.close()
 
-    val transport = OpenSearchTransportFactory.create(settings(
-      JWT_TOKEN_KEY              -> "my-jwt-token",
-      "ssl.keystore.location"    -> ksFile.toString,
-      "ssl.keystore.type"        -> "PKCS12",
-      "ssl.keystore.password"    -> "test",
-      "ssl.truststore.location"  -> tsFile.toString,
-      "ssl.truststore.type"      -> "PKCS12",
-      "ssl.truststore.password"  -> "test",
-    ))
+    val transport = OpenSearchTransportFactory.create(
+      settings(
+        JWT_TOKEN_KEY             -> "my-jwt-token",
+        "ssl.keystore.location"   -> ksFile.toString,
+        "ssl.keystore.type"       -> "PKCS12",
+        "ssl.keystore.password"   -> "test",
+        "ssl.truststore.location" -> tsFile.toString,
+        "ssl.truststore.type"     -> "PKCS12",
+        "ssl.truststore.password" -> "test",
+      ),
+    )
     try {
       transport shouldBe a[ApacheHttpClient5Transport]
     } finally {
@@ -219,10 +222,12 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
     val port = wireMock.port()
 
     // Stub: GET / (the info() endpoint) returns 302 → /redirected
-    wireMock.stubFor(get(urlEqualTo("/"))
-      .willReturn(aResponse()
-        .withStatus(302)
-        .withHeader("Location", s"http://localhost:$port/redirected")))
+    wireMock.stubFor(
+      get(urlEqualTo("/"))
+        .willReturn(aResponse()
+          .withStatus(302)
+          .withHeader("Location", s"http://localhost:$port/redirected")),
+    )
 
     // Stub: the redirect target — if hit, we will count it
     wireMock.stubFor(get(urlEqualTo("/redirected"))
@@ -252,12 +257,12 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
   test("SigV4 settings create an AwsSdk2Transport (not ApacheHttpClient5Transport)") {
     val s = settings(
       AWS_SIGNING_ENABLED_KEY       -> "true",
-      AWS_REGION_KEY                 -> "us-east-1",
-      AWS_SIGNING_SERVICE_KEY        -> "es",
-      AWS_CREDENTIALS_PROVIDER_KEY   -> "STATIC",
-      AWS_ACCESS_KEY_ID_KEY          -> "AKIAIOSFODNN7EXAMPLE",
-      AWS_SECRET_ACCESS_KEY_KEY      -> "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-      "connect.opensearch.protocol"  -> "https",
+      AWS_REGION_KEY                -> "us-east-1",
+      AWS_SIGNING_SERVICE_KEY       -> "es",
+      AWS_CREDENTIALS_PROVIDER_KEY  -> "STATIC",
+      AWS_ACCESS_KEY_ID_KEY         -> "AKIAIOSFODNN7EXAMPLE",
+      AWS_SECRET_ACCESS_KEY_KEY     -> "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      "connect.opensearch.protocol" -> "https",
     )
     val transport = OpenSearchTransportFactory.create(s)
     try {

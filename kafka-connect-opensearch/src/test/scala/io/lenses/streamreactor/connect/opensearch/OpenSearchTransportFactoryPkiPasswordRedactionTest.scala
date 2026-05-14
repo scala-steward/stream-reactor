@@ -40,12 +40,12 @@ class OpenSearchTransportFactoryPkiPasswordRedactionTest extends AnyFunSuite wit
     Files.write(corruptKeystore, "this-is-not-a-valid-jks-file".getBytes())
 
     val props = Map(
-      HOSTS                    -> "localhost",
-      ES_PORT                  -> "9200",
-      KCQL                     -> "INSERT INTO idx SELECT * FROM topic",
-      "ssl.keystore.location"  -> corruptKeystore.toString,
-      "ssl.keystore.password"  -> knownPassword,
-      "ssl.keystore.type"      -> "JKS",
+      HOSTS                   -> "localhost",
+      ES_PORT                 -> "9200",
+      KCQL                    -> "INSERT INTO idx SELECT * FROM topic",
+      "ssl.keystore.location" -> corruptKeystore.toString,
+      "ssl.keystore.password" -> knownPassword,
+      "ssl.keystore.type"     -> "JKS",
     )
 
     // Config toString must not expose the password regardless of whether loading succeeds.

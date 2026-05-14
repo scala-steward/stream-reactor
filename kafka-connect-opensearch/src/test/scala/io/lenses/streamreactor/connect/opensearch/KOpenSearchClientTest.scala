@@ -79,7 +79,10 @@ class KOpenSearchClientTest extends AnyFunSuite with Matchers {
     infoResp
   }
 
-  private def makeBulkResponse(hasErrors: Boolean, items: java.util.List[BulkResponseItem] = Collections.emptyList()): BulkResponse = {
+  private def makeBulkResponse(
+    hasErrors: Boolean,
+    items:     java.util.List[BulkResponseItem] = Collections.emptyList(),
+  ): BulkResponse = {
     val resp = mock(classOf[BulkResponse])
     when(resp.errors()).thenReturn(hasErrors)
     when(resp.took()).thenReturn(1L)
@@ -96,8 +99,8 @@ class KOpenSearchClientTest extends AnyFunSuite with Matchers {
     client
   }
 
-  private val simpleDoc   = JsonNodeFactory.instance.objectNode().put("field", "value")
-  private val simpleOps   = Seq(InsertOp("idx", "1", simpleDoc, None, None))
+  private val simpleDoc = JsonNodeFactory.instance.objectNode().put("field", "value")
+  private val simpleOps = Seq(InsertOp("idx", "1", simpleDoc, None, None))
 
   test("cluster compatibility probe: start() throws on Elasticsearch distribution") {
     val client = makeClient(
@@ -144,7 +147,7 @@ class KOpenSearchClientTest extends AnyFunSuite with Matchers {
   // The *writer* (JsonBulkWriter) is responsible for converting errors=true into Failure(ConnectException)
   // and routing through ErrorPolicy. KOpenSearchClient is intentionally NOT the escalation boundary.
   test("strict mode: bulk with item errors returns Success(BulkResult(errors=true, itemErrors=...))") {
-    val errorItem = mock(classOf[BulkResponseItem])
+    val errorItem   = mock(classOf[BulkResponseItem])
     val errorDetail = mock(classOf[org.opensearch.client.opensearch._types.ErrorCause])
     when(errorDetail.reason()).thenReturn("mapping error")
     when(errorItem.error()).thenReturn(errorDetail)
@@ -171,21 +174,24 @@ class KOpenSearchClientTest extends AnyFunSuite with Matchers {
     val stubbedClient = new KBulkClient {
       override def bulk(ops: Seq[BulkOp]): Try[BulkResult] = {
         capturedOps = ops
-        Success(BulkResult(took = 1L, errors = true, itemErrors =
-          Seq(BulkItemError("idx", "1", "mapping error"))))
+        Success(BulkResult(took   = 1L,
+                           errors = true,
+                           itemErrors =
+                             Seq(BulkItemError("idx", "1", "mapping error")),
+        ))
       }
       override def createIndex(name: String): Try[Unit] = Success(())
       override def close(): Unit = ()
     }
 
     val writerSettings = settings(
-      ERROR_POLICY             -> "THROW",
+      ERROR_POLICY                -> "THROW",
       BULK_STRICT_ITEM_ERRORS_KEY -> "true",
     )
     val writer = new JsonBulkWriter(stubbedClient, writerSettings.common)
 
-    val schema: Schema = SchemaBuilder.struct().field("id", Schema.STRING_SCHEMA).build()
-    val struct: Struct = new Struct(schema).put("id", "val1")
+    val schema: Schema     = SchemaBuilder.struct().field("id", Schema.STRING_SCHEMA).build()
+    val struct: Struct     = new Struct(schema).put("id", "val1")
     val record: SinkRecord = new SinkRecord("topic", 0, Schema.STRING_SCHEMA, "k", schema, struct, 0L)
 
     val ex = intercept[ConnectException](writer.write(Vector(record)))
@@ -193,7 +199,7 @@ class KOpenSearchClientTest extends AnyFunSuite with Matchers {
   }
 
   test("tolerant mode: bulk with item errors returns BulkResult with errors=false") {
-    val errorItem = mock(classOf[BulkResponseItem])
+    val errorItem   = mock(classOf[BulkResponseItem])
     val errorDetail = mock(classOf[org.opensearch.client.opensearch._types.ErrorCause])
     when(errorDetail.reason()).thenReturn("mapping error")
     when(errorItem.error()).thenReturn(errorDetail)
@@ -263,10 +269,10 @@ class KOpenSearchClientTest extends AnyFunSuite with Matchers {
     kClient.bulk(Seq(UpsertOp("my-index", "upsert-1", simpleDoc, None)))
     verify(client).bulk(captor.capture())
 
-    val req  = captor.getValue
-    val ops  = req.operations().asScala
+    val req = captor.getValue
+    val ops = req.operations().asScala
     ops should have size 1
-    val op   = ops.head
+    val op = ops.head
     // Verifying the operation is Update (not Index/Delete) is the core A7 invariant.
     // Wire-level docAsUpsert=true is verified in the B8 NDJSON wire tests below.
     op.isUpdate shouldBe true
@@ -286,18 +292,18 @@ class KOpenSearchClientTest extends AnyFunSuite with Matchers {
     val req = captor.getValue
     val ops = req.operations().asScala
     ops should have size 1
-    val op  = ops.head
+    val op = ops.head
     op.isIndex shouldBe true
     val indexOp = op.index()
 
     // Forbidden wire fields must NOT be set
-    indexOp.routing()        shouldBe null
-    indexOp.version()        shouldBe null
-    indexOp.versionType()    shouldBe null
-    indexOp.ifSeqNo()        shouldBe null
-    indexOp.ifPrimaryTerm()  shouldBe null
+    indexOp.routing() shouldBe null
+    indexOp.version() shouldBe null
+    indexOp.versionType() shouldBe null
+    indexOp.ifSeqNo() shouldBe null
+    indexOp.ifPrimaryTerm() shouldBe null
     // pipeline is allowed only when set explicitly via InsertOp.pipeline; default None → null
-    indexOp.pipeline()       shouldBe null
+    indexOp.pipeline() shouldBe null
   }
 
   // B8: UPSERT action lines must NOT contain forbidden fields either
@@ -311,18 +317,18 @@ class KOpenSearchClientTest extends AnyFunSuite with Matchers {
     kClient.bulk(Seq(UpsertOp("my-index", "wire-2", simpleDoc, None)))
     verify(client).bulk(captor.capture())
 
-    val req    = captor.getValue
-    val ops    = req.operations().asScala
-    val op     = ops.head
+    val req = captor.getValue
+    val ops = req.operations().asScala
+    val op  = ops.head
     op.isUpdate shouldBe true
     val updateOp = op.update()
-    updateOp.routing()         shouldBe null
+    updateOp.routing() shouldBe null
     updateOp.retryOnConflict() shouldBe null
   }
 
   // A4: empty-id guard
   test("A4: bulk with empty id raises IllegalArgumentException") {
-    val client = makeClient(makeInfoResponse("opensearch", "2.13.0"), makeBulkResponse(false))
+    val client  = makeClient(makeInfoResponse("opensearch", "2.13.0"), makeBulkResponse(false))
     val kClient = new KOpenSearchClient(client, settings())
     val ex = intercept[IllegalArgumentException](
       kClient.bulk(Seq(InsertOp("idx", "", simpleDoc, None, None))).get,
@@ -332,7 +338,7 @@ class KOpenSearchClientTest extends AnyFunSuite with Matchers {
 
   // A4: empty-index guard
   test("A4: bulk with empty index raises IllegalArgumentException") {
-    val client = makeClient(makeInfoResponse("opensearch", "2.13.0"), makeBulkResponse(false))
+    val client  = makeClient(makeInfoResponse("opensearch", "2.13.0"), makeBulkResponse(false))
     val kClient = new KOpenSearchClient(client, settings())
     val ex = intercept[IllegalArgumentException](
       kClient.bulk(Seq(InsertOp("", "1", simpleDoc, None, None))).get,
@@ -354,9 +360,9 @@ class KOpenSearchClientTest extends AnyFunSuite with Matchers {
   // Wire-level assertion: the NDJSON serialised by the opensearch-java BulkRequest
   // must not contain a "_type" or "type" mapping-type field (OpenSearch 2.x dropped types).
   test("B8 wire: BulkRequest NDJSON contains no _type field") {
-    val captor    = ArgumentCaptor.forClass(classOf[BulkRequest])
+    val captor     = ArgumentCaptor.forClass(classOf[BulkRequest])
     val mockClient = makeClient(makeInfoResponse("opensearch", "2.13.0"), makeBulkResponse(false))
-    val kClient   = new KOpenSearchClient(mockClient, settings())
+    val kClient    = new KOpenSearchClient(mockClient, settings())
     kClient.bulk(Seq(InsertOp("my-index", "wire-3", simpleDoc, None, None)))
     verify(mockClient).bulk(captor.capture())
 
@@ -381,7 +387,7 @@ class KOpenSearchClientTest extends AnyFunSuite with Matchers {
     val osEx = new OpenSearchException(mockErrorResp)
 
     type BuilderFn = java.util.function.Function[CreateIndexRequest.Builder, ObjectBuilder[CreateIndexRequest]]
-    val indicesClient  = mock(classOf[OpenSearchIndicesClient])
+    val indicesClient = mock(classOf[OpenSearchIndicesClient])
     when(indicesClient.create(any(classOf[BuilderFn]).asInstanceOf[BuilderFn])).thenThrow(osEx)
 
     val client = makeClient(makeInfoResponse("opensearch", "2.13.0"), makeBulkResponse(false))
@@ -419,16 +425,16 @@ class KOpenSearchClientTest extends AnyFunSuite with Matchers {
   // Verify that UpsertOp maps to an Update BulkOperation (not Index or Delete).
   // The doc_as_upsert=true flag is set in KOpenSearchClient.bulk — this is a code-level invariant.
   test("A7 code: UpsertOp is mapped to an Update (not Index) BulkOperation") {
-    val captor    = ArgumentCaptor.forClass(classOf[BulkRequest])
+    val captor     = ArgumentCaptor.forClass(classOf[BulkRequest])
     val mockClient = makeClient(makeInfoResponse("opensearch", "2.13.0"), makeBulkResponse(false))
-    val kClient   = new KOpenSearchClient(mockClient, settings())
+    val kClient    = new KOpenSearchClient(mockClient, settings())
     kClient.bulk(Seq(UpsertOp("my-index", "upsert-wire", simpleDoc, None)))
     verify(mockClient).bulk(captor.capture())
 
     val ops = captor.getValue.operations().asScala
     ops should have size 1
     ops.head.isUpdate shouldBe true
-    ops.head.isIndex  shouldBe false
+    ops.head.isIndex shouldBe false
     ops.head.isDelete shouldBe false
   }
 }

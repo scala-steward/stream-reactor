@@ -64,9 +64,9 @@ class FileJwtTokenSource(path: String, refreshInterval: Long, clock: Clock = Clo
       // Invalidate BEFORE the read attempt so that any failure leaves the cache
       // empty. Subsequent calls within the same interval slot therefore also fail
       // rather than silently returning the stale (possibly revoked) token.
-      current = None
+      current    = None
       lastReadAt = now
-      current = Some(readFile())
+      current    = Some(readFile())
     }
     current.getOrElse(
       throw new ConnectException(s"JWT token cache is empty — last read from $path failed"),

@@ -97,9 +97,9 @@ class OpenSearchJwtAuthIT extends ITBase {
 
   /** Build a JWT-authenticated [[OpenSearchClient]] for read-back searches. */
   private def jwtSearchClient(token: String): OpenSearchClient = {
-    val httpHost   = new HttpHost("https", host, port)
+    val httpHost    = new HttpHost("https", host, port)
     val tokenSource = JwtTokenSource.fromStaticToken(token)
-    val sslCtx     = buildTrustStoreSslContext(container.clientTruststorePath, "changeit")
+    val sslCtx      = buildTrustStoreSslContext(container.clientTruststorePath, "changeit")
     val tlsStrategy = new DefaultClientTlsStrategy(sslCtx)
     val cm = PoolingAsyncClientConnectionManagerBuilder.create()
       .setTlsStrategy(tlsStrategy)
@@ -114,19 +114,24 @@ class OpenSearchJwtAuthIT extends ITBase {
     new OpenSearchClient(transport)
   }
 
-  test("happy path: HS512-signed JWT with correct key authenticates, writes documents, and read-back confirms landing") {
+  test(
+    "happy path: HS512-signed JWT with correct key authenticates, writes documents, and read-back confirms landing",
+  ) {
     val index = "test-jwt-happy"
     val token = mintToken(jwtSigningKeyBytes)
-    val kClient = makeKClient(baseProps(
-      host, port,
-      s"INSERT INTO $index SELECT * FROM topic",
-      Map(
-        "connect.opensearch.protocol"    -> "https",
-        JWT_TOKEN_KEY                    -> token,
-        "ssl.truststore.location"        -> container.clientTruststorePath,
-        "ssl.truststore.password"        -> "changeit",
+    val kClient = makeKClient(
+      baseProps(
+        host,
+        port,
+        s"INSERT INTO $index SELECT * FROM topic",
+        Map(
+          "connect.opensearch.protocol" -> "https",
+          JWT_TOKEN_KEY                 -> token,
+          "ssl.truststore.location"     -> container.clientTruststorePath,
+          "ssl.truststore.password"     -> "changeit",
+        ),
       ),
-    ))
+    )
     val doc    = JsonNodeFactory.instance.objectNode().put("msg", "jwt-happy")
     val result = kClient.bulk(Seq(InsertOp(index, "1", doc, None, None)))
     result.isSuccess shouldBe true
@@ -157,17 +162,20 @@ class OpenSearchJwtAuthIT extends ITBase {
     // to give the cache well over 5x its refresh interval to expire — removing flakiness.
     val refreshIntervalMs = 200L
 
-    val kClient = makeKClient(baseProps(
-      host, port,
-      "INSERT INTO test-jwt-rotation SELECT * FROM topic",
-      Map(
-        "connect.opensearch.protocol" -> "https",
-        JWT_TOKEN_FILE_KEY            -> tokenFile.toString,
-        JWT_REFRESH_INTERVAL_KEY      -> refreshIntervalMs.toString,
-        "ssl.truststore.location"     -> container.clientTruststorePath,
-        "ssl.truststore.password"     -> "changeit",
+    val kClient = makeKClient(
+      baseProps(
+        host,
+        port,
+        "INSERT INTO test-jwt-rotation SELECT * FROM topic",
+        Map(
+          "connect.opensearch.protocol" -> "https",
+          JWT_TOKEN_FILE_KEY            -> tokenFile.toString,
+          JWT_REFRESH_INTERVAL_KEY      -> refreshIntervalMs.toString,
+          "ssl.truststore.location"     -> container.clientTruststorePath,
+          "ssl.truststore.password"     -> "changeit",
+        ),
       ),
-    ))
+    )
 
     val doc1 = JsonNodeFactory.instance.objectNode().put("msg", "rotation-v1").put("subject", "kafka-connect-v1")
     val r1   = kClient.bulk(Seq(InsertOp("test-jwt-rotation", "1", doc1, None, None)))
@@ -192,18 +200,21 @@ class OpenSearchJwtAuthIT extends ITBase {
     val pki   = io.lenses.streamreactor.connect.testcontainers.SecurityPkiFixture.shared
     val token = mintToken(jwtSigningKeyBytes, subject = "kafka-connect-jwt-mtls")
 
-    val kClient = makeKClient(baseProps(
-      host, port,
-      "INSERT INTO test-jwt-mtls SELECT * FROM topic",
-      Map(
-        "connect.opensearch.protocol" -> "https",
-        JWT_TOKEN_KEY                 -> token,
-        "ssl.keystore.location"       -> pki.keystorePath.toString,
-        "ssl.keystore.password"       -> "changeit",
-        "ssl.truststore.location"     -> pki.truststorePath.toString,
-        "ssl.truststore.password"     -> "changeit",
+    val kClient = makeKClient(
+      baseProps(
+        host,
+        port,
+        "INSERT INTO test-jwt-mtls SELECT * FROM topic",
+        Map(
+          "connect.opensearch.protocol" -> "https",
+          JWT_TOKEN_KEY                 -> token,
+          "ssl.keystore.location"       -> pki.keystorePath.toString,
+          "ssl.keystore.password"       -> "changeit",
+          "ssl.truststore.location"     -> pki.truststorePath.toString,
+          "ssl.truststore.password"     -> "changeit",
+        ),
       ),
-    ))
+    )
 
     val doc    = JsonNodeFactory.instance.objectNode().put("msg", "jwt-mtls-combo")
     val result = kClient.bulk(Seq(InsertOp("test-jwt-mtls", "1", doc, None, None)))
@@ -216,16 +227,19 @@ class OpenSearchJwtAuthIT extends ITBase {
     new SecureRandom().nextBytes(wrongKey)
     val wrongToken = mintToken(wrongKey)
 
-    val kClient = makeKClient(baseProps(
-      host, port,
-      "INSERT INTO test-jwt-wrong SELECT * FROM topic",
-      Map(
-        "connect.opensearch.protocol"    -> "https",
-        JWT_TOKEN_KEY                    -> wrongToken,
-        "ssl.truststore.location"        -> container.clientTruststorePath,
-        "ssl.truststore.password"        -> "changeit",
+    val kClient = makeKClient(
+      baseProps(
+        host,
+        port,
+        "INSERT INTO test-jwt-wrong SELECT * FROM topic",
+        Map(
+          "connect.opensearch.protocol" -> "https",
+          JWT_TOKEN_KEY                 -> wrongToken,
+          "ssl.truststore.location"     -> container.clientTruststorePath,
+          "ssl.truststore.password"     -> "changeit",
+        ),
       ),
-    ))
+    )
     val doc    = JsonNodeFactory.instance.objectNode().put("msg", "wrong-key")
     val result = kClient.bulk(Seq(InsertOp("test-jwt-wrong", "1", doc, None, None)))
     result.isFailure shouldBe true

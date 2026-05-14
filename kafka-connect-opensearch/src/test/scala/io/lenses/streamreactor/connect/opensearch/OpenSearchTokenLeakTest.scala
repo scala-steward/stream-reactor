@@ -34,10 +34,10 @@ import org.scalatest.matchers.should.Matchers
  */
 class OpenSearchTokenLeakTest extends AnyFunSuite with Matchers {
 
-  private val secretJwtToken  = "SECRET-JWT-TOKEN-DO-NOT-LOG-abc123"
-  private val secretAccessKey = "SECRET-AWS-KEY-DO-NOT-LOG-xyz789"
+  private val secretJwtToken   = "SECRET-JWT-TOKEN-DO-NOT-LOG-abc123"
+  private val secretAccessKey  = "SECRET-AWS-KEY-DO-NOT-LOG-xyz789"
   private val secretSessionTok = "SECRET-SESSION-TOKEN-DO-NOT-LOG-mno456"
-  private val secretPassword  = "SECRET-BASIC-PASS-DO-NOT-LOG-pqr012"
+  private val secretPassword   = "SECRET-BASIC-PASS-DO-NOT-LOG-pqr012"
 
   private val baseProps = Map(
     HOSTS   -> "localhost",
@@ -48,11 +48,13 @@ class OpenSearchTokenLeakTest extends AnyFunSuite with Matchers {
   test("static JWT token does not appear in ConfigException messages") {
     // Mutual-exclusion validation fires in OpenSearchSettings, not OpenSearchConfig.
     // Create config first (toString must not leak), then trigger settings validation.
-    val config = OpenSearchConfig(baseProps ++ Map(
-      JWT_TOKEN_KEY                   -> secretJwtToken,
-      CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
-      CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "pass",
-    ))
+    val config = OpenSearchConfig(
+      baseProps ++ Map(
+        JWT_TOKEN_KEY                   -> secretJwtToken,
+        CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
+        CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "pass",
+      ),
+    )
     config.toString should not include secretJwtToken
 
     val ex = intercept[ConfigException] {
@@ -65,14 +67,18 @@ class OpenSearchTokenLeakTest extends AnyFunSuite with Matchers {
   test("AWS secret access key does not appear in ConfigException messages") {
     val ex = intercept[ConfigException] {
       import io.lenses.streamreactor.connect.opensearch.config.OpenSearchSettings
-      OpenSearchSettings(OpenSearchConfig(baseProps ++ Map(
-        AWS_SIGNING_ENABLED_KEY       -> "true",
-        AWS_REGION_KEY                 -> "us-east-1",
-        AWS_CREDENTIALS_PROVIDER_KEY   -> "STATIC",
-        AWS_ACCESS_KEY_ID_KEY          -> "AKIAIOSFODNN7EXAMPLE",
-        AWS_SECRET_ACCESS_KEY_KEY      -> secretAccessKey,
-        HOSTS                          -> "host1,host2",
-      )))
+      OpenSearchSettings(
+        OpenSearchConfig(
+          baseProps ++ Map(
+            AWS_SIGNING_ENABLED_KEY      -> "true",
+            AWS_REGION_KEY               -> "us-east-1",
+            AWS_CREDENTIALS_PROVIDER_KEY -> "STATIC",
+            AWS_ACCESS_KEY_ID_KEY        -> "AKIAIOSFODNN7EXAMPLE",
+            AWS_SECRET_ACCESS_KEY_KEY    -> secretAccessKey,
+            HOSTS                        -> "host1,host2",
+          ),
+        ),
+      )
     }
     ex.getMessage should not include secretAccessKey
   }
@@ -85,11 +91,13 @@ class OpenSearchTokenLeakTest extends AnyFunSuite with Matchers {
   }
 
   test("basic auth password does not appear in ConfigException messages") {
-    val config = OpenSearchConfig(baseProps ++ Map(
-      CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
-      CLIENT_HTTP_BASIC_AUTH_PASSWORD -> secretPassword,
-      JWT_TOKEN_KEY                   -> "some-token",
-    ))
+    val config = OpenSearchConfig(
+      baseProps ++ Map(
+        CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
+        CLIENT_HTTP_BASIC_AUTH_PASSWORD -> secretPassword,
+        JWT_TOKEN_KEY                   -> "some-token",
+      ),
+    )
     config.toString should not include secretPassword
 
     val ex = intercept[ConfigException] {
@@ -100,12 +108,14 @@ class OpenSearchTokenLeakTest extends AnyFunSuite with Matchers {
   }
 
   test("kafka CONFIG with PASSWORD type masks secret in toString") {
-    val config = OpenSearchConfig(baseProps ++ Map(
-      JWT_TOKEN_KEY             -> secretJwtToken,
-      AWS_SECRET_ACCESS_KEY_KEY -> secretAccessKey,
-      AWS_SESSION_TOKEN_KEY     -> secretSessionTok,
-      CLIENT_HTTP_BASIC_AUTH_PASSWORD -> secretPassword,
-    ))
+    val config = OpenSearchConfig(
+      baseProps ++ Map(
+        JWT_TOKEN_KEY                   -> secretJwtToken,
+        AWS_SECRET_ACCESS_KEY_KEY       -> secretAccessKey,
+        AWS_SESSION_TOKEN_KEY           -> secretSessionTok,
+        CLIENT_HTTP_BASIC_AUTH_PASSWORD -> secretPassword,
+      ),
+    )
     val repr = config.toString
     repr should not include secretJwtToken
     repr should not include secretAccessKey

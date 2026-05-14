@@ -71,8 +71,8 @@ class JwtTokenSourceTest extends AnyFunSuite with Matchers {
     Files.write(f, "token-v1".getBytes(StandardCharsets.UTF_8))
 
     var now: Instant = Instant.ofEpochMilli(1000L)
-    val testClock    = new Clock {
-      override def getZone: ZoneOffset     = ZoneOffset.UTC
+    val testClock = new Clock {
+      override def getZone: ZoneOffset = ZoneOffset.UTC
       override def withZone(z: java.time.ZoneId): Clock = this
       override def instant(): Instant = now
     }
@@ -97,7 +97,7 @@ class JwtTokenSourceTest extends AnyFunSuite with Matchers {
     Files.write(f, "initial-token".getBytes(StandardCharsets.UTF_8))
 
     var now: Instant = Instant.ofEpochMilli(1000L)
-    val testClock    = new Clock {
+    val testClock = new Clock {
       override def getZone: ZoneOffset = ZoneOffset.UTC
       override def withZone(z: java.time.ZoneId): Clock = this
       override def instant(): Instant = now
@@ -123,7 +123,7 @@ class JwtTokenSourceTest extends AnyFunSuite with Matchers {
     Files.write(f, tokenSubject1.getBytes(StandardCharsets.UTF_8))
 
     var now: Instant = Instant.ofEpochMilli(0L)
-    val testClock    = new Clock {
+    val testClock = new Clock {
       override def getZone: ZoneOffset = ZoneOffset.UTC
       override def withZone(z: java.time.ZoneId): Clock = this
       override def instant(): Instant = now
@@ -152,7 +152,7 @@ class JwtTokenSourceTest extends AnyFunSuite with Matchers {
     Files.write(f, "good-token".getBytes(StandardCharsets.UTF_8))
 
     var now: Instant = Instant.ofEpochMilli(0L)
-    val testClock    = new Clock {
+    val testClock = new Clock {
       override def getZone: ZoneOffset = ZoneOffset.UTC
       override def withZone(z: java.time.ZoneId): Clock = this
       override def instant(): Instant = now

@@ -27,12 +27,12 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider
 class AwsCredentialsProviderFactoryTest extends AnyFunSuite with Matchers {
 
   private val baseProps = Map(
-    HOSTS                          -> "my-cluster.us-east-1.es.amazonaws.com",
-    ES_PORT                        -> "9200",
-    KCQL                           -> "INSERT INTO idx SELECT * FROM topic",
-    AWS_SIGNING_ENABLED_KEY        -> "true",
-    AWS_REGION_KEY                  -> "us-east-1",
-    "connect.opensearch.protocol"  -> "https",
+    HOSTS                         -> "my-cluster.us-east-1.es.amazonaws.com",
+    ES_PORT                       -> "9200",
+    KCQL                          -> "INSERT INTO idx SELECT * FROM topic",
+    AWS_SIGNING_ENABLED_KEY       -> "true",
+    AWS_REGION_KEY                -> "us-east-1",
+    "connect.opensearch.protocol" -> "https",
   )
 
   private def settings(extra: (String, String)*): OpenSearchSettings =
@@ -47,8 +47,8 @@ class AwsCredentialsProviderFactoryTest extends AnyFunSuite with Matchers {
   test("STATIC provider with access key + secret returns StaticCredentialsProvider") {
     val s = settings(
       AWS_CREDENTIALS_PROVIDER_KEY -> "STATIC",
-      AWS_ACCESS_KEY_ID_KEY         -> "AKIAIOSFODNN7EXAMPLE",
-      AWS_SECRET_ACCESS_KEY_KEY     -> "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      AWS_ACCESS_KEY_ID_KEY        -> "AKIAIOSFODNN7EXAMPLE",
+      AWS_SECRET_ACCESS_KEY_KEY    -> "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
     )
     val provider = AwsCredentialsProviderFactory.create(s)
     provider shouldBe a[StaticCredentialsProvider]
@@ -60,9 +60,9 @@ class AwsCredentialsProviderFactoryTest extends AnyFunSuite with Matchers {
   test("STATIC provider with session token returns AwsSessionCredentials") {
     val s = settings(
       AWS_CREDENTIALS_PROVIDER_KEY -> "STATIC",
-      AWS_ACCESS_KEY_ID_KEY         -> "AKIAIOSFODNN7EXAMPLE",
-      AWS_SECRET_ACCESS_KEY_KEY     -> "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-      AWS_SESSION_TOKEN_KEY         -> "SESSION-TOKEN-VALUE",
+      AWS_ACCESS_KEY_ID_KEY        -> "AKIAIOSFODNN7EXAMPLE",
+      AWS_SECRET_ACCESS_KEY_KEY    -> "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      AWS_SESSION_TOKEN_KEY        -> "SESSION-TOKEN-VALUE",
     )
     val provider = AwsCredentialsProviderFactory.create(s)
     val creds    = provider.resolveCredentials()

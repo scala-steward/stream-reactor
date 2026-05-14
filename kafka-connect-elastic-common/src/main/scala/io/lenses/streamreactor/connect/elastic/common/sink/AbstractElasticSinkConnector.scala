@@ -38,7 +38,7 @@ abstract class AbstractElasticSinkConnector extends SinkConnector with StrictLog
   private var configProps: Option[util.Map[String, String]] = None
 
   protected def kcqlConfigKey: String
-  protected def configDef: ConfigDef
+  protected def configDef:     ConfigDef
 
   override def config(): ConfigDef = configDef
 

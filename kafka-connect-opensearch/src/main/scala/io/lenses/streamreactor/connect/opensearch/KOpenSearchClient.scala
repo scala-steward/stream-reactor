@@ -49,9 +49,7 @@ import scala.util.Try
  * - Applies `strictItemErrors` to decide how to handle per-item bulk failures.
  * - Uses the synchronous `OpenSearchClient` (no `Future.sequence` / `Await`).
  */
-class KOpenSearchClient(client: OpenSearchClient, settings: OpenSearchSettings)
-    extends KBulkClient
-    with StrictLogging {
+class KOpenSearchClient(client: OpenSearchClient, settings: OpenSearchSettings) extends KBulkClient with StrictLogging {
 
   private val closed = new AtomicBoolean(false)
 
@@ -150,11 +148,13 @@ class KOpenSearchClient(client: OpenSearchClient, settings: OpenSearchSettings)
     } else {
       val itemErrors: Seq[BulkItemError] = response.items().asScala
         .filter(item => item.error() != null)
-        .map(item => BulkItemError(
-          index  = Option(item.index()).getOrElse(""),
-          id     = Option(item.id()).getOrElse(""),
-          reason = Option(item.error().reason()).getOrElse(""),
-        ))
+        .map(item =>
+          BulkItemError(
+            index  = Option(item.index()).getOrElse(""),
+            id     = Option(item.id()).getOrElse(""),
+            reason = Option(item.error().reason()).getOrElse(""),
+          ),
+        )
         .toSeq
 
       if (settings.strictItemErrors) {

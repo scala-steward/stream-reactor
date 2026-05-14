@@ -38,16 +38,18 @@ class OpenSearchPkiAuthIT extends ITBase {
 
   test("C4: happy path — mTLS-alone client cert authenticates; whoami returns client CN as principal") {
     val pki = SecurityPkiFixture.shared
-    val kClient = makeKClient(Map(
-      "connect.opensearch.hosts"    -> host,
-      "connect.opensearch.port"     -> port.toString,
-      "connect.opensearch.kcql"     -> "INSERT INTO test-pki-happy SELECT * FROM topic",
-      "connect.opensearch.protocol" -> "https",
-      "ssl.keystore.location"       -> pki.keystorePath.toString,
-      "ssl.keystore.password"       -> "changeit",
-      "ssl.truststore.location"     -> pki.truststorePath.toString,
-      "ssl.truststore.password"     -> "changeit",
-    ))
+    val kClient = makeKClient(
+      Map(
+        "connect.opensearch.hosts"    -> host,
+        "connect.opensearch.port"     -> port.toString,
+        "connect.opensearch.kcql"     -> "INSERT INTO test-pki-happy SELECT * FROM topic",
+        "connect.opensearch.protocol" -> "https",
+        "ssl.keystore.location"       -> pki.keystorePath.toString,
+        "ssl.keystore.password"       -> "changeit",
+        "ssl.truststore.location"     -> pki.truststorePath.toString,
+        "ssl.truststore.password"     -> "changeit",
+      ),
+    )
 
     val doc    = JsonNodeFactory.instance.objectNode().put("msg", "pki-happy")
     val result = kClient.bulk(Seq(InsertOp("test-pki-happy", "1", doc, None, None)))
@@ -76,14 +78,16 @@ class OpenSearchPkiAuthIT extends ITBase {
   test("C7: negative path — wrong truststore causes SSLHandshakeException in exception cause chain") {
     val wrongTruststoreFile = Files.createTempFile("wrong-truststore", ".jks")
 
-    val kClient = makeKClient(Map(
-      "connect.opensearch.hosts"    -> host,
-      "connect.opensearch.port"     -> port.toString,
-      "connect.opensearch.kcql"     -> "INSERT INTO test-pki-bad SELECT * FROM topic",
-      "connect.opensearch.protocol" -> "https",
-      "ssl.truststore.location"     -> wrongTruststoreFile.toString,
-      "ssl.truststore.password"     -> "changeit",
-    ))
+    val kClient = makeKClient(
+      Map(
+        "connect.opensearch.hosts"    -> host,
+        "connect.opensearch.port"     -> port.toString,
+        "connect.opensearch.kcql"     -> "INSERT INTO test-pki-bad SELECT * FROM topic",
+        "connect.opensearch.protocol" -> "https",
+        "ssl.truststore.location"     -> wrongTruststoreFile.toString,
+        "ssl.truststore.password"     -> "changeit",
+      ),
+    )
 
     val doc    = JsonNodeFactory.instance.objectNode().put("msg", "pki-bad")
     val result = kClient.bulk(Seq(InsertOp("test-pki-bad", "1", doc, None, None)))

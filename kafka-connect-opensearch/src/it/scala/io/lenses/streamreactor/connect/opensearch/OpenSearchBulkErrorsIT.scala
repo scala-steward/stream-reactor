@@ -38,7 +38,7 @@ import org.apache.kafka.connect.sink.SinkRecord
  */
 class OpenSearchBulkErrorsIT extends ITBase {
 
-  private val host = "localhost"
+  private val host      = "localhost"
   private lazy val port = container.hostNetwork.httpHostAddress.split(":").last.toInt
 
   private def numericDoc(value: Int) =
@@ -55,7 +55,7 @@ class OpenSearchBulkErrorsIT extends ITBase {
       import org.opensearch.client.opensearch.OpenSearchClient
       import org.opensearch.client.transport.httpclient5.ApacheHttpClient5TransportBuilder
       import org.apache.hc.core5.http.HttpHost
-      val httpHost = new HttpHost("http", host, port)
+      val httpHost  = new HttpHost("http", host, port)
       val transport = ApacheHttpClient5TransportBuilder.builder(httpHost).build()
       new OpenSearchClient(transport)
     }
@@ -112,7 +112,7 @@ class OpenSearchBulkErrorsIT extends ITBase {
   }
 
   test("write to a non-existent index succeeds when AUTOCREATE is used in KCQL") {
-    val index   = "autocreate-test"
+    val index = "autocreate-test"
     val kClient = makeKClient(baseProps(
       host,
       port,
@@ -137,10 +137,11 @@ class OpenSearchBulkErrorsIT extends ITBase {
     import org.opensearch.client.opensearch.OpenSearchClient
 
     val props = baseProps(
-      host, port,
+      host,
+      port,
       s"INSERT INTO $index SELECT * FROM topic PK id",
       Map(
-        BULK_STRICT_ITEM_ERRORS_KEY -> "true",
+        BULK_STRICT_ITEM_ERRORS_KEY       -> "true",
         "connect.opensearch.error.policy" -> "THROW",
       ),
     )
@@ -152,8 +153,8 @@ class OpenSearchBulkErrorsIT extends ITBase {
     val writer    = new JsonBulkWriter(kClient, settings.common)
 
     // Step 3: Send a string value — mapping conflict with integer mapping
-    val schema: Schema = SchemaBuilder.struct().field("id", Schema.STRING_SCHEMA).build()
-    val struct:  Struct = new Struct(schema).put("id", "not-a-number")
+    val schema: Schema     = SchemaBuilder.struct().field("id", Schema.STRING_SCHEMA).build()
+    val struct: Struct     = new Struct(schema).put("id", "not-a-number")
     val record: SinkRecord = new SinkRecord("topic", 0, Schema.STRING_SCHEMA, "key", schema, struct, 1L)
 
     // C9 assertion: the writer must throw ConnectException (THROW policy) on item-level errors

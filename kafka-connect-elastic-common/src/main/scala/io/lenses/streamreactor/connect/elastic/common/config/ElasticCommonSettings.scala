@@ -15,7 +15,7 @@
  */
 package io.lenses.streamreactor.connect.elastic.common.config
 
-import cyclops.control.{Option => COption}
+import cyclops.control.{ Option => COption }
 import io.lenses.kcql.Kcql
 import io.lenses.streamreactor.common.errors.ErrorPolicy
 import io.lenses.streamreactor.common.security.StoresInfo

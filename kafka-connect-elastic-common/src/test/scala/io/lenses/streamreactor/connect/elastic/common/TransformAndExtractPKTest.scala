@@ -414,7 +414,7 @@ class TransformAndExtractPKTest extends AnyFunSuite with Matchers {
     headers.addInt("numericHeader", 42)
 
     val kcqlValues = KcqlValues(
-      fields = Seq(Field(name = "field1", alias = "field1", parents = Vector.empty)),
+      fields               = Seq(Field(name = "field1", alias = "field1", parents = Vector.empty)),
       ignoredFields        = Seq.empty,
       primaryKeysPath      = Seq(Vector("_header", "numericHeader")),
       behaviorOnNullValues = NullValueBehavior.FAIL,

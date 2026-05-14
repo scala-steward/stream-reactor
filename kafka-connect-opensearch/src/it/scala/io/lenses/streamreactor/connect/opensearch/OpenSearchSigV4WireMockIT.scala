@@ -55,9 +55,8 @@ class OpenSearchSigV4WireMockIT extends AnyFunSuite with Matchers with BeforeAnd
     wireMock.start()
   }
 
-  override def afterAll(): Unit = {
+  override def afterAll(): Unit =
     wireMock.stop()
-  }
 
   private def doc = JsonNodeFactory.instance.objectNode().put("field", "value")
 
@@ -65,21 +64,21 @@ class OpenSearchSigV4WireMockIT extends AnyFunSuite with Matchers with BeforeAnd
     val host = "localhost"
     val port = wireMock.port()
     val props = Map(
-      HOSTS                         -> host,
-      ES_PORT                       -> port.toString,
-      KCQL                          -> "INSERT INTO idx SELECT * FROM topic",
-      AWS_SIGNING_ENABLED_KEY       -> "true",
-      AWS_REGION_KEY                 -> "us-east-1",
-      AWS_SIGNING_SERVICE_KEY        -> service,
-      AWS_CREDENTIALS_PROVIDER_KEY   -> "STATIC",
-      AWS_ACCESS_KEY_ID_KEY          -> "AKIAIOSFODNN7EXAMPLE",
-      AWS_SECRET_ACCESS_KEY_KEY      -> "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      HOSTS                        -> host,
+      ES_PORT                      -> port.toString,
+      KCQL                         -> "INSERT INTO idx SELECT * FROM topic",
+      AWS_SIGNING_ENABLED_KEY      -> "true",
+      AWS_REGION_KEY               -> "us-east-1",
+      AWS_SIGNING_SERVICE_KEY      -> service,
+      AWS_CREDENTIALS_PROVIDER_KEY -> "STATIC",
+      AWS_ACCESS_KEY_ID_KEY        -> "AKIAIOSFODNN7EXAMPLE",
+      AWS_SECRET_ACCESS_KEY_KEY    -> "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
     )
     import io.lenses.streamreactor.connect.opensearch.config.OpenSearchConfig
     import io.lenses.streamreactor.connect.opensearch.config.OpenSearchSettings
     import org.opensearch.client.opensearch.OpenSearchClient
-    val config   = OpenSearchConfig(props)
-    val settings = OpenSearchSettings(config)
+    val config    = OpenSearchConfig(props)
+    val settings  = OpenSearchSettings(config)
     val transport = OpenSearchTransportFactory.create(settings)
     val osClient  = new OpenSearchClient(transport)
     new KOpenSearchClient(osClient, settings)

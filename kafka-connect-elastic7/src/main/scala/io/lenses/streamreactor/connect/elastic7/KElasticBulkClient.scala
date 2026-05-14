@@ -73,7 +73,9 @@ class KElasticBulkClient(client: KElasticClient, writeTimeoutMs: Int) extends KB
       .map(item => s"[${item.index}/${item.id}] ${item.error.map(_.reason).getOrElse("")}")
 
     if (itemErrorMessages.nonEmpty) {
-      logger.warn(s"Bulk write completed with ${itemErrorMessages.size} item-level errors (ES7 tolerant mode): $itemErrorMessages")
+      logger.warn(
+        s"Bulk write completed with ${itemErrorMessages.size} item-level errors (ES7 tolerant mode): $itemErrorMessages",
+      )
     }
 
     logger.info(s"Bulk write completed: took=${tookMillis}ms, items=${result.items.size}")

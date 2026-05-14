@@ -34,7 +34,7 @@ import scala.jdk.CollectionConverters.SeqHasAsJava
  */
 class OpenSearchSinkTaskLifecycleIT extends ITBase {
 
-  private val host = "localhost"
+  private val host      = "localhost"
   private lazy val port = container.hostNetwork.httpHostAddress.split(":").last.toInt
 
   private val valueSchema: Schema = SchemaBuilder.struct()
@@ -49,11 +49,11 @@ class OpenSearchSinkTaskLifecycleIT extends ITBase {
 
   private def makeContext: SinkTaskContext = new SinkTaskContext {
     override def configs(): java.util.Map[String, String] = java.util.Collections.emptyMap()
-    override def offset(tp: org.apache.kafka.common.TopicPartition, l: Long): Unit = ()
+    override def offset(tp:  org.apache.kafka.common.TopicPartition, l: Long): Unit = ()
     override def offset(map: java.util.Map[org.apache.kafka.common.TopicPartition, java.lang.Long]): Unit = ()
-    override def timeout(l: Long): Unit = ()
+    override def timeout(l:  Long): Unit = ()
     override def assignment(): java.util.Set[org.apache.kafka.common.TopicPartition] = java.util.Collections.emptySet()
-    override def pause(tps: org.apache.kafka.common.TopicPartition*): Unit = ()
+    override def pause(tps:  org.apache.kafka.common.TopicPartition*): Unit = ()
     override def resume(tps: org.apache.kafka.common.TopicPartition*): Unit = ()
     override def requestCommit(): Unit = ()
   }
@@ -110,9 +110,9 @@ class OpenSearchSinkTaskLifecycleIT extends ITBase {
   test("T3: progress counter key (connect.progress.enabled=true) does not crash task start") {
     val index = "lifecycle-progress"
     val props = Map(
-      HOSTS                   -> host,
-      ES_PORT                 -> port.toString,
-      KCQL                    -> s"INSERT INTO $index SELECT * FROM topic",
+      HOSTS                      -> host,
+      ES_PORT                    -> port.toString,
+      KCQL                       -> s"INSERT INTO $index SELECT * FROM topic",
       "connect.progress.enabled" -> "true",
     ).asJava
 

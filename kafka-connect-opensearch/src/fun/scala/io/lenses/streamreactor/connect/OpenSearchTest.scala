@@ -56,8 +56,8 @@ class OpenSearchTest
   override val connectorModule: String = "opensearch"
 
   private lazy val opensearchClient: OpenSearchClient = {
-    val parts    = container.hostNetwork.httpHostAddress.split(":")
-    val httpHost = new HttpHost("http", parts(0), parts(1).toInt)
+    val parts     = container.hostNetwork.httpHostAddress.split(":")
+    val httpHost  = new HttpHost("http", parts(0), parts(1).toInt)
     val transport = ApacheHttpClient5TransportBuilder.builder(httpHost).build()
     new OpenSearchClient(transport)
   }

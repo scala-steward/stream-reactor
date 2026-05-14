@@ -100,7 +100,7 @@ class JsonPayloadExtractorTest extends AnyFunSuite with Matchers with EitherValu
   }
 
   test("handle complex nested JSON with arrays") {
-    val json = """{"name":"test","details":{"age":30,"hobbies":["reading","coding"]}}"""
+    val json   = """{"name":"test","details":{"age":30,"hobbies":["reading","coding"]}}"""
     val result = JsonPayloadExtractor.extractJsonNode(json, Schema.STRING_SCHEMA)
     result.value.value.get("details").get("age").asInt() shouldBe 30
     result.value.value.get("details").get("hobbies").get(0).asText() shouldBe "reading"

@@ -57,12 +57,14 @@ class OpenSearchConfigTest extends AnyFunSuite with Matchers {
   }
 
   test("tableprefix is rejected with SigV4") {
-    val ex = intercept[ConfigException](settings(
-      ES_PREFIX              -> "myprefix",
-      AWS_SIGNING_ENABLED_KEY -> "true",
-      AWS_REGION_KEY          -> "us-east-1",
-      HOSTS                   -> "my-cluster.us-east-1.es.amazonaws.com",
-    ))
+    val ex = intercept[ConfigException](
+      settings(
+        ES_PREFIX               -> "myprefix",
+        AWS_SIGNING_ENABLED_KEY -> "true",
+        AWS_REGION_KEY          -> "us-east-1",
+        HOSTS                   -> "my-cluster.us-east-1.es.amazonaws.com",
+      ),
+    )
     ex.getMessage should include("connect.opensearch.tableprefix is not supported")
   }
 
@@ -78,8 +80,8 @@ class OpenSearchConfigTest extends AnyFunSuite with Matchers {
 
   test("JWT file requires refresh interval > 0") {
     val ex = intercept[ConfigException](settings(
-      JWT_TOKEN_FILE_KEY          -> "/tmp/token.jwt",
-      JWT_REFRESH_INTERVAL_KEY    -> "0",
+      JWT_TOKEN_FILE_KEY       -> "/tmp/token.jwt",
+      JWT_REFRESH_INTERVAL_KEY -> "0",
     ))
     ex.getMessage should include("refresh.interval.ms must be > 0")
   }
@@ -96,23 +98,27 @@ class OpenSearchConfigTest extends AnyFunSuite with Matchers {
   // ---- SigV4 validation ----
 
   test("SigV4 and basic auth are mutually exclusive") {
-    val ex = intercept[ConfigException](settings(
-      AWS_SIGNING_ENABLED_KEY         -> "true",
-      AWS_REGION_KEY                   -> "us-east-1",
-      HOSTS                            -> "my-cluster.us-east-1.es.amazonaws.com",
-      CLIENT_HTTP_BASIC_AUTH_USERNAME  -> "user",
-      CLIENT_HTTP_BASIC_AUTH_PASSWORD  -> "pass",
-    ))
+    val ex = intercept[ConfigException](
+      settings(
+        AWS_SIGNING_ENABLED_KEY         -> "true",
+        AWS_REGION_KEY                  -> "us-east-1",
+        HOSTS                           -> "my-cluster.us-east-1.es.amazonaws.com",
+        CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
+        CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "pass",
+      ),
+    )
     ex.getMessage should include("mutually exclusive")
   }
 
   test("SigV4 and JWT are mutually exclusive") {
-    val ex = intercept[ConfigException](settings(
-      AWS_SIGNING_ENABLED_KEY -> "true",
-      AWS_REGION_KEY           -> "us-east-1",
-      HOSTS                    -> "my-cluster.us-east-1.es.amazonaws.com",
-      JWT_TOKEN_KEY             -> "some-token",
-    ))
+    val ex = intercept[ConfigException](
+      settings(
+        AWS_SIGNING_ENABLED_KEY -> "true",
+        AWS_REGION_KEY          -> "us-east-1",
+        HOSTS                   -> "my-cluster.us-east-1.es.amazonaws.com",
+        JWT_TOKEN_KEY           -> "some-token",
+      ),
+    )
     ex.getMessage should include("mutually exclusive")
   }
 
@@ -125,60 +131,72 @@ class OpenSearchConfigTest extends AnyFunSuite with Matchers {
   }
 
   test("SigV4 rejects unknown region") {
-    val ex = intercept[ConfigException](settings(
-      AWS_SIGNING_ENABLED_KEY -> "true",
-      AWS_REGION_KEY           -> "xx-neverland-99",
-      HOSTS                    -> "my-cluster.us-east-1.es.amazonaws.com",
-    ))
+    val ex = intercept[ConfigException](
+      settings(
+        AWS_SIGNING_ENABLED_KEY -> "true",
+        AWS_REGION_KEY          -> "xx-neverland-99",
+        HOSTS                   -> "my-cluster.us-east-1.es.amazonaws.com",
+      ),
+    )
     ex.getMessage should include("not a known AWS region")
   }
 
   test("SigV4 service must be es or aoss") {
-    val ex = intercept[ConfigException](settings(
-      AWS_SIGNING_ENABLED_KEY     -> "true",
-      AWS_REGION_KEY               -> "us-east-1",
-      AWS_SIGNING_SERVICE_KEY      -> "invalid-service",
-      HOSTS                        -> "my-cluster.us-east-1.es.amazonaws.com",
-    ))
+    val ex = intercept[ConfigException](
+      settings(
+        AWS_SIGNING_ENABLED_KEY -> "true",
+        AWS_REGION_KEY          -> "us-east-1",
+        AWS_SIGNING_SERVICE_KEY -> "invalid-service",
+        HOSTS                   -> "my-cluster.us-east-1.es.amazonaws.com",
+      ),
+    )
     ex.getMessage should include("{es, aoss}")
   }
 
   test("SigV4 STATIC credentials require access key id") {
-    val ex = intercept[ConfigException](settings(
-      AWS_SIGNING_ENABLED_KEY       -> "true",
-      AWS_REGION_KEY                 -> "us-east-1",
-      AWS_CREDENTIALS_PROVIDER_KEY   -> "STATIC",
-      HOSTS                          -> "my-cluster.us-east-1.es.amazonaws.com",
-    ))
+    val ex = intercept[ConfigException](
+      settings(
+        AWS_SIGNING_ENABLED_KEY      -> "true",
+        AWS_REGION_KEY               -> "us-east-1",
+        AWS_CREDENTIALS_PROVIDER_KEY -> "STATIC",
+        HOSTS                        -> "my-cluster.us-east-1.es.amazonaws.com",
+      ),
+    )
     ex.getMessage should include("aws.access.key.id is required")
   }
 
   test("SigV4 STATIC credentials require secret key when access key id provided") {
-    val ex = intercept[ConfigException](settings(
-      AWS_SIGNING_ENABLED_KEY       -> "true",
-      AWS_REGION_KEY                 -> "us-east-1",
-      AWS_CREDENTIALS_PROVIDER_KEY   -> "STATIC",
-      AWS_ACCESS_KEY_ID_KEY          -> "AKIAIOSFODNN7EXAMPLE",
-      HOSTS                          -> "my-cluster.us-east-1.es.amazonaws.com",
-    ))
+    val ex = intercept[ConfigException](
+      settings(
+        AWS_SIGNING_ENABLED_KEY      -> "true",
+        AWS_REGION_KEY               -> "us-east-1",
+        AWS_CREDENTIALS_PROVIDER_KEY -> "STATIC",
+        AWS_ACCESS_KEY_ID_KEY        -> "AKIAIOSFODNN7EXAMPLE",
+        HOSTS                        -> "my-cluster.us-east-1.es.amazonaws.com",
+      ),
+    )
     ex.getMessage should include("aws.secret.access.key is required")
   }
 
   test("SigV4 requires exactly one host") {
-    val ex = intercept[ConfigException](settings(
-      AWS_SIGNING_ENABLED_KEY -> "true",
-      AWS_REGION_KEY           -> "us-east-1",
-      HOSTS                    -> "host1.es.amazonaws.com,host2.es.amazonaws.com",
-    ))
+    val ex = intercept[ConfigException](
+      settings(
+        AWS_SIGNING_ENABLED_KEY -> "true",
+        AWS_REGION_KEY          -> "us-east-1",
+        HOSTS                   -> "host1.es.amazonaws.com,host2.es.amazonaws.com",
+      ),
+    )
     ex.getMessage should include("exactly one entry")
   }
 
   test("SigV4 rejects host with scheme prefix") {
-    val ex = intercept[ConfigException](settings(
-      AWS_SIGNING_ENABLED_KEY -> "true",
-      AWS_REGION_KEY           -> "us-east-1",
-      HOSTS                    -> "https://my-cluster.us-east-1.es.amazonaws.com",
-    ))
+    val ex = intercept[ConfigException](
+      settings(
+        AWS_SIGNING_ENABLED_KEY -> "true",
+        AWS_REGION_KEY          -> "us-east-1",
+        HOSTS                   -> "https://my-cluster.us-east-1.es.amazonaws.com",
+      ),
+    )
     ex.getMessage should include("strip the scheme")
   }
 
@@ -217,9 +235,9 @@ class OpenSearchConfigTest extends AnyFunSuite with Matchers {
   test("SigV4 DEFAULT credentials parse cleanly") {
     val s = settings(
       AWS_SIGNING_ENABLED_KEY       -> "true",
-      AWS_REGION_KEY                 -> "us-east-1",
-      HOSTS                          -> "my-cluster.us-east-1.es.amazonaws.com",
-      "connect.opensearch.protocol"  -> "https",
+      AWS_REGION_KEY                -> "us-east-1",
+      HOSTS                         -> "my-cluster.us-east-1.es.amazonaws.com",
+      "connect.opensearch.protocol" -> "https",
     )
     s.awsSigningEnabled shouldBe true
     s.awsRegion shouldBe "us-east-1"
@@ -230,21 +248,23 @@ class OpenSearchConfigTest extends AnyFunSuite with Matchers {
   test("SigV4 aoss service accepted") {
     val s = settings(
       AWS_SIGNING_ENABLED_KEY       -> "true",
-      AWS_REGION_KEY                 -> "us-east-1",
-      AWS_SIGNING_SERVICE_KEY        -> "aoss",
-      HOSTS                          -> "my-cluster.us-east-1.aoss.amazonaws.com",
-      "connect.opensearch.protocol"  -> "https",
+      AWS_REGION_KEY                -> "us-east-1",
+      AWS_SIGNING_SERVICE_KEY       -> "aoss",
+      HOSTS                         -> "my-cluster.us-east-1.aoss.amazonaws.com",
+      "connect.opensearch.protocol" -> "https",
     )
     s.awsSigningService shouldBe "aoss"
   }
 
   test("SigV4 rejects protocol=http (signing over plain HTTP exposes credentials)") {
-    val ex = intercept[ConfigException](settings(
-      AWS_SIGNING_ENABLED_KEY       -> "true",
-      AWS_REGION_KEY                 -> "us-east-1",
-      HOSTS                          -> "my-cluster.us-east-1.es.amazonaws.com",
-      "connect.opensearch.protocol"  -> "http",
-    ))
+    val ex = intercept[ConfigException](
+      settings(
+        AWS_SIGNING_ENABLED_KEY       -> "true",
+        AWS_REGION_KEY                -> "us-east-1",
+        HOSTS                         -> "my-cluster.us-east-1.es.amazonaws.com",
+        "connect.opensearch.protocol" -> "http",
+      ),
+    )
     ex.getMessage should include("must be 'https'")
   }
 
@@ -266,22 +286,28 @@ class OpenSearchConfigTest extends AnyFunSuite with Matchers {
   }
 
   test("two KCQL statements separated by semicolon both parse") {
-    val s = OpenSearchSettings(OpenSearchConfig(Map(
-      HOSTS   -> "localhost",
-      ES_PORT -> "9200",
-      KCQL    -> "INSERT INTO idx1 SELECT * FROM topic1;INSERT INTO idx2 SELECT * FROM topic2",
-    )))
+    val s = OpenSearchSettings(
+      OpenSearchConfig(
+        Map(
+          HOSTS   -> "localhost",
+          ES_PORT -> "9200",
+          KCQL    -> "INSERT INTO idx1 SELECT * FROM topic1;INSERT INTO idx2 SELECT * FROM topic2",
+        ),
+      ),
+    )
     s.common.kcqls should have size 2
     s.common.kcqls.map(_.getSource) should contain allOf ("topic1", "topic2")
     s.common.kcqls.map(_.getTarget) should contain allOf ("idx1", "idx2")
   }
 
   test("field list with commas inside a KCQL clause is not mis-split") {
-    val s = OpenSearchSettings(OpenSearchConfig(Map(
-      HOSTS   -> "localhost",
-      ES_PORT -> "9200",
-      KCQL    -> "INSERT INTO idx SELECT field1, field2, field3 FROM topic",
-    )))
+    val s = OpenSearchSettings(
+      OpenSearchConfig(Map(
+        HOSTS   -> "localhost",
+        ES_PORT -> "9200",
+        KCQL    -> "INSERT INTO idx SELECT field1, field2, field3 FROM topic",
+      )),
+    )
     s.common.kcqls should have size 1
     s.common.kcqls.head.getSource shouldBe "topic"
   }

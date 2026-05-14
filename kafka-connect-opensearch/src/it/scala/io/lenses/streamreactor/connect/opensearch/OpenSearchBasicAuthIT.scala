@@ -62,7 +62,7 @@ class OpenSearchBasicAuthIT extends ITBase {
       new UsernamePasswordCredentials(username, password.toCharArray),
     )
 
-    val sslCtx = buildTrustStoreSslContext(container.clientTruststorePath, "changeit")
+    val sslCtx      = buildTrustStoreSslContext(container.clientTruststorePath, "changeit")
     val tlsStrategy = new DefaultClientTlsStrategy(sslCtx)
     val cm = PoolingAsyncClientConnectionManagerBuilder.create()
       .setTlsStrategy(tlsStrategy)
@@ -91,18 +91,21 @@ class OpenSearchBasicAuthIT extends ITBase {
   }
 
   test("happy path: valid basic credentials write documents successfully and read-back confirms landing") {
-    val index   = "test-basic-happy"
-    val kClient = makeKClient(baseProps(
-      host, port,
-      s"INSERT INTO $index SELECT * FROM topic",
-      Map(
-        "connect.opensearch.protocol"   -> "https",
-        CLIENT_HTTP_BASIC_AUTH_USERNAME -> "kafka-connect",
-        CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "connect-password",
-        "ssl.truststore.location"       -> container.clientTruststorePath,
-        "ssl.truststore.password"       -> "changeit",
+    val index = "test-basic-happy"
+    val kClient = makeKClient(
+      baseProps(
+        host,
+        port,
+        s"INSERT INTO $index SELECT * FROM topic",
+        Map(
+          "connect.opensearch.protocol"   -> "https",
+          CLIENT_HTTP_BASIC_AUTH_USERNAME -> "kafka-connect",
+          CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "connect-password",
+          "ssl.truststore.location"       -> container.clientTruststorePath,
+          "ssl.truststore.password"       -> "changeit",
+        ),
       ),
-    ))
+    )
     val doc    = JsonNodeFactory.instance.objectNode().put("msg", "hello")
     val result = kClient.bulk(Seq(InsertOp(index, "1", doc, None, None)))
     result.isSuccess shouldBe true
@@ -122,17 +125,20 @@ class OpenSearchBasicAuthIT extends ITBase {
   }
 
   test("negative path: wrong password fails with an exception") {
-    val kClient = makeKClient(baseProps(
-      host, port,
-      "INSERT INTO test-basic-bad SELECT * FROM topic",
-      Map(
-        "connect.opensearch.protocol"   -> "https",
-        CLIENT_HTTP_BASIC_AUTH_USERNAME -> "kafka-connect",
-        CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "wrong-password",
-        "ssl.truststore.location"       -> container.clientTruststorePath,
-        "ssl.truststore.password"       -> "changeit",
+    val kClient = makeKClient(
+      baseProps(
+        host,
+        port,
+        "INSERT INTO test-basic-bad SELECT * FROM topic",
+        Map(
+          "connect.opensearch.protocol"   -> "https",
+          CLIENT_HTTP_BASIC_AUTH_USERNAME -> "kafka-connect",
+          CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "wrong-password",
+          "ssl.truststore.location"       -> container.clientTruststorePath,
+          "ssl.truststore.password"       -> "changeit",
+        ),
       ),
-    ))
+    )
     val doc    = JsonNodeFactory.instance.objectNode().put("msg", "hello")
     val result = kClient.bulk(Seq(InsertOp("test-basic-bad", "1", doc, None, None)))
     result.isFailure shouldBe true

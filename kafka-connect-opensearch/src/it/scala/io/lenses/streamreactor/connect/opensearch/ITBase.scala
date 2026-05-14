@@ -63,8 +63,8 @@ trait ITBase extends AnyFunSuite with Matchers with BeforeAndAfterAll with Event
   protected lazy val client: OpenSearchClient = buildClient()
 
   protected def buildClient(): OpenSearchClient = {
-    val host = container.hostNetwork.httpHostAddress.split(":")
-    val httpHost = new HttpHost("http", host(0), host(1).toInt)
+    val host      = container.hostNetwork.httpHostAddress.split(":")
+    val httpHost  = new HttpHost("http", host(0), host(1).toInt)
     val transport = ApacheHttpClient5TransportBuilder.builder(httpHost).build()
     new OpenSearchClient(transport)
   }
@@ -104,7 +104,12 @@ trait ITBase extends AnyFunSuite with Matchers with BeforeAndAfterAll with Event
     new SinkRecord(topic, 0, Schema.STRING_SCHEMA, s"key-$id", schema, struct, offset.toLong)
   }
 
-  protected def baseProps(host: String, port: Int, kcql: String, extra: Map[String, String] = Map.empty): Map[String, String] =
+  protected def baseProps(
+    host:  String,
+    port:  Int,
+    kcql:  String,
+    extra: Map[String, String] = Map.empty,
+  ): Map[String, String] =
     Map(
       HOSTS   -> host,
       ES_PORT -> port.toString,
@@ -112,8 +117,8 @@ trait ITBase extends AnyFunSuite with Matchers with BeforeAndAfterAll with Event
     ) ++ extra
 
   protected def makeKClient(props: Map[String, String]): KOpenSearchClient = {
-    val config   = OpenSearchConfig(props)
-    val settings = OpenSearchSettings(config)
+    val config    = OpenSearchConfig(props)
+    val settings  = OpenSearchSettings(config)
     val transport = OpenSearchTransportFactory.create(settings)
     val osClient  = new OpenSearchClient(transport)
     new KOpenSearchClient(osClient, settings)
@@ -126,7 +131,11 @@ trait ITBase extends AnyFunSuite with Matchers with BeforeAndAfterAll with Event
    * Build a raw [[OpenSearchClient]] for direct REST calls (e.g. `/_plugins/_security/whoami`).
    * When `maybePki` is provided, the client is configured with the PKI keystore and truststore.
    */
-  protected def openSearchClient(host: String, port: Int, maybePki: Option[SecurityPkiFixture] = None): OpenSearchClient = {
+  protected def openSearchClient(
+    host:     String,
+    port:     Int,
+    maybePki: Option[SecurityPkiFixture] = None,
+  ): OpenSearchClient = {
     val httpHost = new HttpHost("https", host, port)
     val builder  = ApacheHttpClient5TransportBuilder.builder(httpHost)
     builder.setMapper(new JacksonJsonpMapper())
@@ -145,7 +154,9 @@ trait ITBase extends AnyFunSuite with Matchers with BeforeAndAfterAll with Event
   private def buildSslContextFromPki(pki: SecurityPkiFixture): javax.net.ssl.SSLContext = {
     import java.io.FileInputStream
     import java.security.KeyStore
-    import javax.net.ssl.{ KeyManagerFactory, TrustManagerFactory, SSLContext }
+    import javax.net.ssl.KeyManagerFactory
+    import javax.net.ssl.TrustManagerFactory
+    import javax.net.ssl.SSLContext
 
     val keyStore = KeyStore.getInstance("JKS")
     val ksStream = new FileInputStream(pki.keystorePath.toFile)
