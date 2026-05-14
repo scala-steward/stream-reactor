@@ -143,7 +143,7 @@ object ElasticCommonConfigDef {
       )
       .define(
         s"$prefix.$ERROR_RETRY_INTERVAL_SUFFIX",
-        Type.INT,
+        Type.LONG,
         ERROR_RETRY_INTERVAL_DEFAULT,
         Importance.MEDIUM,
         ERROR_RETRY_INTERVAL_DOC,

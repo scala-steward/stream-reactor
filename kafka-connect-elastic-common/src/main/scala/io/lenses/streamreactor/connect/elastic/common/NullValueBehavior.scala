@@ -20,5 +20,5 @@ object NullValueBehavior extends Enumeration {
   val FAIL, IGNORE, DELETE = Value
 
   def fromString(s: String): NullValueBehavior =
-    values.find(_.toString.toUpperCase == s).getOrElse(IGNORE)
+    Option(s).map(_.toUpperCase).flatMap(up => values.find(_.toString == up)).getOrElse(IGNORE)
 }

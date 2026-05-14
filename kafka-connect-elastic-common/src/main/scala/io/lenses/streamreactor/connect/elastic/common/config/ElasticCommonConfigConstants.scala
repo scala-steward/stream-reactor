@@ -81,9 +81,9 @@ object ElasticCommonConfigConstants {
   val BATCH_SIZE_DISPLAY = "Batch size"
   val BATCH_SIZE_DEFAULT = 4000
 
-  val ERROR_RETRY_INTERVAL_SUFFIX  = RETRY_INTERVAL_PROP_SUFFIX
-  val ERROR_RETRY_INTERVAL_DOC     = "The time in milliseconds between retries."
-  val ERROR_RETRY_INTERVAL_DEFAULT = 60000
+  val ERROR_RETRY_INTERVAL_SUFFIX = RETRY_INTERVAL_PROP_SUFFIX
+  val ERROR_RETRY_INTERVAL_DOC    = "The time in milliseconds between retries."
+  val ERROR_RETRY_INTERVAL_DEFAULT: Long = 60000L
 
   val PROGRESS_COUNTER_ENABLED         = PROGRESS_ENABLED_CONST
   val PROGRESS_COUNTER_ENABLED_DOC     = "Enables the output for how many records have been processed"

@@ -446,6 +446,79 @@ class JsonBulkWriterTest
     }
   }
 
+  // ---- Bug 1 regression: case-insensitive null-value behavior ----------------------------
+
+  test("tombstone with lowercase 'delete' behavior produces a DeleteOp (case-insensitive)") {
+    val recording = new RecordingBulkClient
+    val writer = new JsonBulkWriter(
+      recording,
+      kcqlSettings(
+        """INSERT INTO ts-lower-idx SELECT * FROM ts-lower-topic PK id PROPERTIES('behavior.on.null.values'='delete')""",
+      ),
+    )
+
+    writer.write(Vector(
+      record("ts-lower-topic", "k1", struct(7, "G")),
+      tombstone("ts-lower-topic", "k1", offset = 1L),
+    ))
+
+    val ops = recording.allOps
+    ops should have size 2
+    ops(0) shouldBe an[InsertOp]
+    ops(1) shouldBe an[DeleteOp]
+  }
+
+  test("tombstone with mixed-case 'Fail' behavior throws (case-insensitive)") {
+    val recording = new RecordingBulkClient
+    val writer = new JsonBulkWriter(
+      recording,
+      kcqlSettings(
+        """INSERT INTO ts-mixedcase-idx SELECT * FROM ts-mc-topic PK id PROPERTIES('behavior.on.null.values'='Fail')""",
+      ),
+    )
+
+    intercept[Exception](writer.write(Vector(tombstone("ts-mc-topic", "k1"))))
+  }
+
+  // ---- Bug 2 regression: nested IGNORE field removal ---------------------------------
+
+  private val nestedSchema: Schema = SchemaBuilder.struct()
+    .field("id", Schema.INT32_SCHEMA)
+    .field("meta",
+           SchemaBuilder.struct()
+             .field("tag", Schema.STRING_SCHEMA)
+             .field("score", Schema.INT32_SCHEMA)
+             .build(),
+    )
+    .build()
+
+  private def nestedStruct(id: Int, tag: String, score: Int): Struct = {
+    val inner = new Struct(nestedSchema.field("meta").schema())
+      .put("tag", tag)
+      .put("score", score)
+    new Struct(nestedSchema).put("id", id).put("meta", inner)
+  }
+
+  private def nestedRecord(topic: String, key: String, value: Struct, offset: Long = 0L): SinkRecord =
+    new SinkRecord(topic, 0, Schema.STRING_SCHEMA, key, nestedSchema, value, offset)
+
+  test("IGNORE nested.field removes only the leaf from the nested object, leaving siblings intact") {
+    val recording = new RecordingBulkClient
+    val writer = new JsonBulkWriter(
+      recording,
+      kcqlSettings("INSERT INTO nested-idx SELECT * FROM nested-topic IGNORE meta.tag"),
+    )
+
+    writer.write(Vector(nestedRecord("nested-topic", "k1", nestedStruct(1, "t", 99))))
+
+    val op   = recording.allOps.head.asInstanceOf[InsertOp]
+    val meta = op.json.get("meta")
+    meta should not be null
+    meta.has("tag") shouldBe false
+    meta.has("score") shouldBe true
+    op.json.has("id") shouldBe true
+  }
+
   // ---- Parity-contract: dynamic index resolution runs before tombstone branch -----------
 
   test("dynamic index (WITHINDEXSUFFIX) is resolved before tombstone branch — DeleteOp carries resolved index") {

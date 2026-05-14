@@ -167,7 +167,14 @@ class JsonBulkWriter(client: KBulkClient, val settings: ElasticCommonSettings) e
     if (ignoredFields.isEmpty || !node.isObject) node
     else {
       val copy: ObjectNode = node.deepCopy[ObjectNode]()
-      ignoredFields.foreach(f => copy.remove(f.name))
+      ignoredFields.foreach { f =>
+        val parents = if (f.parents == null) Vector.empty[String] else f.parents
+        val parent: Option[ObjectNode] = parents.foldLeft(Option(copy: JsonNode)) {
+          case (Some(n), key) if n.isObject => Option(n.get(key)).filter(_.isObject)
+          case _                            => None
+        }.collect { case o: ObjectNode => o }
+        parent.getOrElse(copy).remove(f.name)
+      }
       copy
     }
 

@@ -66,7 +66,7 @@ abstract class AbstractElasticSinkTask extends SinkTask with StrictLogging with 
     w.settings.errorPolicy match {
       case RetryErrorPolicy() =>
         val retryInterval = conf.asScala.get(errorRetryIntervalKey).map(_.toLong).getOrElse(
-          ElasticCommonConfigConstants.ERROR_RETRY_INTERVAL_DEFAULT.toLong,
+          ElasticCommonConfigConstants.ERROR_RETRY_INTERVAL_DEFAULT,
         )
         context.timeout(retryInterval)
       case _ =>
