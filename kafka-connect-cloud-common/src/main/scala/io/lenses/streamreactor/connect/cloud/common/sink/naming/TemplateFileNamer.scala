@@ -32,24 +32,43 @@ object TemplateFileNamer {
     "extension",
   )
 
+  private val FlushVaryingPlaceholders = Set(
+    "start-offset",
+    "end-offset",
+    "start-timestamp",
+    "end-timestamp",
+    "record-count",
+  )
+
   /**
-   * Validates the template at configuration time so that unknown placeholders
-   * are rejected before the connector starts accepting records.
+   * Validates the template at configuration time so that unknown placeholders are rejected before
+   * the connector starts accepting records, and that at least one flush-varying placeholder is
+   * present to prevent identical filenames (and silent overwrites) across consecutive flushes.
    */
-  def validate(template: String): Either[Throwable, Unit] = {
+  def validate(template: String): Either[Throwable, Unit] =
     if (template.trim.isEmpty) {
       Left(new IllegalArgumentException("object.key.template must not be blank"))
     } else {
-      val unknown = PlaceholderPattern.findAllMatchIn(template).map(_.group(1)).filterNot(KnownPlaceholders).toList
+      val found   = PlaceholderPattern.findAllMatchIn(template).map(_.group(1)).toList
+      val unknown = found.filterNot(KnownPlaceholders)
       if (unknown.nonEmpty)
-        Left(new IllegalArgumentException(
-          s"object.key.template contains unknown placeholder(s): ${unknown.mkString(", ")}. " +
-            s"Known placeholders are: ${KnownPlaceholders.toList.sorted.mkString(", ")}",
-        ))
+        Left(
+          new IllegalArgumentException(
+            s"object.key.template contains unknown placeholder(s): ${unknown.mkString(", ")}. " +
+              s"Known placeholders are: ${KnownPlaceholders.toList.sorted.mkString(", ")}",
+          ),
+        )
+      else if (found.toSet.intersect(FlushVaryingPlaceholders).isEmpty)
+        Left(
+          new IllegalArgumentException(
+            "object.key.template must contain at least one flush-varying placeholder " +
+              s"(${FlushVaryingPlaceholders.toList.sorted.mkString(", ")}) " +
+              "to avoid overwriting files on consecutive flushes",
+          ),
+        )
       else
         Right(())
     }
-  }
 
   def apply(template: String, fileNamerConfig: FileNamerConfig): Either[Throwable, TemplateFileNamer] =
     validate(template).map(_ => new TemplateFileNamer(template, fileNamerConfig))
@@ -75,15 +94,15 @@ object TemplateFileNamer {
  * Construct via [[TemplateFileNamer.apply]] to get upfront validation of unknown placeholders.
  */
 class TemplateFileNamer(
-  template:       String,
+  template:        String,
   fileNamerConfig: FileNamerConfig,
 ) extends FileNamer {
 
   override def fileName(params: FileNamerParams): String = {
-    val topic      = params.topicPartitionOffset.topic.value
-    val partition  = fileNamerConfig.partitionPaddingStrategy.padString(params.topicPartitionOffset.partition.toString)
+    val topic       = params.topicPartitionOffset.topic.value
+    val partition   = fileNamerConfig.partitionPaddingStrategy.padString(params.topicPartitionOffset.partition.toString)
     val startOffset = fileNamerConfig.offsetPaddingStrategy.padString(params.firstOffset.value.toString)
-    val endOffset  = fileNamerConfig.offsetPaddingStrategy.padString(params.topicPartitionOffset.offset.value.toString)
+    val endOffset   = fileNamerConfig.offsetPaddingStrategy.padString(params.topicPartitionOffset.offset.value.toString)
 
     template
       .replace("{topic}", topic)

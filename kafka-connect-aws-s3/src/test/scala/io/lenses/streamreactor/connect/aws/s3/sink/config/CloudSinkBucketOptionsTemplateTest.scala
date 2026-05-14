@@ -52,11 +52,23 @@ class CloudSinkBucketOptionsTemplateTest extends AnyFunSuite with Matchers with 
       PartitionPartitionField -> tpo.partition.toString,
     )
 
-  private def fileName(kcql: String, tpo: TopicPartitionOffset, firstOff: Offset = Offset(50L), recCount: Long = 3L): String = {
+  private def fileName(
+    kcql:     String,
+    tpo:      TopicPartitionOffset,
+    firstOff: Offset = Offset(50L),
+    recCount: Long   = 3L,
+  ): String = {
     val opts = CloudSinkBucketOptions(connectorTaskId, S3SinkConfigDefBuilder(Map("connect.s3.kcql" -> kcql))).value
     opts should have size 1
-    val opt  = opts.head
-    val path = opt.keyNamer.value(opt.bucketAndPrefix, tpo, defaultPartitionValues(tpo), firstOff, 1000L, 2000L, recCount).value.path.value
+    val opt = opts.head
+    val path = opt.keyNamer.value(opt.bucketAndPrefix,
+                                  tpo,
+                                  defaultPartitionValues(tpo),
+                                  firstOff,
+                                  1000L,
+                                  2000L,
+                                  recCount,
+    ).value.path.value
     // Return just the filename portion after the last '/'
     path.split('/').last
   }
@@ -72,10 +84,10 @@ class CloudSinkBucketOptionsTemplateTest extends AnyFunSuite with Matchers with 
 
   test("TemplateFileNamer: {topic} in template produces topic in filename") {
     val name = fileName(
-      s"INSERT INTO my-bucket SELECT * FROM topic-a PROPERTIES('${FlushCount.entryName}'=1,'object.key.template'='{topic}.{extension}')",
+      s"INSERT INTO my-bucket SELECT * FROM topic-a PROPERTIES('${FlushCount.entryName}'=1,'object.key.template'='{topic}-{record-count}.{extension}')",
       tpoA,
     )
-    name shouldEqual "topic-a.json"
+    name shouldEqual "topic-a-3.json"
   }
 
   test("TemplateFileNamer: {record-count} is rendered as plain number in filename") {
@@ -106,13 +118,13 @@ class CloudSinkBucketOptionsTemplateTest extends AnyFunSuite with Matchers with 
   }
 
   test("TemplateFileNamer: {partition} uses default padding strategy (no padding for partition by default)") {
-    val tpo  = Topic("topic-a").withPartition(3).atOffset(1L)
+    val tpo = Topic("topic-a").withPartition(3).atOffset(1L)
     val name = fileName(
-      s"INSERT INTO my-bucket SELECT * FROM topic-a PROPERTIES('object.key.template'='{partition}')",
+      s"INSERT INTO my-bucket SELECT * FROM topic-a PROPERTIES('object.key.template'='{partition}-{record-count}')",
       tpo,
     )
     // Default S3 partition padding: NoOp (no padding)
-    name shouldEqual "3"
+    name shouldEqual "3-3"
   }
 
   test("TemplateFileNamer: composite template with multiple placeholders") {
@@ -128,7 +140,9 @@ class CloudSinkBucketOptionsTemplateTest extends AnyFunSuite with Matchers with 
     val result = CloudSinkBucketOptions(
       connectorTaskId,
       S3SinkConfigDefBuilder(
-        Map("connect.s3.kcql" -> "INSERT INTO my-bucket SELECT * FROM topic-a PROPERTIES('object.key.template'='{bad-placeholder}')"),
+        Map(
+          "connect.s3.kcql" -> "INSERT INTO my-bucket SELECT * FROM topic-a PROPERTIES('object.key.template'='{bad-placeholder}')",
+        ),
       ),
     )
     result.isLeft shouldBe true
@@ -146,9 +160,22 @@ class CloudSinkBucketOptionsTemplateTest extends AnyFunSuite with Matchers with 
     result.left.value.getMessage should include("blank")
   }
 
+  test("static-only template is rejected at construction time") {
+    val result = CloudSinkBucketOptions(
+      connectorTaskId,
+      S3SinkConfigDefBuilder(
+        Map(
+          "connect.s3.kcql" -> "INSERT INTO my-bucket SELECT * FROM topic-a PROPERTIES('object.key.template'='{topic}.{extension}')",
+        ),
+      ),
+    )
+    result.isLeft shouldBe true
+    result.left.value.getMessage should include("flush-varying")
+  }
+
   test("per-KCQL isolation: statement A uses template, statement B uses built-in namer") {
     val kcqls =
-      s"INSERT INTO bucket-a SELECT * FROM topic-a PROPERTIES('object.key.template'='{topic}.{extension}');" +
+      s"INSERT INTO bucket-a SELECT * FROM topic-a PROPERTIES('object.key.template'='{topic}-{record-count}.{extension}');" +
         s"INSERT INTO bucket-b SELECT * FROM topic-b PROPERTIES('${FlushCount.entryName}'=10)"
 
     val opts = CloudSinkBucketOptions(connectorTaskId, S3SinkConfigDefBuilder(Map("connect.s3.kcql" -> kcqls))).value
@@ -157,14 +184,28 @@ class CloudSinkBucketOptionsTemplateTest extends AnyFunSuite with Matchers with 
     val optA = opts.find(_.sourceTopic.contains("topic-a")).value
     val optB = opts.find(_.sourceTopic.contains("topic-b")).value
 
-    val tpoB   = Topic("topic-b").withPartition(0).atOffset(200L)
-    val pathA  = optA.keyNamer.value(optA.bucketAndPrefix, tpoA, defaultPartitionValues(tpoA), tpoA.offset, 0L, 0L, 1L).value.path.value
-    val pathB  = optB.keyNamer.value(optB.bucketAndPrefix, tpoB, defaultPartitionValues(tpoB), tpoB.offset, 0L, 0L, 1L).value.path.value
-    val nameA  = pathA.split('/').last
-    val nameB  = pathB.split('/').last
+    val tpoB = Topic("topic-b").withPartition(0).atOffset(200L)
+    val pathA = optA.keyNamer.value(optA.bucketAndPrefix,
+                                    tpoA,
+                                    defaultPartitionValues(tpoA),
+                                    tpoA.offset,
+                                    0L,
+                                    0L,
+                                    1L,
+    ).value.path.value
+    val pathB = optB.keyNamer.value(optB.bucketAndPrefix,
+                                    tpoB,
+                                    defaultPartitionValues(tpoB),
+                                    tpoB.offset,
+                                    0L,
+                                    0L,
+                                    1L,
+    ).value.path.value
+    val nameA = pathA.split('/').last
+    val nameB = pathB.split('/').last
 
-    // A: TemplateFileNamer → filename is topic-a.json
-    nameA shouldEqual "topic-a.json"
+    // A: TemplateFileNamer → filename is topic-a-1.json (record-count=1L)
+    nameA shouldEqual "topic-a-1.json"
     // B: OffsetFileNamer → filename is offset-based, not topic name
     nameB should not include "topic-b"
     nameB should endWith(".json")

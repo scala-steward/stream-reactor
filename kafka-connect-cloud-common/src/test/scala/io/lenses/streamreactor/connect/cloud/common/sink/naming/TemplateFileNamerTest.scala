@@ -57,19 +57,27 @@ class TemplateFileNamerTest extends AnyFunSuite with Matchers with EitherValues 
     err.getMessage should include("Known placeholders")
   }
 
+  test("validation rejects template with no flush-varying placeholder") {
+    for (template <- Seq("{topic}.{extension}", "{topic}/{partition}", "data.json", "{extension}")) {
+      val err = TemplateFileNamer.validate(template).left.value
+      err.getMessage should include("flush-varying")
+    }
+  }
+
   test("validation accepts all known placeholders") {
-    val template = "{topic}/{partition}/{start-offset}-{end-offset}-{record-count}_{start-timestamp}_{end-timestamp}.{extension}"
+    val template =
+      "{topic}/{partition}/{start-offset}-{end-offset}-{record-count}_{start-timestamp}_{end-timestamp}.{extension}"
     TemplateFileNamer.validate(template).value shouldBe ()
   }
 
   test("{topic} placeholder is substituted correctly") {
-    val namer = TemplateFileNamer("{topic}.{extension}", config).value
-    namer.fileName(params()) shouldEqual "my-topic.parquet"
+    val namer = TemplateFileNamer("{topic}-{record-count}.{extension}", config).value
+    namer.fileName(params()) shouldEqual "my-topic-5.parquet"
   }
 
   test("{partition} placeholder uses partitionPaddingStrategy") {
-    val namer = TemplateFileNamer("{partition}", config).value
-    namer.fileName(params()) shouldEqual "00003"
+    val namer = TemplateFileNamer("{partition}-{record-count}", config).value
+    namer.fileName(params()) shouldEqual "00003-5"
   }
 
   test("{start-offset} placeholder uses offsetPaddingStrategy") {
@@ -98,24 +106,25 @@ class TemplateFileNamerTest extends AnyFunSuite with Matchers with EitherValues 
   }
 
   test("{extension} placeholder uses fileNamerConfig.extension") {
-    val namer = TemplateFileNamer("{extension}", config).value
-    namer.fileName(params()) shouldEqual "parquet"
+    val namer = TemplateFileNamer("{start-offset}.{extension}", config).value
+    namer.fileName(params()) shouldEqual "00100.parquet"
   }
 
   test("composite template produces correct filename") {
-    val namer = TemplateFileNamer("{topic}/{partition}/{start-offset}-{end-offset}-{record-count}.{extension}", config).value
+    val namer =
+      TemplateFileNamer("{topic}/{partition}/{start-offset}-{end-offset}-{record-count}.{extension}", config).value
     namer.fileName(params(firstOffset = 100L, recordCount = 5L)) shouldEqual
       "my-topic/00003/00100-00150-5.parquet"
   }
 
   test("multiple occurrences of the same placeholder are all substituted") {
-    val namer = TemplateFileNamer("{topic}-{topic}", config).value
-    namer.fileName(params()) shouldEqual "my-topic-my-topic"
+    val namer = TemplateFileNamer("{topic}-{topic}-{record-count}", config).value
+    namer.fileName(params()) shouldEqual "my-topic-my-topic-5"
   }
 
   test("literal slashes in template are preserved (sub-directory paths)") {
-    val namer = TemplateFileNamer("prefix/{topic}/data/{partition}", config).value
-    namer.fileName(params()) shouldEqual "prefix/my-topic/data/00003"
+    val namer = TemplateFileNamer("prefix/{topic}/data/{partition}/{record-count}", config).value
+    namer.fileName(params()) shouldEqual "prefix/my-topic/data/00003/5"
   }
 
   test("padding does not apply to {record-count} or timestamps") {
