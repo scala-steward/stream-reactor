@@ -21,6 +21,8 @@ import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.conversion.PrimitiveSinkData
 import io.lenses.streamreactor.connect.cloud.common.stream.CloudOutputStream
 
+import java.nio.charset.StandardCharsets
+
 import scala.util.Failure
 import scala.util.Success
 import scala.util.Try
@@ -32,7 +34,7 @@ class TextFormatWriter(outputStream: CloudOutputStream) extends FormatWriter {
 
       val dataBytes: Array[Byte] = Try {
         messageDetail.value match {
-          case data: PrimitiveSinkData => data.safeValue.toString.getBytes
+          case data: PrimitiveSinkData => data.safeValue.toString.getBytes(StandardCharsets.UTF_8)
           case _ => throw FormatWriterException("Not a string")
         }
       } match {
@@ -46,16 +48,14 @@ class TextFormatWriter(outputStream: CloudOutputStream) extends FormatWriter {
 
       outputStream.write(dataBytes)
       outputStream.write(LineSeparatorBytes)
-      outputStream.flush()
     }.toEither
 
   override def rolloverFileOnSchemaChange(): Boolean = false
 
   override def complete(): Either[SinkError, Unit] =
     for {
-      closed <- outputStream.complete()
       _      <- Suppress(outputStream.flush())
-      _      <- Suppress(outputStream.close())
+      closed <- outputStream.complete()
     } yield closed
 
   override def getPointer: Long = outputStream.getPointer

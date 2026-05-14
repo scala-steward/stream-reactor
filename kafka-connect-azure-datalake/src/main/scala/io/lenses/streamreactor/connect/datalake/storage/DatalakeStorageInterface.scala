@@ -48,9 +48,14 @@ import java.time.Instant
 import scala.util.Try
 import scala.util.Using
 
-class DatalakeStorageInterface(connectorTaskId: ConnectorTaskId, client: DataLakeServiceClient)
-    extends StorageInterface[DatalakeFileMetadata]
+class DatalakeStorageInterface(
+  connectorTaskId: ConnectorTaskId,
+  client:          DataLakeServiceClient,
+  uploadOptions:   DatalakeUploadOptions = DatalakeUploadOptions.default,
+) extends StorageInterface[DatalakeFileMetadata]
     with LazyLogging {
+
+  private val parallelTransferOptions: ParallelTransferOptions = uploadOptions.toParallelTransferOptions
 
   private def parentDirectory(path: String): Option[String] = {
     val idx = path.lastIndexOf('/')
@@ -197,7 +202,7 @@ class DatalakeStorageInterface(connectorTaskId: ConnectorTaskId, client: DataLak
       val createFileClient: DataLakeFileClient = createFile(bucket, filePath)
       val response = createFileClient.uploadFromFileWithResponse(
         localFilePath,
-        new ParallelTransferOptions(),
+        parallelTransferOptions,
         null,                            // PathHttpHeaders
         null,                            // Metadata
         new DataLakeRequestConditions(), // RequestConditions to avoid overwriting

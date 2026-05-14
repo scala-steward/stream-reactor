@@ -22,7 +22,6 @@ import org.apache.kafka.connect.data.Struct
 import org.apache.kafka.connect.json.JsonConverter
 
 import java.nio.ByteBuffer
-import scala.jdk.CollectionConverters._
 object ToJsonDataConverter {
 
   private val jacksonJson: ObjectMapper = new ObjectMapper().registerModule(DefaultScalaModule)
@@ -35,11 +34,10 @@ object ToJsonDataConverter {
         //In case of building a Map with Struct Jackson won't know how to serialise it
         if (hasStructValues(map)) {
           converter.fromConnectData(topic.value, schema.orNull, map)
-        } else jacksonJson.writeValueAsString(map).getBytes()
+        } else jacksonJson.writeValueAsBytes(map)
 
       case ArraySinkData(array, _) if isPojo(array) =>
-        val json = jacksonJson.writeValueAsString(array)
-        json.getBytes()
+        jacksonJson.writeValueAsBytes(array)
       case ArraySinkData(array, schema) =>
         converter.fromConnectData(topic.value, schema.orNull, array)
       case dsd @ DateSinkData(value)       => converter.fromConnectData(topic.value, dsd.schema().orNull, value)
@@ -56,18 +54,12 @@ object ToJsonDataConverter {
     case data                         => data.value
   }
 
-  private def hasStructValues(map: java.util.Map[_, _]) =
-    map.values().asScala.exists {
-      case _: Struct => true
-      case _ => false
-    }
+  private def hasStructValues(map: java.util.Map[_, _]): Boolean =
+    map.values().stream().anyMatch(_.isInstanceOf[Struct])
 
   /**
    * This is a workaround to help some of the customers who use Kafka Connect SMT ignoring the best practices
    */
-  private def isPojo(array: java.util.List[_]) =
-    array.size() > 0 && array.asScala.exists {
-      case _: Struct => false
-      case _ => true
-    }
+  private def isPojo(array: java.util.List[_]): Boolean =
+    !array.isEmpty && array.stream().anyMatch(!_.isInstanceOf[Struct])
 }

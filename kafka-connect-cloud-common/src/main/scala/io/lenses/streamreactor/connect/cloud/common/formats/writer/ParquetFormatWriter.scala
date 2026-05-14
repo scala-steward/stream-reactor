@@ -81,7 +81,6 @@ class ParquetFormatWriter(
       val genericRecord = ToAvroDataConverter.convertToGenericRecordWithSchema(messageDetail.value, writerAvroSchema)
 
       writer.write(genericRecord)
-      outputStream.flush()
     }.toEither
 
   private def createWriterIfNoWriter(connectSchema: ConnectSchema): Unit =

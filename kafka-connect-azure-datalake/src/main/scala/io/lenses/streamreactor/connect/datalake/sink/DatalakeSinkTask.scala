@@ -48,7 +48,8 @@ class DatalakeSinkTask
     connectorTaskId: ConnectorTaskId,
     config:          DatalakeSinkConfig,
     cloudClient:     DataLakeServiceClient,
-  ): StorageInterface[DatalakeFileMetadata] = new DatalakeStorageInterface(connectorTaskId, cloudClient)
+  ): StorageInterface[DatalakeFileMetadata] =
+    new DatalakeStorageInterface(connectorTaskId, cloudClient, config.uploadOptions)
 
   override def convertPropsToConfig(
     connectorTaskId: ConnectorTaskId,

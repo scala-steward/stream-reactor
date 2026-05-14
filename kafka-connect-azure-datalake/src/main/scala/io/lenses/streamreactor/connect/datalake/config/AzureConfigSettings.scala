@@ -68,4 +68,23 @@ object AzureConfigSettings {
   val LOG_METRICS_DOC: String =
     "If true, the connector will log metrics to the logger.  This is useful for debugging and performance tuning."
 
+  val UPLOAD_PARALLELISM: String = s"$CONNECTOR_PREFIX.upload.parallelism"
+  val UPLOAD_PARALLELISM_DOC: String =
+    "Maximum number of parallel upload threads per file upload to Azure Data Lake Storage (maps to ParallelTransferOptions.maxConcurrency). " +
+      "Increasing this value improves upload throughput for large files at the cost of additional heap and direct-buffer memory: " +
+      "peak memory usage is approximately maxConcurrency × blockSize per concurrent upload. " +
+      "Leave unset to use the Azure SDK default (1 thread, no parallel upload)."
+
+  val UPLOAD_BLOCK_SIZE_BYTES: String = s"$CONNECTOR_PREFIX.upload.block.size.bytes"
+  val UPLOAD_BLOCK_SIZE_BYTES_DOC: String =
+    "Block size in bytes used when uploading files to Azure Data Lake Storage (maps to ParallelTransferOptions.blockSizeLong). " +
+      "Larger blocks mean fewer round-trips for big files but increase memory per upload thread. " +
+      "Leave unset to use the Azure SDK default."
+
+  val UPLOAD_MAX_SINGLE_UPLOAD_SIZE_BYTES: String = s"$CONNECTOR_PREFIX.upload.max.single.upload.size.bytes"
+  val UPLOAD_MAX_SINGLE_UPLOAD_SIZE_BYTES_DOC: String =
+    "Maximum file size in bytes below which a single-request (non-parallel) upload is used (maps to ParallelTransferOptions.maxSingleUploadSizeLong). " +
+      "Files smaller than this threshold bypass the parallel upload pipeline entirely. " +
+      "Leave unset to use the Azure SDK default."
+
 }

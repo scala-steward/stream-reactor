@@ -849,7 +849,7 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     masterLockOffsets.last shouldBe 501L
   }
 
-  test("high-watermark is cleared on cleanUp so rebalanced partition starts fresh") {
+  test("high-watermark survives cleanUp via lastReturnedSafeOffset to prevent post-rollback regression") {
     val mockIM = mock[IndexManager]
     when(mockIM.indexingEnabled).thenReturn(false)
     when(mockIM.getSeekedOffsetForTopicPartition(any[TopicPartition])).thenReturn(None)
@@ -943,15 +943,22 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     val offsets1 = wm.preCommit(immutable.Map(topicPartition -> new OffsetAndMetadata(500L)))
     offsets1(topicPartition).offset() shouldBe 501L
 
-    // Simulate rebalance: partition is removed
+    // In-place rollback (NOT rebalance — rebalance goes through close()/open()).
+    // cleanUp clears HWM and `lastWrittenMasterSafeOffset(tp)` but PRESERVES
+    // `lastReturnedSafeOffset(tp)` so the next preCommit cannot return less than the 501
+    // already reported to Kafka — cleanUp must preserve lastReturnedSafeOffset.
     wm.cleanUp(topicPartition)
 
-    // Partition is re-assigned; write a record with a lower offset (from new master lock)
+    // Same task instance retries with a fresh writer at a much lower committed offset.
+    // Without the lastReturnedSafeOffset preservation, this would return 51 and (after the
+    // forced write at that lower value) drive cleanUpObsoleteLocks past still-needed
+    // granular locks — silently regressing monotonicity and breaking dedup.
     wm.write(topicPartition.withOffset(Offset(50)), makeMockMsg(50L)) shouldBe Right(())
     val offsets2 = wm.preCommit(immutable.Map(topicPartition -> new OffsetAndMetadata(50L)))
 
-    // After cleanUp, the high watermark was cleared, so the new offset (51) is used, not 501
-    offsets2(topicPartition).offset() shouldBe 51L
+    // Floor held at 501; WriteForced(PostCleanUp) catches the durable master lock up to
+    // the previously returned value.
+    offsets2(topicPartition).offset() shouldBe 501L
   }
 
   test("evictIdleWritersIfNeeded does not evict active (non-NoWriter) writers") {
@@ -1332,9 +1339,14 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
 
     val offsets = wm.preCommit(immutable.Map(topicPartition -> new OffsetAndMetadata(500L)))
 
-    // globalSafeOffset must be at least 1001 (master lock committedOffset 1000 + 1)
+    // globalSafeOffset must be at least 1001 (master lock committedOffset 1000 + 1).
+    // Under the dirty-flag gate, lastWrittenMasterSafeOffset(tp) also lazy-seeds to
+    // 1001 on this first cycle, so the cycle is classified `Skip` (no advance to persist).
+    // The point of the test — that the safe offset reported to Kafka does NOT regress to
+    // 501 — still holds; the master-lock write itself is correctly suppressed because
+    // the durable floor is already at the required value.
     offsets(topicPartition).offset() shouldBe 1001L
-    masterLockOffsets.last shouldBe 1001L
+    masterLockOffsets shouldBe empty
   }
 
   test("master lock fallback: writer created after granular lock GC'd uses master lock for dedup") {

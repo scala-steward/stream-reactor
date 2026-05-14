@@ -52,6 +52,7 @@ class CsvFormatWriterTest extends AnyFlatSpec with Matchers with Assertions {
                                      0,
                                      Offset(0),
     ))
+    formatWriter.complete()
 
     val reader = new StringReader(new String(outputStream.toByteArray))
 
@@ -82,6 +83,7 @@ class CsvFormatWriterTest extends AnyFlatSpec with Matchers with Assertions {
         ),
       ),
     )
+    formatWriter.complete()
 
     val reader    = new StringReader(new String(outputStream.toByteArray))
     val csvReader = new CSVReader(reader)
@@ -132,6 +134,7 @@ class CsvFormatWriterTest extends AnyFlatSpec with Matchers with Assertions {
                                      0,
                                      Offset(0),
     ))
+    formatWriter.complete()
 
     val reader = new StringReader(new String(outputStream.toByteArray))
 

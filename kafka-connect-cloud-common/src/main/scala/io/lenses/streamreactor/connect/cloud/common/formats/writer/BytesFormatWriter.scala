@@ -59,9 +59,8 @@ class BytesFormatWriter(outputStream: CloudOutputStream) extends FormatWriter wi
 
   override def complete(): Either[SinkError, Unit] =
     for {
-      closed <- outputStream.complete()
       _      <- Suppress(outputStream.flush())
-      _      <- Suppress(outputStream.close())
+      closed <- outputStream.complete()
     } yield closed
 
   override def getPointer: Long = outputStream.getPointer

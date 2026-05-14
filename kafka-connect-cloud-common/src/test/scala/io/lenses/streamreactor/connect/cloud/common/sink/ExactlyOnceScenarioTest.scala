@@ -652,6 +652,98 @@ class ExactlyOnceScenarioTest extends AnyFunSuite with Matchers with BeforeAndAf
     h.persistedOffsetsForPk(tp0, Some("pk-b")) shouldBe Set(50L)
   }
 
+  // ── End-to-end zombie scenario: rebalance race fenced via master-lock eTag ─────────
+  // What this pins: the dirty-flag gate does NOT relax the zombie-fencing semantics that
+  // `IndexManagerV2.updateMasterLock` provides. A zombie task whose master-lock write is
+  // structurally delayed past a rebalance must still be fenced (`If-Match` fails), its
+  // K-stream stays pinned (no consumer advance), and the new task's recovery does not
+  // duplicate at the final path.
+  //
+  // How it is engineered: the harness installs the test-only pre-write barrier via
+  // `IndexManagerV2.IndexManagerV2TestHooks.installPreWriteMasterLockBarrier` on the first
+  // (zombie) IndexManagerV2 instance. The barrier runs an external master-lock write between
+  // the cached-eTag read and the eTag-conditional storage write. This external write
+  // simulates Task B (the new owner) bumping the master lock during the race window. When
+  // the zombie's barrier returns, its own write fails with an eTag mismatch — the exact
+  // fencing path the design relies on, exercised deterministically without timing-based
+  // sleeps.
+  test(
+    "PARTITIONBY end-to-end zombie: master-lock write fenced by rebalance race, K does not advance, no duplication at final paths",
+  ) {
+    val pk        = "pk-zombie"
+    val finalPath = h.expectedFinalPath(tp0, Some(pk), 42L)
+
+    val setup = List[Op](
+      Assign(Set(tp0)),
+      Write(tp0, Some(pk), 42L),
+      Commit(tp0), // record successfully persisted to its final path
+    )
+    h.run(setup)
+    h.storage.pathExists(h.bucket, finalPath).getOrElse(false) shouldBe true
+    h.persistedOffsetsForPk(tp0, Some(pk)) shouldBe Set(42L)
+
+    // Engineer the rebalance race: install a one-shot barrier on the zombie IndexManagerV2
+    // that, when fired, performs an external master-lock write to bump the eTag. The
+    // external write goes through the storage interface directly (bypasses the index
+    // manager's cache) so the zombie's cached eTag becomes stale at the exact moment its
+    // write is about to land.
+    //
+    // The barrier is installed AND torn down inside a `try/finally` so a mid-test assertion
+    // failure cannot leak the seam onto a still-live `IndexManagerV2` instance for any
+    // subsequent operation in this test (the after-each `silentClose()` is also a defence
+    // in depth — see `Harness.silentClose()`). Without the `try/finally` an assertion at
+    // line "K stream did NOT grow" could throw and skip the manual `clearPreWriteMasterLockBarrier`
+    // call below, causing the `Crash` op a few lines later to drive a still-armed barrier
+    // through `im.close() → drainGcQueue()` and produce a confusing secondary failure.
+    val masterPath = h.masterLockPath(tp0)
+    val fired      = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val zombieIM   = h.indexManager
+    IndexManagerV2.IndexManagerV2TestHooks.installPreWriteMasterLockBarrier(
+      zombieIM,
+      () =>
+        if (fired.compareAndSet(false, true)) {
+          // Simulate Task B's `updateMasterLock` succeeding while the zombie is paused
+          // mid-write: re-write the lock contents externally so the underlying eTag bumps.
+          // The zombie's cached eTag is now stale, and its impending CAS will fail with
+          // `If-Match` mismatch — the exact fencing path the design relies on.
+          val currentPayload = h.storage.getBlobAsString(h.bucket, masterPath)
+            .getOrElse(throw new AssertionError(s"zombie test: master lock missing at $masterPath"))
+          h.storage.writeStringToFile(
+            h.bucket,
+            masterPath,
+            io.lenses.streamreactor.connect.cloud.common.model.UploadableString(currentPayload),
+          ).left.foreach(err => throw new AssertionError(s"zombie test: external write failed: ${err.message()}"))
+        },
+    )
+
+    try {
+      // Now drive a preCommit on the zombie. The barrier fires, the external write bumps
+      // the eTag, and the zombie's own write fails with `If-Match` mismatch. preCommit
+      // returns None for this TP; the K stream does not advance.
+      val zombieKBeforeAttempt = h.ks.get(tp0).flatMap(_.lastOption)
+      h.run(List[Op](PreCommit(tp0, 1000L)), expectPreCommitErrors = true)
+
+      // K stream did NOT grow — the fenced preCommit returned None for this TP.
+      h.ks.get(tp0).flatMap(_.lastOption) shouldBe zombieKBeforeAttempt
+      fired.get() shouldBe true
+    } finally {
+      // Reset the barrier so post-fenced recovery is not affected. Idempotent — the
+      // harness's `silentClose()` also clears it as a final safety net.
+      IndexManagerV2.IndexManagerV2TestHooks.clearPreWriteMasterLockBarrier(zombieIM)
+    }
+
+    // Crash + reboot (simulates the new task instance taking over). Recovery reads the
+    // durable master lock through `open()`, which seeds the new instance's eTag cache
+    // with a fresh value. The next preCommit succeeds — and crucially the final path is
+    // not touched: the record at offset 42 still lands at exactly one path.
+    h.run(List[Op](Crash, PreCommit(tp0, 1000L)))
+
+    h.storage.pathExists(h.bucket, finalPath).getOrElse(false) shouldBe true
+    h.persistedOffsetsForPk(tp0, Some(pk)) shouldBe Set(42L)
+    // Final K is max(committed)+1 = 43, no regression below the zombie's last successful K.
+    h.ks(tp0).lastOption shouldBe Some(43L)
+  }
+
   // (d) mid-chain Copy failure returns FatalCloudSinkError (not NonFatal) and leaves no orphan after recovery
   test("non-PARTITIONBY: Copy failure returns FatalCloudSinkError and no temp blob is orphaned after recovery") {
     // The Copy phase is mid-chain (not an UploadOperation), so its failure escalates to
@@ -829,8 +921,24 @@ object ExactlyOnceScenarioTest {
     def evictGranularLocks(tp: TopicPartition): Unit =
       im.evictAllGranularLocks(tp)
 
+    /**
+     * Accessor for the wired `IndexManagerV2` instance. Used by tests that drive the
+     * `IndexManagerV2.IndexManagerV2TestHooks` seam directly (rebalance-race / zombie
+     * scenarios). Most tests should prefer the high-level `Op` DSL instead — this
+     * accessor is the narrow seam for low-level orchestration that the DSL cannot
+     * express deterministically.
+     */
+    def indexManager: IndexManagerV2 = im
+
     /** Drop the IndexManagerV2 (releases executors). The next bootTask reads from storage. */
     def crash(): Unit = {
+      // Defensive: clear any test-only seam that a test installed via
+      // `IndexManagerV2.IndexManagerV2TestHooks` so cross-test leakage is impossible
+      // even if a test exits before its own teardown. Functionally a no-op once
+      // `im = null` runs (the seam dies with the instance), but keeps the harness
+      // self-documenting: every Crash conceptually drops ALL in-memory state, hooks
+      // included.
+      if (im != null) IndexManagerV2.IndexManagerV2TestHooks.clearPreWriteMasterLockBarrier(im)
       try im.close()
       catch { case _: Throwable => () }
       im = null
@@ -843,6 +951,10 @@ object ExactlyOnceScenarioTest {
 
     def silentClose(): Unit =
       if (im != null) {
+        // Same defensive seam-clear as `crash()` — see comment there. `silentClose()` is
+        // the after-each hook, so this is the last line of defence against any test that
+        // installed a barrier and then aborted before clearing it.
+        IndexManagerV2.IndexManagerV2TestHooks.clearPreWriteMasterLockBarrier(im)
         try im.close()
         catch { case _: Throwable => () }
         im = null
