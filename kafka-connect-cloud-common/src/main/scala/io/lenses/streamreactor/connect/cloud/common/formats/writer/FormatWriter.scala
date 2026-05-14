@@ -19,6 +19,7 @@ import cats.implicits._
 import io.lenses.streamreactor.connect.cloud.common.config.FormatOptions.WithHeaders
 import io.lenses.streamreactor.connect.cloud.common.config._
 import io.lenses.streamreactor.connect.cloud.common.formats.FormatWriterException
+import io.lenses.streamreactor.connect.cloud.common.model.location.FileUtils
 import io.lenses.streamreactor.connect.cloud.common.model.location.FileUtils.toBufferedOutputStream
 import io.lenses.streamreactor.connect.cloud.common.model.CompressionCodec
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
@@ -35,12 +36,13 @@ object FormatWriter {
     formatSelection: FormatSelection,
     path:            Path,
     topicPartition:  TopicPartition,
+    bufferSize:      Int = FileUtils.DefaultStagingWriteBufferSize,
   )(
     implicit
     compressionCodec: CompressionCodec,
   ): Either[SinkError, FormatWriter] = {
     for {
-      outputStream <- Try(new BuildLocalOutputStream(toBufferedOutputStream(path.toFile), topicPartition))
+      outputStream <- Try(new BuildLocalOutputStream(toBufferedOutputStream(path.toFile, bufferSize), topicPartition))
       writer <- Try {
         formatSelection match {
           case ParquetFormatSelection =>

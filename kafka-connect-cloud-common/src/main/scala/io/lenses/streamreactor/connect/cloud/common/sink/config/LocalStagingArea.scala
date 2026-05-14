@@ -19,6 +19,7 @@ import cats.syntax.all._
 import io.lenses.streamreactor.common.config.base.traits.BaseSettings
 import io.lenses.streamreactor.common.config.base.traits.WithConnectorPrefix
 import io.lenses.streamreactor.connect.cloud.common.config.ConnectorTaskId
+import io.lenses.streamreactor.connect.cloud.common.model.location.FileUtils
 import org.apache.kafka.common.config.ConfigDef
 import org.apache.kafka.common.config.ConfigDef.Importance
 import org.apache.kafka.common.config.ConfigDef.Type
@@ -29,16 +30,26 @@ import java.util.UUID
 import scala.util.Try
 
 trait LocalStagingAreaConfigKeys extends WithConnectorPrefix {
-  val LOCAL_TMP_DIRECTORY: String = s"$connectorPrefix.local.tmp.directory"
+  val LOCAL_TMP_DIRECTORY:             String = s"$connectorPrefix.local.tmp.directory"
+  val LOCAL_STAGING_WRITE_BUFFER_SIZE: String = s"$connectorPrefix.local.staging.write.buffer.size"
 
   def addLocalStagingAreaToConfigDef(configDef: ConfigDef): ConfigDef =
-    configDef.define(
-      LOCAL_TMP_DIRECTORY,
-      Type.STRING,
-      "",
-      Importance.LOW,
-      s"Local tmp directory for preparing the files",
-    )
+    configDef
+      .define(
+        LOCAL_TMP_DIRECTORY,
+        Type.STRING,
+        "",
+        Importance.LOW,
+        s"Local tmp directory for preparing the files",
+      )
+      .define(
+        LOCAL_STAGING_WRITE_BUFFER_SIZE,
+        Type.INT,
+        FileUtils.DefaultStagingWriteBufferSize,
+        ConfigDef.Range.atLeast(1),
+        Importance.LOW,
+        s"Buffer size in bytes for the staging file output stream (default ${FileUtils.DefaultStagingWriteBufferSize})",
+      )
 }
 trait LocalStagingAreaSettings extends BaseSettings with LocalStagingAreaConfigKeys {
 
@@ -46,28 +57,36 @@ trait LocalStagingAreaSettings extends BaseSettings with LocalStagingAreaConfigK
   )(
     implicit
     connectorTaskId: ConnectorTaskId,
-  ): Either[Throwable, LocalStagingArea] =
+  ): Either[Throwable, LocalStagingArea] = {
+    val writeBufferSize = getInt(LOCAL_STAGING_WRITE_BUFFER_SIZE)
     Option(getString(LOCAL_TMP_DIRECTORY)).map(_.trim).filter(_.nonEmpty)
-      .fold(useTmpDir)(useConfiguredDir)
+      .fold(useTmpDir(writeBufferSize))(useConfiguredDir(_, writeBufferSize))
       .leftMap(
         new IllegalStateException(
           s"Either a local temporary directory ($LOCAL_TMP_DIRECTORY) or a Sink Name (name) must be configured.",
           _,
         ),
       )
+  }
 
-  private def useConfiguredDir(dirName: String): Either[Throwable, LocalStagingArea] =
+  private def useConfiguredDir(dirName: String, writeBufferSize: Int): Either[Throwable, LocalStagingArea] =
     Try {
       val stagingDir = new File(dirName)
       stagingDir.mkdirs()
-      LocalStagingArea(stagingDir)
+      LocalStagingArea(stagingDir, writeBufferSize)
     }.toEither
-  private def useTmpDir(implicit connectorTaskId: ConnectorTaskId): Either[Throwable, LocalStagingArea] =
+
+  private def useTmpDir(
+    writeBufferSize: Int,
+  )(
+    implicit
+    connectorTaskId: ConnectorTaskId,
+  ): Either[Throwable, LocalStagingArea] =
     Try {
       val stagingDir = Files.createTempDirectory(s"${connectorTaskId.show}.${UUID.randomUUID().toString}").toFile
-      LocalStagingArea(stagingDir)
+      LocalStagingArea(stagingDir, writeBufferSize)
     }.toEither
 
 }
 
-case class LocalStagingArea(dir: File)
+case class LocalStagingArea(dir: File, writeBufferSize: Int = FileUtils.DefaultStagingWriteBufferSize)
