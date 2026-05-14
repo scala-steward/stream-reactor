@@ -108,8 +108,21 @@ class WriterManager[SM <: FileMetadata](
   connectorTaskId: ConnectorTaskId,
 ) extends StrictLogging {
 
-  private val writers             = mutable.LinkedHashMap.empty[MapKey, Writer[SM]]
-  private val writerCommitManager = new WriterCommitManager[SM](() => writers.toMap, metrics)
+  private val writers = mutable.LinkedHashMap.empty[MapKey, Writer[SM]]
+  // Auxiliary index: one LinkedHashMap per TopicPartition, kept strictly in lockstep with
+  // `writers`. Insertion order is preserved within each bucket so the iteration order seen
+  // by `WriterCommitManager` matches the primary map's order. This lets the per-record
+  // commit path visit only O(siblings on TP) entries instead of O(all writers).
+  private val tpIndex = mutable.Map.empty[TopicPartition, mutable.LinkedHashMap[MapKey, Writer[SM]]]
+
+  private val writerSource: WriterSource[SM] = new WriterSource[SM] {
+    override def iterator: Iterator[(MapKey, Writer[SM])] =
+      writers.iterator
+    override def iteratorForTopicPartition(tp: TopicPartition): Iterator[(MapKey, Writer[SM])] =
+      tpIndex.get(tp).fold(Iterator.empty[(MapKey, Writer[SM])])(_.iterator)
+  }
+
+  private val writerCommitManager = new WriterCommitManager[SM](writerSource)
 
   // Highest globalSafeOffset ever reported to Kafka Connect per TP. Prevents regression on
   // idle-writer eviction. See docs/datalake-exactly-once-partitionby.md ("globalSafeOffset regression").
@@ -187,6 +200,7 @@ class WriterManager[SM <: FileMetadata](
     keysToRemove.foreach { key =>
       writers.get(key).foreach(_.close())
       writers.remove(key)
+      removeFromTpIndex(key)
     }
     // Writer.close() deliberately leaves cache entries for cleanUpObsoleteLocks to GC;
     // this eviction is the sole memory-cleanup path on shutdown.
@@ -384,6 +398,7 @@ class WriterManager[SM <: FileMetadata](
           createWriter(bucketAndPrefix, topicPartition, partitionValues)
             .map { w =>
               writers.put(key, w)
+              addToTpIndex(key, w)
               evictIdleWriters(key.topicPartition, Some(key))
               metrics.setWriterCount(writers.size)
               w
@@ -439,11 +454,7 @@ class WriterManager[SM <: FileMetadata](
       }
 
   private def writersForTopicPartition(topicPartition: TopicPartition): Seq[Writer[SM]] =
-    writers
-      .collect {
-        case (key, writer) if key.topicPartition == topicPartition => writer
-      }
-      .toSeq
+    tpIndex.get(topicPartition).fold(Seq.empty[Writer[SM]])(_.values.toSeq)
 
   private def getOffsetAndMeta(
     topicPartition:    TopicPartition,
@@ -638,6 +649,7 @@ class WriterManager[SM <: FileMetadata](
     keysToRemove.foreach { key =>
       writers.get(key).foreach(_.close())
       writers.remove(key)
+      removeFromTpIndex(key)
     }
     safeOffsetHighWatermarks.remove(topicPartition)
     // Preserve `lastReturnedSafeOffset(tp)` across `cleanUp(tp)` so the HWM re-seed on the
@@ -666,6 +678,7 @@ class WriterManager[SM <: FileMetadata](
     idleEntries.foreach { case (key, writer) =>
       writer.close()
       writers.remove(key)
+      removeFromTpIndex(key)
       WriterManager.derivePartitionKey(key.partitionValues).foreach { pk =>
         indexManager.evictGranularLock(key.topicPartition, pk)
       }
@@ -674,9 +687,23 @@ class WriterManager[SM <: FileMetadata](
     metrics.setWriterCount(writers.size)
   }
 
+  private def addToTpIndex(key: MapKey, writer: Writer[SM]): Unit = {
+    val bucket = tpIndex.getOrElseUpdate(key.topicPartition, mutable.LinkedHashMap.empty)
+    val _      = bucket.put(key, writer)
+  }
+
+  private def removeFromTpIndex(key: MapKey): Unit =
+    tpIndex.get(key.topicPartition).foreach { bucket =>
+      bucket.remove(key)
+      if (bucket.isEmpty) tpIndex.remove(key.topicPartition)
+    }
+
   private[writer] def writerCount: Int = writers.size
 
-  private[writer] def putWriter(key: MapKey, writer: Writer[SM]): Unit = { val _ = writers.put(key, writer) }
+  private[writer] def putWriter(key: MapKey, writer: Writer[SM]): Unit = {
+    val _ = writers.put(key, writer)
+    addToTpIndex(key, writer)
+  }
 
   private[writer] def evictIdleWritersNow(topicPartition: TopicPartition): Unit =
     evictIdleWriters(topicPartition, None)
