@@ -77,4 +77,6 @@ object PropsKeyEnum extends Enum[PropsKeyEntry] {
 
   case object KeySuffix extends PropsKeyEntry("key.suffix")
 
+  case object ObjectKeyTemplate extends PropsKeyEntry("object.key.template")
+
 }

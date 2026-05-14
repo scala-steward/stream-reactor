@@ -136,10 +136,11 @@ class Writer[SM <: FileMetadata](
     writeState match {
       case uploadState @ Uploading(commitState,
                                    file,
-                                   _,
+                                   firstBufferedOffset,
                                    uncommittedOffset,
                                    earliestRecordTimestamp,
                                    latestRecordTimestamp,
+                                   recordCount,
           ) =>
         val fnIndexUpdate: (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]] =
           partitionKey match {
@@ -147,7 +148,12 @@ class Writer[SM <: FileMetadata](
             case None     => (tp, co, ps) => indexManager.update(tp, co, ps)
           }
         for {
-          key  <- objectKeyBuilder.build(uncommittedOffset, earliestRecordTimestamp, latestRecordTimestamp)
+          key <- objectKeyBuilder.build(firstBufferedOffset,
+                                        uncommittedOffset,
+                                        earliestRecordTimestamp,
+                                        latestRecordTimestamp,
+                                        recordCount,
+          )
           path <- key.path.toRight(NonFatalCloudSinkError("No path exists within cloud location"))
           pendingOperations =
             if (indexManager.indexingEnabled) {
@@ -209,7 +215,7 @@ class Writer[SM <: FileMetadata](
         Try(formatWriter.close())
         Try(file.delete())
         NoWriter(commitState.reset())
-      case Uploading(commitState, file, _, _, _, _) =>
+      case Uploading(commitState, file, _, _, _, _, _) =>
         Try(file.delete())
         NoWriter(commitState.reset())
     }
@@ -288,7 +294,7 @@ class Writer[SM <: FileMetadata](
       writeState match {
         case NoWriter(commitState) =>
           shouldSkipInternal(currentOffset, commitState.committedOffset)
-        case Uploading(commitState, _, _, uncommittedOffset, _, _) =>
+        case Uploading(commitState, _, _, uncommittedOffset, _, _, _) =>
           shouldSkipInternal(currentOffset, Option(largestOffset(commitState.committedOffset, uncommittedOffset)))
         case Writing(commitState, _, _, _, uncommittedOffset, _, _) =>
           shouldSkipInternal(currentOffset, Option(largestOffset(commitState.committedOffset, uncommittedOffset)))

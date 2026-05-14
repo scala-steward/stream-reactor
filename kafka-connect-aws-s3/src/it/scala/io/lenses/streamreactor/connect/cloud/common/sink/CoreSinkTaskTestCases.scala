@@ -2318,6 +2318,72 @@ abstract class CoreSinkTaskTestCases[
     headers
   }
 
+  unitUnderTest should "write two objects with templated keys when object.key.template is configured" in {
+    val task     = createSinkTask()
+    val template = "{start-offset}-{end-offset}-{record-count}.{extension}"
+    val kcql =
+      s"insert into $BucketName:$PrefixName select * from $TopicName PROPERTIES('${FlushCount.entryName}'=3,'object.key.template'='$template')"
+    val props = (defaultProps + (s"$prefix.kcql" -> kcql)).asJava
+
+    task.start(props)
+    task.open(Seq(new TopicPartition(TopicName, 1)).asJava)
+
+    // First flush: offsets 0, 1, 2
+    task.put(records.asJava)
+
+    // Second flush: offsets 3, 4, 5
+    val secondBatch = firstUsers.zipWithIndex.map {
+      case (user, k) =>
+        new SinkRecord(TopicName, 1, null, null, schema, user, (k + 3).toLong, k + 3, TimestampType.CREATE_TIME)
+    }
+    task.put(secondBatch.asJava)
+
+    task.close(Seq(new TopicPartition(TopicName, 1)).asJava)
+    task.stop()
+
+    val files = listBucketPath(BucketName, s"$PrefixName/$TopicName/1/")
+    files should have size 2
+
+    // The first flush produces start-offset=0, end-offset=2, record-count=3
+    files.exists(_.contains("000000000000-000000000002-3.")) shouldBe true
+    // The second flush produces start-offset=3, end-offset=5, record-count=3
+    files.exists(_.contains("000000000003-000000000005-3.")) shouldBe true
+  }
+
+  unitUnderTest should "use legacy namer when object.key.template is absent alongside a templated KCQL" in {
+    val task     = createSinkTask()
+    val topic2   = "myTopic2"
+    val template = "{record-count}.{extension}"
+    val kcql =
+      s"insert into $BucketName:$PrefixName select * from $TopicName PROPERTIES('${FlushCount.entryName}'=3,'object.key.template'='$template');insert into $BucketName:$PrefixName select * from $topic2 PROPERTIES('${FlushCount.entryName}'=3)"
+    val props = (defaultProps + (s"$prefix.kcql" -> kcql)).asJava
+
+    task.start(props)
+    task.open(Seq(new TopicPartition(TopicName, 1), new TopicPartition(topic2, 1)).asJava)
+
+    // Put 3 records on each topic (one flush each)
+    task.put(records.asJava)
+    val topic2Records = firstUsers.zipWithIndex.map {
+      case (user, k) =>
+        new SinkRecord(topic2, 1, null, null, schema, user, k.toLong, k, TimestampType.CREATE_TIME)
+    }
+    task.put(topic2Records.asJava)
+
+    task.close(Seq(new TopicPartition(TopicName, 1), new TopicPartition(topic2, 1)).asJava)
+    task.stop()
+
+    // Template topic: filename is "{record-count}.{extension}" => "3.json"
+    val templateFiles = listBucketPath(BucketName, s"$PrefixName/$TopicName/1/")
+    templateFiles should have size 1
+    templateFiles.head should endWith("3.json")
+
+    // Legacy topic: filename is offset-based (OffsetFileNamer), does NOT start with "3."
+    val legacyFiles = listBucketPath(BucketName, s"$PrefixName/$topic2/1/")
+    legacyFiles should have size 1
+    legacyFiles.head should not endWith "3.json"
+    legacyFiles.head should endWith(".json")
+  }
+
   @nowarn
   private def openCsvReaderToBucketFile(bucketFileName: String) = {
     val file1Bytes = remoteFileAsBytes(BucketName, bucketFileName)

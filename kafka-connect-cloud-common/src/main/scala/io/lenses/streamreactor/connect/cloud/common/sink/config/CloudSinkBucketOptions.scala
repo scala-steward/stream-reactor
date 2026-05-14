@@ -25,6 +25,7 @@ import io.lenses.streamreactor.connect.cloud.common.config.FormatSelection
 import io.lenses.streamreactor.connect.cloud.common.config.kcqlprops.PropsKeyEnum.FlushCount
 import io.lenses.streamreactor.connect.cloud.common.config.kcqlprops.PropsKeyEnum.FlushInterval
 import io.lenses.streamreactor.connect.cloud.common.config.kcqlprops.PropsKeyEnum.FlushSize
+import io.lenses.streamreactor.connect.cloud.common.config.kcqlprops.PropsKeyEnum.ObjectKeyTemplate
 import io.lenses.streamreactor.connect.cloud.common.config.kcqlprops.PropsKeyEnum.PartitionIncludeKeys
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocation
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocationValidator
@@ -77,10 +78,17 @@ object CloudSinkBucketOptions extends LazyLogging {
         paddingService     <- PaddingService.fromConfig(config, sinkProps)
         storageSettings    <- DataStorageSettings.from(sinkProps)
         fileNamerSuffix     = KeySuffix.fromKcql(kcql, SinkPropsSchema.schema)
-        fileNamer          <- getFileNamer(storageSettings, fileExtension, partitionSelection, paddingService, fileNamerSuffix)
-        keyNamer            = CloudKeyNamer(formatSelection, partitionSelection, fileNamer, paddingService)
-        stagingArea        <- config.getLocalStagingArea()(connectorTaskId)
-        target             <- CloudLocation.splitAndValidate(kcql.getTarget)
+        objectKeyTemplate   = sinkProps.getString(ObjectKeyTemplate)
+        fileNamer <- getFileNamer(storageSettings,
+                                  fileExtension,
+                                  partitionSelection,
+                                  paddingService,
+                                  fileNamerSuffix,
+                                  objectKeyTemplate,
+        )
+        keyNamer     = CloudKeyNamer(formatSelection, partitionSelection, fileNamer, paddingService)
+        stagingArea <- config.getLocalStagingArea()(connectorTaskId)
+        target      <- CloudLocation.splitAndValidate(kcql.getTarget)
 
         _           <- validateEnvelopeAndFormat(formatSelection, storageSettings)
         commitPolicy = config.commitPolicy(kcql)
@@ -115,6 +123,7 @@ object CloudSinkBucketOptions extends LazyLogging {
     partitionSelection: PartitionSelection,
     paddingService:     PaddingService,
     suffix:             Option[String],
+    objectKeyTemplate:  Option[String],
   ): Either[Throwable, FileNamer] = {
     val config = FileNamerConfig(
       partitionPaddingStrategy = paddingService.padderFor("partition"),
@@ -122,18 +131,20 @@ object CloudSinkBucketOptions extends LazyLogging {
       extension                = fileExtension,
       suffix                   = suffix,
     )
-    Try {
-      storageSettings.customNamerFactory match {
-        case Some(factory) =>
-          factory.createFileNamer(config)
-        case None =>
-          if (partitionSelection.isCustom) {
-            new TopicPartitionOffsetFileNamer(config)
-          } else {
-            new OffsetFileNamer(config)
-          }
-      }
-    }.toEither
+    storageSettings.customNamerFactory match {
+      case Some(factory) =>
+        Try(factory.createFileNamer(config)).toEither
+      case None =>
+        objectKeyTemplate match {
+          case Some(template) =>
+            TemplateFileNamer(template, config)
+          case None =>
+            Try {
+              if (partitionSelection.isCustom) new TopicPartitionOffsetFileNamer(config)
+              else new OffsetFileNamer(config)
+            }.toEither
+        }
+    }
   }
 
   private def validateWithFlush(kcql: Kcql): Either[Throwable, Unit] = {

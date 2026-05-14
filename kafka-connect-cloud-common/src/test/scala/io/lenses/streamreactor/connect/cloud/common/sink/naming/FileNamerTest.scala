@@ -15,6 +15,7 @@
  */
 package io.lenses.streamreactor.connect.cloud.common.sink.naming
 
+import io.lenses.streamreactor.connect.cloud.common.model.Offset
 import io.lenses.streamreactor.connect.cloud.common.model.Topic
 import io.lenses.streamreactor.connect.cloud.common.sink.config.padding.PaddingType.LeftPad
 import org.scalatest.funsuite.AnyFunSuite
@@ -34,17 +35,19 @@ class FileNamerTest extends AnyFunSuite with Matchers {
   test("OffsetFileNamer.fileName should generate the correct file name") {
 
     new OffsetFileNamer(config)
-      .fileName(FileNamerParams(topicPartitionOffset, 1L, 9L)) shouldEqual "00081_1_9.avro"
+      .fileName(FileNamerParams(topicPartitionOffset, 1L, 9L, Offset(50L), 3L)) shouldEqual "00081_1_9.avro"
     new OffsetFileNamer(config.copy(suffix = Some("my-suffix")))
-      .fileName(FileNamerParams(topicPartitionOffset, 1L, 9L)) shouldEqual "00081_1_9my-suffix.avro"
+      .fileName(FileNamerParams(topicPartitionOffset, 1L, 9L, Offset(50L), 3L)) shouldEqual "00081_1_9my-suffix.avro"
   }
 
   test("TopicPartitionOffsetFileNamer.fileName should generate the correct file name") {
 
     new TopicPartitionOffsetFileNamer(config)
-      .fileName(FileNamerParams(topicPartitionOffset, 0L, 0L)) shouldEqual "topic(00009_00081).avro"
+      .fileName(FileNamerParams(topicPartitionOffset, 0L, 0L, Offset(50L), 3L)) shouldEqual "topic(00009_00081).avro"
 
     new TopicPartitionOffsetFileNamer(config.copy(suffix = Some("mine")))
-      .fileName(FileNamerParams(topicPartitionOffset, 0L, 0L)) shouldEqual "topic(00009_00081)mine.avro"
+      .fileName(
+        FileNamerParams(topicPartitionOffset, 0L, 0L, Offset(50L), 3L),
+      ) shouldEqual "topic(00009_00081)mine.avro"
   }
 }

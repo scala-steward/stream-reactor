@@ -16,6 +16,7 @@
 package io.lenses.streamreactor.connect.cloud.common.sink.naming
 
 import io.lenses.streamreactor.connect.cloud.common.formats.writer.MessageDetail
+import io.lenses.streamreactor.connect.cloud.common.model.Offset
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartitionOffset
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocation
@@ -41,8 +42,10 @@ trait KeyNamer {
     bucketAndPrefix:         CloudLocation,
     topicPartitionOffset:    TopicPartitionOffset,
     partitionValues:         Map[PartitionField, String],
+    firstOffset:             Offset,
     earliestRecordTimestamp: Long,
     latestRecordTimestamp:   Long,
+    recordCount:             Long,
   ): Either[FatalCloudSinkError, CloudLocation]
 
   def processPartitionValues(

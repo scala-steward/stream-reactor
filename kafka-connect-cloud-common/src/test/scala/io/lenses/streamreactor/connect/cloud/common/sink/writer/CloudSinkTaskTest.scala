@@ -486,7 +486,7 @@ class CloudSinkTaskTest
     uncommittedOff: Offset,
   ): Writer[FakeFileMetadata] = {
     val objectKeyBuilder = mock[ObjectKeyBuilder]
-    when(objectKeyBuilder.build(any[Offset], any[Long], any[Long])).thenReturn(
+    when(objectKeyBuilder.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenReturn(
       CloudLocation(bucket,
                     path = Some(s"data/${tp.topic.value}/${tp.partition}/final-${uncommittedOff.value}.jsonl"),
       ).asRight,
@@ -514,6 +514,7 @@ class CloudSinkTaskTest
         uncommittedOffset       = uncommittedOff,
         earliestRecordTimestamp = 1L,
         latestRecordTimestamp   = 100L,
+        recordCount             = 1L,
       ),
     )
     writer
@@ -756,6 +757,7 @@ class CloudSinkTaskTest
         uncommittedOffset       = Offset(151),
         earliestRecordTimestamp = 1L,
         latestRecordTimestamp   = 100L,
+        recordCount             = 1L,
       ),
     )
 

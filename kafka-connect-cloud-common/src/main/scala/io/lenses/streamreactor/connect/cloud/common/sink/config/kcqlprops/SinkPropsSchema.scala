@@ -42,6 +42,7 @@ object SinkPropsSchema {
     FlushSize             -> LongPropsSchema,
     FlushInterval         -> IntPropsSchema,
     KeySuffix             -> StringPropsSchema,
+    ObjectKeyTemplate     -> StringPropsSchema,
   )
 
   val schema: KcqlPropsSchema[PropsKeyEntry, PropsKeyEnum.type] =

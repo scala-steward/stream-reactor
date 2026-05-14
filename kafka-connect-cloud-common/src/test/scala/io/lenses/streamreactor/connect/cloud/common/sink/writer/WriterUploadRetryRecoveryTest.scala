@@ -144,7 +144,9 @@ class WriterUploadRetryRecoveryTest
     when(formatWriter.complete()).thenReturn(().asRight)
 
     val objectKeyBuilder = mock[ObjectKeyBuilder]
-    when(objectKeyBuilder.build(any[Offset], any[Long], any[Long])).thenReturn(finalKeyLocation.asRight)
+    when(objectKeyBuilder.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenReturn(
+      finalKeyLocation.asRight,
+    )
 
     val writer = new Writer[FakeFileMetadata](
       topicPartition,
@@ -166,6 +168,7 @@ class WriterUploadRetryRecoveryTest
         uncommittedOffset       = uncommittedOffset,
         earliestRecordTimestamp = 1L,
         latestRecordTimestamp   = 100L,
+        recordCount             = 1L,
       ),
     )
 
@@ -238,9 +241,9 @@ class WriterUploadRetryRecoveryTest
       )
 
     val okbPk1 = mock[ObjectKeyBuilder]
-    when(okbPk1.build(any[Offset], any[Long], any[Long])).thenReturn(finalKeyPk1.asRight)
+    when(okbPk1.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenReturn(finalKeyPk1.asRight)
     val okbPk2 = mock[ObjectKeyBuilder]
-    when(okbPk2.build(any[Offset], any[Long], any[Long])).thenReturn(finalKeyPk2.asRight)
+    when(okbPk2.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenReturn(finalKeyPk2.asRight)
 
     val writerPk1 = new Writer[FakeFileMetadata](
       topicPartition,
@@ -262,6 +265,7 @@ class WriterUploadRetryRecoveryTest
         uncommittedOffset       = uncommittedOffset,
         earliestRecordTimestamp = 1L,
         latestRecordTimestamp   = 100L,
+        recordCount             = 1L,
       ),
     )
 
@@ -293,6 +297,7 @@ class WriterUploadRetryRecoveryTest
         uncommittedOffset       = uncommittedOffset,
         earliestRecordTimestamp = 1L,
         latestRecordTimestamp   = 100L,
+        recordCount             = 1L,
       ),
     )
 
@@ -405,9 +410,9 @@ class WriterUploadRetryRecoveryTest
         path = Some(s"data/${topicPartition.topic.value}/${topicPartition.partition}/pk2-final.jsonl"),
       )
       val okbPk1 = mock[ObjectKeyBuilder]
-      when(okbPk1.build(any[Offset], any[Long], any[Long])).thenReturn(finalKeyPk1.asRight)
+      when(okbPk1.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenReturn(finalKeyPk1.asRight)
       val okbPk2 = mock[ObjectKeyBuilder]
-      when(okbPk2.build(any[Offset], any[Long], any[Long])).thenReturn(finalKeyPk2.asRight)
+      when(okbPk2.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenReturn(finalKeyPk2.asRight)
 
       val writerPk1 = new Writer[FakeFileMetadata](
         topicPartition,
@@ -429,6 +434,7 @@ class WriterUploadRetryRecoveryTest
           uncommittedOffset       = uncommittedOffset,
           earliestRecordTimestamp = 1L,
           latestRecordTimestamp   = 100L,
+          recordCount             = 1L,
         ),
       )
 
@@ -456,6 +462,7 @@ class WriterUploadRetryRecoveryTest
           uncommittedOffset       = uncommittedOffset,
           earliestRecordTimestamp = 1L,
           latestRecordTimestamp   = 100L,
+          recordCount             = 1L,
         ),
       )
 
@@ -585,7 +592,7 @@ class WriterUploadRetryRecoveryTest
                     path = Some(s"data/${topicPartition.topic.value}/${topicPartition.partition}/pk1-final.jsonl"),
       )
     val okbPk1 = mock[ObjectKeyBuilder]
-    when(okbPk1.build(any[Offset], any[Long], any[Long])).thenReturn(finalKeyPk1.asRight)
+    when(okbPk1.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenReturn(finalKeyPk1.asRight)
     val okbPk2 = mock[ObjectKeyBuilder]
 
     // pk1 is in Uploading -> recommitPending must drive `Writer.commit` and the upload
@@ -610,6 +617,7 @@ class WriterUploadRetryRecoveryTest
         uncommittedOffset       = uncommittedOffset,
         earliestRecordTimestamp = 1L,
         latestRecordTimestamp   = 100L,
+        recordCount             = 1L,
       ),
     )
 
@@ -698,7 +706,9 @@ class WriterUploadRetryRecoveryTest
     val commitPolicy         = mock[CommitPolicy]
 
     val objectKeyBuilder = mock[ObjectKeyBuilder]
-    when(objectKeyBuilder.build(any[Offset], any[Long], any[Long])).thenReturn(finalKeyLocation.asRight)
+    when(objectKeyBuilder.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenReturn(
+      finalKeyLocation.asRight,
+    )
 
     val writer = new Writer[FakeFileMetadata](
       topicPartition,
@@ -806,7 +816,9 @@ class WriterUploadRetryRecoveryTest
     val commitPolicy         = mock[CommitPolicy]
 
     val objectKeyBuilder = mock[ObjectKeyBuilder]
-    when(objectKeyBuilder.build(any[Offset], any[Long], any[Long])).thenReturn(finalKeyLocation.asRight)
+    when(objectKeyBuilder.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenReturn(
+      finalKeyLocation.asRight,
+    )
 
     val writer = new Writer[FakeFileMetadata](
       topicPartition,
@@ -830,6 +842,7 @@ class WriterUploadRetryRecoveryTest
         uncommittedOffset       = uncommittedOff,
         earliestRecordTimestamp = 1L,
         latestRecordTimestamp   = 100L,
+        recordCount             = 1L,
       ),
     )
 
@@ -873,7 +886,9 @@ class WriterUploadRetryRecoveryTest
     val schemaChangeDetector = mock[SchemaChangeDetector]
     val commitPolicy         = mock[CommitPolicy]
     val objectKeyBuilder     = mock[ObjectKeyBuilder]
-    when(objectKeyBuilder.build(any[Offset], any[Long], any[Long])).thenReturn(finalKeyLocation.asRight)
+    when(objectKeyBuilder.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenReturn(
+      finalKeyLocation.asRight,
+    )
 
     when(
       pop.processPendingOperations(
@@ -907,6 +922,7 @@ class WriterUploadRetryRecoveryTest
         uncommittedOffset       = uncommittedOffset,
         earliestRecordTimestamp = 1L,
         latestRecordTimestamp   = 100L,
+        recordCount             = 1L,
       ),
     )
 
@@ -1039,7 +1055,9 @@ class WriterUploadRetryRecoveryTest
     when(formatWriter.complete()).thenReturn(().asRight)
 
     val objectKeyBuilder = mock[ObjectKeyBuilder]
-    when(objectKeyBuilder.build(any[Offset], any[Long], any[Long])).thenReturn(finalKeyLocation.asRight)
+    when(objectKeyBuilder.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenReturn(
+      finalKeyLocation.asRight,
+    )
 
     val oldCommittedOffset = Offset(99)
     val uncommittedOff     = Offset(150)
@@ -1064,6 +1082,7 @@ class WriterUploadRetryRecoveryTest
       uncommittedOffset       = uncommittedOff,
       earliestRecordTimestamp = 1L,
       latestRecordTimestamp   = 100L,
+      recordCount             = 1L,
     )
     writer.forceWriteState(initialUploadingState)
 

@@ -131,7 +131,7 @@ class CloudKeyNamerTest extends AnyFunSuite with Matchers with OptionValues with
       new OffsetFileNamer(FileNamerConfig(NoOpPaddingStrategy, paddingStrategy, JsonFormatSelection.extension, None))
     val s3KeyNamer = CloudKeyNamer(formatSelection, partitionSelection, fileNamer, paddingService)
 
-    val result = s3KeyNamer.value(bucketNoPrefix, topicPartition, partitionValues, 0L, 10L)
+    val result = s3KeyNamer.value(bucketNoPrefix, topicPartition, partitionValues, topicPartition.offset, 0L, 10L, 1L)
 
     result.value.path.value shouldEqual s"$TopicName/00$Partition/0${Offset}_0_10.json"
   }
@@ -141,7 +141,8 @@ class CloudKeyNamerTest extends AnyFunSuite with Matchers with OptionValues with
       new OffsetFileNamer(FileNamerConfig(NoOpPaddingStrategy, paddingStrategy, JsonFormatSelection.extension, None))
     val s3KeyNamer = CloudKeyNamer(formatSelection, partitionSelection, fileNamer, paddingService)
 
-    val result = s3KeyNamer.value(bucketAndPrefix, topicPartition, partitionValues, 101L, 9999L)
+    val result =
+      s3KeyNamer.value(bucketAndPrefix, topicPartition, partitionValues, topicPartition.offset, 101L, 9999L, 1L)
 
     result.value.path.value shouldEqual s"prefix/$TopicName/00$Partition/0${Offset}_101_9999.json"
   }
@@ -155,7 +156,8 @@ class CloudKeyNamerTest extends AnyFunSuite with Matchers with OptionValues with
       ))
     val s3KeyNamer = CloudKeyNamer(formatSelection, partitionSelection, fileNamer, paddingService)
 
-    val result = s3KeyNamer.value(bucketAndPrefix, topicPartition, partitionValues, 101L, 1000L)
+    val result =
+      s3KeyNamer.value(bucketAndPrefix, topicPartition, partitionValues, topicPartition.offset, 101L, 1000L, 1L)
 
     result.value.path.value shouldEqual s"prefix/$TopicName/00$Partition/${topicPartition.topic.value}(009_0$Offset).json"
   }
@@ -170,7 +172,8 @@ class CloudKeyNamerTest extends AnyFunSuite with Matchers with OptionValues with
       ))
     val s3KeyNamer = CloudKeyNamer(formatSelection, partitionSelection, fileNamer, paddingService)
 
-    val result = s3KeyNamer.value(bucketAndPrefix, topicPartition, partitionValues, 101L, 1000L)
+    val result =
+      s3KeyNamer.value(bucketAndPrefix, topicPartition, partitionValues, topicPartition.offset, 101L, 1000L, 1L)
 
     result.value.path.value shouldEqual s"prefix/$TopicName/00$Partition/${topicPartition.topic.value}(009_0$Offset)-my-suffix.json"
   }

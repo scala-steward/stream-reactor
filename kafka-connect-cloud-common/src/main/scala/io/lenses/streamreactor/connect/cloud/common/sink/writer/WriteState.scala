@@ -76,12 +76,14 @@ case class Writing(
 
   def toUploading: Uploading = {
     logger.debug("state transition: Writing => Uploading")
-    Uploading(commitState.reset(),
-              file,
-              firstBufferedOffset,
-              uncommittedOffset,
-              earliestRecordTimestamp,
-              latestRecordTimestamp,
+    Uploading(
+      commitState.reset(),
+      file,
+      firstBufferedOffset,
+      uncommittedOffset,
+      earliestRecordTimestamp,
+      latestRecordTimestamp,
+      recordCount = commitState.recordCount,
     )
   }
 }
@@ -93,6 +95,7 @@ case class Uploading(
   uncommittedOffset:       Offset,
   earliestRecordTimestamp: Long,
   latestRecordTimestamp:   Long,
+  recordCount:             Long,
 ) extends WriteState(commitState)
     with LazyLogging {
 
