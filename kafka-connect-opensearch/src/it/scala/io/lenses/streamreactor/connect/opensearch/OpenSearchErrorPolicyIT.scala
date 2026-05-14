@@ -1,0 +1,138 @@
+/*
+ * Copyright 2017-2026 Lenses.io Ltd
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.lenses.streamreactor.connect.opensearch
+
+import com.github.tomakehurst.wiremock.WireMockServer
+import com.github.tomakehurst.wiremock.client.WireMock._
+import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
+import io.lenses.streamreactor.connect.elastic.common.writer.JsonBulkWriter
+import io.lenses.streamreactor.connect.opensearch.config.OpenSearchConfig
+import io.lenses.streamreactor.connect.opensearch.config.OpenSearchConfigConstants._
+import io.lenses.streamreactor.connect.opensearch.config.OpenSearchSettings
+import org.apache.kafka.connect.data.Schema
+import org.apache.kafka.connect.data.SchemaBuilder
+import org.apache.kafka.connect.data.Struct
+import org.apache.kafka.connect.errors.ConnectException
+import org.apache.kafka.connect.errors.RetriableException
+import org.apache.kafka.connect.sink.SinkRecord
+import org.opensearch.client.opensearch.OpenSearchClient
+import org.scalatest.BeforeAndAfterAll
+import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
+
+/**
+ * Integration tests for error policy end-to-end behaviour.
+ *
+ * Uses WireMock to inject transport-level failures:
+ *  - RETRY policy: WireMock returns HTTP 503 → `RetriableException` propagates from the writer.
+ *  - NOOP policy: Writer points at a closed port → exception is silently swallowed.
+ *  - THROW policy: WireMock returns HTTP 503 → `ConnectException` propagates.
+ */
+class OpenSearchErrorPolicyIT extends AnyFunSuite with Matchers with BeforeAndAfterAll {
+
+  private var wireMock: WireMockServer = _
+
+  override def beforeAll(): Unit = {
+    wireMock = new WireMockServer(wireMockConfig().dynamicPort())
+    wireMock.start()
+  }
+
+  override def afterAll(): Unit = {
+    wireMock.stop()
+  }
+
+  private val schema: Schema = SchemaBuilder.struct()
+    .field("id", Schema.STRING_SCHEMA)
+    .build()
+
+  private def sinkRecord(topic: String, id: String): SinkRecord = {
+    val struct = new Struct(schema).put("id", id)
+    new SinkRecord(topic, 0, Schema.STRING_SCHEMA, id, schema, struct, 0L)
+  }
+
+  private def makeWriter(host: String, port: Int, kcql: String, errorPolicy: String): JsonBulkWriter = {
+    val props = Map(
+      HOSTS      -> host,
+      ES_PORT    -> port.toString,
+      KCQL       -> kcql,
+      ERROR_POLICY -> errorPolicy,
+      NBR_OF_RETRIES -> "2",
+    )
+    val config    = OpenSearchConfig(props)
+    val settings  = OpenSearchSettings(config)
+    val transport = OpenSearchTransportFactory.create(settings)
+    val osClient  = new OpenSearchClient(transport)
+    val kClient   = new KOpenSearchClient(osClient, settings)
+    new JsonBulkWriter(kClient, settings.common)
+  }
+
+  private val infoBody =
+    """{"name":"test","cluster_name":"test","version":{"number":"2.13.0","distribution":"opensearch"},"tagline":"The OpenSearch Project"}"""
+
+  test("THROW policy: transport error from WireMock 503 surfaces as ConnectException") {
+    wireMock.resetAll()
+    wireMock.stubFor(
+      get(urlEqualTo("/")).willReturn(
+        aResponse().withStatus(200).withHeader("Content-Type", "application/json").withBody(infoBody),
+      ),
+    )
+    wireMock.stubFor(
+      post(urlEqualTo("/_bulk")).willReturn(
+        aResponse().withStatus(503).withHeader("Content-Type", "application/json")
+          .withBody("""{"error":"service unavailable"}"""),
+      ),
+    )
+
+    val writer = makeWriter("localhost", wireMock.port(), "INSERT INTO idx SELECT * FROM topic PK id", "THROW")
+    intercept[ConnectException](writer.write(Vector(sinkRecord("topic", "id-1"))))
+  }
+
+  test("RETRY policy: transport error from WireMock 503 surfaces as RetriableException") {
+    wireMock.resetAll()
+    wireMock.stubFor(
+      get(urlEqualTo("/")).willReturn(
+        aResponse().withStatus(200).withHeader("Content-Type", "application/json").withBody(infoBody),
+      ),
+    )
+    wireMock.stubFor(
+      post(urlEqualTo("/_bulk")).willReturn(
+        aResponse().withStatus(503).withHeader("Content-Type", "application/json")
+          .withBody("""{"error":"service unavailable"}"""),
+      ),
+    )
+
+    val writer = makeWriter("localhost", wireMock.port(), "INSERT INTO idx SELECT * FROM topic PK id", "RETRY")
+    intercept[RetriableException](writer.write(Vector(sinkRecord("topic", "id-2"))))
+  }
+
+  test("NOOP policy: transport error from WireMock 503 is silently swallowed — write returns without exception") {
+    wireMock.resetAll()
+    wireMock.stubFor(
+      get(urlEqualTo("/")).willReturn(
+        aResponse().withStatus(200).withHeader("Content-Type", "application/json").withBody(infoBody),
+      ),
+    )
+    wireMock.stubFor(
+      post(urlEqualTo("/_bulk")).willReturn(
+        aResponse().withStatus(503).withHeader("Content-Type", "application/json")
+          .withBody("""{"error":"service unavailable"}"""),
+      ),
+    )
+
+    val writer = makeWriter("localhost", wireMock.port(), "INSERT INTO idx SELECT * FROM topic PK id", "NOOP")
+    noException should be thrownBy writer.write(Vector(sinkRecord("topic", "id-3")))
+  }
+}

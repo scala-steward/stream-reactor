@@ -16,7 +16,7 @@
 package io.lenses.streamreactor.connect.elastic6
 
 import io.lenses.kcql.Kcql
-import io.lenses.streamreactor.connect.elastic6.indexname.CreateIndex
+import io.lenses.streamreactor.connect.elastic.common.indexname.CreateIndex
 import org.apache.kafka.connect.data.Schema
 import org.apache.kafka.connect.data.SchemaAndValue
 import org.apache.kafka.connect.data.SchemaBuilder

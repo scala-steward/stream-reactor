@@ -15,31 +15,17 @@
  */
 package io.lenses.streamreactor.connect.elastic7.config
 
-import cyclops.control.Option.none
-import io.lenses.kcql.Kcql
-import io.lenses.streamreactor.common.errors.ErrorPolicy
-import io.lenses.streamreactor.common.security.StoresInfo
 import io.lenses.streamreactor.common.util.EitherUtils.unpackOrThrow
+import io.lenses.streamreactor.common.security.StoresInfo
+import io.lenses.streamreactor.connect.elastic.common.config.ElasticCommonSettings
 
 /**
- * Created by andrew@datamountaineer.com on 13/05/16.
- * stream-reactor-maven
+ * Factory for [[ElasticCommonSettings]] using the elastic7 [[ElasticConfig]] / [[ElasticConfigConstants]].
+ * The case class is a type alias so existing code referencing `ElasticSettings` continues to compile.
  */
-case class ElasticSettings(
-  kcqls:                 Seq[Kcql],
-  errorPolicy:           ErrorPolicy,
-  taskRetries:           Int        = ElasticConfigConstants.NBR_OF_RETIRES_DEFAULT,
-  writeTimeout:          Int        = ElasticConfigConstants.WRITE_TIMEOUT_DEFAULT,
-  batchSize:             Int        = ElasticConfigConstants.BATCH_SIZE_DEFAULT,
-  pkJoinerSeparator:     String     = ElasticConfigConstants.PK_JOINER_SEPARATOR_DEFAULT,
-  httpBasicAuthUsername: String     = ElasticConfigConstants.CLIENT_HTTP_BASIC_AUTH_USERNAME_DEFAULT,
-  httpBasicAuthPassword: String     = ElasticConfigConstants.CLIENT_HTTP_BASIC_AUTH_USERNAME_DEFAULT,
-  storesInfo:            StoresInfo = new StoresInfo(none(), none(), none()),
-)
-
 object ElasticSettings {
 
-  def apply(config: ElasticConfig): ElasticSettings = {
+  def apply(config: ElasticConfig): ElasticCommonSettings = {
     val kcql                  = config.getKcql()
     val pkJoinerSeparator     = config.getString(ElasticConfigConstants.PK_JOINER_SEPARATOR)
     val writeTimeout          = config.getWriteTimeout
@@ -47,19 +33,18 @@ object ElasticSettings {
     val retries               = config.getNumberRetries
     val httpBasicAuthUsername = config.getString(ElasticConfigConstants.CLIENT_HTTP_BASIC_AUTH_USERNAME)
     val httpBasicAuthPassword = config.getString(ElasticConfigConstants.CLIENT_HTTP_BASIC_AUTH_PASSWORD)
+    val batchSize             = config.getInt(ElasticConfigConstants.BATCH_SIZE_CONFIG)
 
-    val batchSize = config.getInt(ElasticConfigConstants.BATCH_SIZE_CONFIG)
-
-    ElasticSettings(
-      kcql,
-      errorPolicy,
-      retries,
-      writeTimeout,
-      batchSize,
-      pkJoinerSeparator,
-      httpBasicAuthUsername,
-      httpBasicAuthPassword,
-      unpackOrThrow(StoresInfo.fromConfig(config)),
+    ElasticCommonSettings(
+      kcqls                = kcql,
+      errorPolicy          = errorPolicy,
+      taskRetries          = retries,
+      writeTimeout         = writeTimeout,
+      batchSize            = batchSize,
+      pkJoinerSeparator    = pkJoinerSeparator,
+      httpBasicAuthUsername = httpBasicAuthUsername,
+      httpBasicAuthPassword = httpBasicAuthPassword,
+      storesInfo           = unpackOrThrow(StoresInfo.fromConfig(config)),
     )
   }
 }

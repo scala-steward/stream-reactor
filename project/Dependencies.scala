@@ -168,6 +168,10 @@ object Dependencies {
       override val jnaVersion:           String = "5.17.0"
     }
 
+    val openSearchVersion               = "2.13.0"
+    val openSearchTestcontainersVersion = "2.0.1"
+    val httpclient5Version              = "5.2.1"
+
   }
 
   import Versions._
@@ -454,6 +458,17 @@ object Dependencies {
 
   def jna(v: String): ModuleID = "net.java.dev.jna" % "jna" % v
 
+  // OpenSearch
+  lazy val openSearchJava           = "org.opensearch.client"              % "opensearch-java"          % Versions.openSearchVersion
+  lazy val openSearchRestClient     = "org.opensearch.client"              % "opensearch-rest-client"   % Versions.openSearchVersion
+  lazy val openSearchTestcontainers = "org.opensearch"                     % "opensearch-testcontainers" % Versions.openSearchTestcontainersVersion
+  lazy val httpclient5              = "org.apache.httpcomponents.client5"  % "httpclient5"              % Versions.httpclient5Version
+
+  // AWS SDK v2 extras (auth/regions/apache-client)
+  lazy val awsSdkAuth         = "software.amazon.awssdk" % "auth"          % Versions.awsSdkVersion
+  lazy val awsSdkRegions      = "software.amazon.awssdk" % "regions"       % Versions.awsSdkVersion
+  lazy val awsSdkApacheClient = "software.amazon.awssdk" % "apache-client" % Versions.awsSdkVersion
+
 }
 
 trait Dependencies {
@@ -647,15 +662,40 @@ trait Dependencies {
     testContainersScalaElasticsearch,
   )
 
+  // elastic-common module (no elastic4s-specific deps — only shared Kafka/JSON infrastructure)
+  val kafkaConnectElasticCommonDeps: Seq[ModuleID] = baseDeps
+
+  val kafkaConnectElasticCommonTestDeps: Seq[ModuleID] = baseTestDeps
+
   val kafkaConnectElastic6Deps: Seq[ModuleID] =
-    elasticCommonDeps(Elastic6Versions) ++ Seq(elastic4sHttp(Elastic6Versions.elastic4sVersion))
+    kafkaConnectElasticCommonDeps ++ elasticCommonDeps(Elastic6Versions) ++ Seq(
+      elastic4sHttp(Elastic6Versions.elastic4sVersion),
+    )
 
   val kafkaConnectElastic6TestDeps: Seq[ModuleID] = baseTestDeps ++ elasticTestCommonDeps(Elastic6Versions)
 
   val kafkaConnectElastic7Deps: Seq[ModuleID] =
-    elasticCommonDeps(Elastic7Versions) ++ Seq(elastic4sClient(Elastic7Versions.elastic4sVersion))
+    kafkaConnectElasticCommonDeps ++ elasticCommonDeps(Elastic7Versions) ++ Seq(
+      elastic4sClient(Elastic7Versions.elastic4sVersion),
+    )
 
   val kafkaConnectElastic7TestDeps: Seq[ModuleID] = baseTestDeps ++ elasticTestCommonDeps(Elastic7Versions)
+
+  val kafkaConnectOpenSearchDeps: Seq[ModuleID] =
+    kafkaConnectElasticCommonDeps ++ Seq(
+      openSearchJava,
+      httpclient5,
+      awsSdkAuth,
+      awsSdkRegions,
+      awsSdkApacheClient,
+    )
+
+  val kafkaConnectOpenSearchTestDeps: Seq[ModuleID] =
+    baseTestDeps ++ Seq(
+      openSearchTestcontainers,
+      testContainersScala,
+      nimbusJoseJwt,
+    )
 
   val kafkaConnectFtpDeps: Seq[ModuleID] = Seq(commonsNet, commonsCodec, commonsIO, commonsLang3, jsch)
 
@@ -684,6 +724,7 @@ trait Dependencies {
     testcontainersMongodb,
     jedis,
     mongoDb,
+    openSearchTestcontainers,
   )
 
   val nettyOverrides: Seq[ModuleID] = Seq(

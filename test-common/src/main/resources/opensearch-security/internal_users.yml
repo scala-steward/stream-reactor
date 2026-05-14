@@ -1,0 +1,15 @@
+_meta:
+  type: "internalusers"
+  config_version: 2
+admin:
+  hash: "$2y$12$VcCDgh2NDk07JGN0rjGbM.Ad41qVR/YFJcgHp0UGns5JDymv..TOG"
+  reserved: true
+  backend_roles:
+    - "admin"
+  description: "Demo admin user used by the basic-auth IT cases"
+kafka-connect:
+  hash: "$2y$12$RQ8u6c8qm/wLi6mObdo74OQGQVR1V7C5cGtpQjF7nHk7HxYlbGKia"
+  reserved: false
+  backend_roles:
+    - "kafka-connect"
+  description: "Connector-side user mapped to all_access via roles_mapping"

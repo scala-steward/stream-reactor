@@ -30,8 +30,10 @@ lazy val subProjects: Seq[Project] = Seq(
   `azure-datalake`,
   cassandra,
   `cassandra-sink`,
+  `elastic-common`,
   elastic6,
   elastic7,
+  opensearch,
   ftp,
   `gcp-storage`,
   http,
@@ -323,9 +325,25 @@ lazy val `cassandra-sink` = (project in file("kafka-connect-cassandra-sink"))
   .configureFunctionalTests()
   .enablePlugins(PackPlugin)
 
+lazy val `elastic-common` = (project in file("kafka-connect-elastic-common"))
+  .dependsOn(common)
+  .dependsOn(`sql-common`)
+  .settings(
+    settings ++
+      Seq(
+        name := "kafka-connect-elastic-common",
+        description := "Shared Kafka Connect elastic/opensearch utilities (internal library — not published as a connector)",
+        libraryDependencies ++= baseDeps ++ kafkaConnectElasticCommonDeps,
+        publish / skip := true,
+      ),
+  )
+  .configureAssembly(false)
+  .configureTests(kafkaConnectElasticCommonTestDeps)
+
 lazy val elastic6 = (project in file("kafka-connect-elastic6"))
   .dependsOn(common)
   .dependsOn(`sql-common`)
+  .dependsOn(`elastic-common`)
   .dependsOn(`test-common` % "fun->compile")
   .settings(
     settings ++
@@ -351,6 +369,7 @@ lazy val elastic6 = (project in file("kafka-connect-elastic6"))
 lazy val elastic7 = (project in file("kafka-connect-elastic7"))
   .dependsOn(common)
   .dependsOn(`sql-common`)
+  .dependsOn(`elastic-common`)
   .dependsOn(`test-common` % "fun->compile")
   .settings(
     settings ++
@@ -369,6 +388,31 @@ lazy val elastic7 = (project in file("kafka-connect-elastic7"))
   .configureMavenDescriptor()
   .configureTests(baseTestDeps)
   .configureIntegrationTests(kafkaConnectElastic7TestDeps)
+  .configureFunctionalTests()
+  .enablePlugins(PackPlugin)
+
+lazy val opensearch = (project in file("kafka-connect-opensearch"))
+  .dependsOn(common)
+  .dependsOn(`sql-common`)
+  .dependsOn(`elastic-common`)
+  .dependsOn(`test-common` % "test->compile;it->compile;fun->compile")
+  .settings(
+    settings ++
+      Seq(
+        name := "kafka-connect-opensearch",
+        description := "Kafka Connect compatible connector to move data between Kafka and OpenSearch",
+        libraryDependencies ++= baseDeps ++ kafkaConnectOpenSearchDeps,
+        publish / skip := true,
+        packExcludeJars := Seq(
+          "scala-.*\\.jar",
+          "zookeeper-.*\\.jar",
+        ),
+      ),
+  )
+  .configureAssembly(true)
+  .configureMavenDescriptor()
+  .configureTests(kafkaConnectOpenSearchTestDeps)
+  .configureIntegrationTests(kafkaConnectOpenSearchTestDeps)
   .configureFunctionalTests()
   .enablePlugins(PackPlugin)
 

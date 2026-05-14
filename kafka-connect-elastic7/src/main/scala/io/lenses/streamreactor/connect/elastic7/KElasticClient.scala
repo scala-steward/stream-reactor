@@ -15,7 +15,6 @@
  */
 package io.lenses.streamreactor.connect.elastic7
 
-import cats.implicits.toBifunctorOps
 import com.sksamuel.elastic4s.ElasticClient
 import com.sksamuel.elastic4s.ElasticNodeEndpoint
 import com.sksamuel.elastic4s.ElasticProperties
@@ -24,27 +23,27 @@ import com.sksamuel.elastic4s.http.JavaClient
 import com.sksamuel.elastic4s.requests.bulk.BulkRequest
 import com.sksamuel.elastic4s.requests.bulk.BulkResponse
 import com.typesafe.scalalogging.StrictLogging
-import io.lenses.kcql.Kcql
 import io.lenses.streamreactor.common.util.EitherUtils.unpackOrThrow
-import io.lenses.streamreactor.connect.elastic7.config.ElasticSettings
-import io.lenses.streamreactor.connect.elastic7.indexname.CreateIndex.getIndexNameForAutoCreate
+import io.lenses.streamreactor.connect.elastic.common.config.ElasticCommonSettings
 import org.apache.http.auth.AuthScope
 import org.apache.http.auth.UsernamePasswordCredentials
 import org.apache.http.client.config.RequestConfig.Builder
 import org.apache.http.impl.client.BasicCredentialsProvider
 import org.apache.http.impl.nio.client.HttpAsyncClientBuilder
 
+import scala.concurrent.Await
 import scala.concurrent.Future
+import scala.concurrent.duration._
 
 trait KElasticClient extends AutoCloseable {
-  def index(kcql: Kcql): Unit
-
   def execute(definition: BulkRequest): Future[Response[BulkResponse]]
+
+  def createIndex(indexName: String): Unit
 }
 
 object KElasticClient extends StrictLogging {
 
-  def createHttpClient(settings: ElasticSettings, endpoints: Seq[ElasticNodeEndpoint]): KElasticClient = {
+  def createHttpClient(settings: ElasticCommonSettings, endpoints: Seq[ElasticNodeEndpoint]): KElasticClient = {
     val maybeProvider: Option[BasicCredentialsProvider] = {
       for {
         httpBasicAuthUsername <- Option.when(settings.httpBasicAuthUsername.nonEmpty)(settings.httpBasicAuthUsername)
@@ -75,19 +74,14 @@ class HttpKElasticClient(client: ElasticClient) extends KElasticClient {
 
   import com.sksamuel.elastic4s.ElasticDsl._
 
-  override def index(kcql: Kcql): Unit = {
-    require(kcql.isAutoCreate, s"Auto-creating indexes hasn't been enabled for target:${kcql.getTarget}")
-
-    getIndexNameForAutoCreate(kcql).leftMap(throw _).map {
-      indexName: String =>
-        client.execute {
-          createIndex(indexName)
-        }
-    }
-    ()
-  }
-
   override def execute(definition: BulkRequest): Future[Response[BulkResponse]] = client.execute(definition)
+
+  override def createIndex(indexName: String): Unit = {
+    import com.sksamuel.elastic4s.ElasticDsl.{ createIndex => dslCreateIndex }
+    // Await completion so the index exists before the first bulk request is sent.
+    // Uses a generous 30-second ceiling; auto-create is a one-off startup operation.
+    val _ = Await.result(client.execute(dslCreateIndex(indexName)), 30.seconds)
+  }
 
   override def close(): Unit = client.close()
 }
