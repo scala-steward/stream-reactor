@@ -121,6 +121,7 @@ class WriterManagerCreator[MD <: FileMetadata, SC <: CloudSinkConfig[_]] extends
                 bucketOptions.formatSelection,
                 stagingFilename.toPath,
                 topicPartition,
+                bucketOptions.localStagingArea.writeBufferSize,
               )(config.compressionCodec)
             } yield formatWriter
           case None => FatalCloudSinkError("Can't find format choice in config", topicPartition).asLeft
