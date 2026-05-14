@@ -147,7 +147,7 @@ class OpenSearchJwtAuthIT extends ITBase {
         )
         resp.hits().total().value() shouldBe 1L
       }
-    } finally Try(searchClient._transport().close())
+    } finally { val _ = Try(searchClient._transport().close()) }
   }
 
   test("C6: file-backed JWT rotation — deterministic via distinct subjects and generous margin") {

@@ -19,7 +19,6 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory
 import io.lenses.streamreactor.connect.elastic.common.bulk.DeleteOp
 import io.lenses.streamreactor.connect.elastic.common.bulk.InsertOp
 import io.lenses.streamreactor.connect.elastic.common.bulk.UpsertOp
-import io.lenses.streamreactor.connect.opensearch.config.OpenSearchConfigConstants._
 
 import java.time.LocalDate
 
@@ -114,9 +113,8 @@ class OpenSearchWriterFeatureIT extends ITBase {
     val kClient = makeKClient(baseProps(host, port, s"INSERT INTO $index SELECT * FROM topic PK meta.id"))
 
     // Build a nested JSON doc: {"meta": {"id": "nested-val"}, "payload": "hello"}
-    val meta = JsonNodeFactory.instance.objectNode().put("id", "nested-val")
-    val doc  = JsonNodeFactory.instance.objectNode()
-    doc.set("meta", meta)
+    val doc = JsonNodeFactory.instance.objectNode()
+    doc.putObject("meta").put("id", "nested-val")
     doc.put("payload", "hello")
 
     // The PK path "meta.id" produces id = "nested-val"

@@ -53,9 +53,12 @@ class OpenSearchSinkTaskLifecycleIT extends ITBase {
     override def offset(map: java.util.Map[org.apache.kafka.common.TopicPartition, java.lang.Long]): Unit = ()
     override def timeout(l:  Long): Unit = ()
     override def assignment(): java.util.Set[org.apache.kafka.common.TopicPartition] = java.util.Collections.emptySet()
-    override def pause(tps:  org.apache.kafka.common.TopicPartition*): Unit = ()
-    override def resume(tps: org.apache.kafka.common.TopicPartition*): Unit = ()
-    override def requestCommit(): Unit = ()
+    @scala.annotation.nowarn("cat=unused")
+    override def pause(partitions: org.apache.kafka.common.TopicPartition*): Unit = ()
+    @scala.annotation.nowarn("cat=unused")
+    override def resume(partitions: org.apache.kafka.common.TopicPartition*): Unit = ()
+    override def pluginMetrics(): org.apache.kafka.common.metrics.PluginMetrics = null
+    override def requestCommit(): Unit                                          = ()
   }
 
   test("T1: start → put → stop lifecycle succeeds with a real props map") {

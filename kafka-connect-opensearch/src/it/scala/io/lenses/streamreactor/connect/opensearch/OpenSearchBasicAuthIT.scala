@@ -121,7 +121,7 @@ class OpenSearchBasicAuthIT extends ITBase {
         )
         resp.hits().total().value() shouldBe 1L
       }
-    } finally Try(searchClient._transport().close())
+    } finally { val _ = Try(searchClient._transport().close()) }
   }
 
   test("negative path: wrong password fails with an exception") {

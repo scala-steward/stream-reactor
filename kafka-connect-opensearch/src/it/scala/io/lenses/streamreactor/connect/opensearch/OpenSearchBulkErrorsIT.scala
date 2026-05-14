@@ -59,14 +59,9 @@ class OpenSearchBulkErrorsIT extends ITBase {
       val transport = ApacheHttpClient5TransportBuilder.builder(httpHost).build()
       new OpenSearchClient(transport)
     }
-    val mappingBody =
-      """{"properties":{"field":{"type":"integer"}}}"""
-    val jsonParser = rawClient._transport().jsonpMapper().jsonProvider().createParser(
-      new java.io.StringReader(mappingBody),
-    )
+    val intProp = org.opensearch.client.opensearch._types.mapping.Property.of(p => p.integer(i => i))
     val putReq = org.opensearch.client.opensearch.indices.PutMappingRequest.of { b =>
-      b.index(index)
-        .withJson(jsonParser)
+      b.index(index).properties("field", intProp)
     }
     rawClient.indices().putMapping(putReq)
     rawClient._transport().close()

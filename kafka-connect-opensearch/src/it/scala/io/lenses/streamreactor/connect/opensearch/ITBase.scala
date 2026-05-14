@@ -72,7 +72,7 @@ trait ITBase extends AnyFunSuite with Matchers with BeforeAndAfterAll with Event
   override def beforeAll(): Unit = {
     container.start()
     logger.info(
-      s"[IT] Container started: image=${container.dockerImageName}, address=${container.hostNetwork.httpHostAddress}",
+      s"[IT] Container started: image=${container.container.getDockerImageName}, address=${container.hostNetwork.httpHostAddress}",
     )
     super.beforeAll()
   }

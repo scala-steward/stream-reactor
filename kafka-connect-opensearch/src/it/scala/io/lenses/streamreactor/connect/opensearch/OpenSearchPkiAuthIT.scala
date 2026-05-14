@@ -64,7 +64,7 @@ class OpenSearchPkiAuthIT extends ITBase {
       val resp = rawClient.generic().execute(
         Requests.builder().endpoint("/_plugins/_security/whoami").method("GET").build(),
       )
-      val bodyStream = resp.getBody.asInputStream
+      val bodyStream = resp.getBody.get().body()
       val json       = new com.fasterxml.jackson.databind.ObjectMapper().readTree(bodyStream)
       val dn         = Option(json.get("dn")).map(_.asText()).getOrElse("")
       // The client cert subject is "CN=connect-client,O=lenses,L=test,C=GB".

@@ -59,10 +59,13 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
   }
 
   test("basic auth creates an ApacheHttpClient5Transport") {
-    val transport = OpenSearchTransportFactory.create(settings(
-      CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
-      CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "pass",
-    ))
+    val transport = OpenSearchTransportFactory.create(
+      settings(
+        "connect.opensearch.protocol"   -> "https",
+        CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
+        CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "pass",
+      ),
+    )
     try {
       transport shouldBe a[ApacheHttpClient5Transport]
     } finally transport.close()
@@ -70,7 +73,8 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
 
   test("JWT auth creates an ApacheHttpClient5Transport") {
     val transport = OpenSearchTransportFactory.create(settings(
-      JWT_TOKEN_KEY -> "my-jwt-token",
+      "connect.opensearch.protocol" -> "https",
+      JWT_TOKEN_KEY                 -> "my-jwt-token",
     ))
     try {
       transport shouldBe a[ApacheHttpClient5Transport]
@@ -117,6 +121,7 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
   // C3: asymmetric basic-auth cases
   test("C3: username-only (no password) creates transport without error — partial creds skip basic-auth wiring") {
     val transport = OpenSearchTransportFactory.create(settings(
+      "connect.opensearch.protocol"   -> "https",
       CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
     ))
     try {
@@ -126,6 +131,7 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
 
   test("C3: password-only (no username) creates transport without error — partial creds skip basic-auth wiring") {
     val transport = OpenSearchTransportFactory.create(settings(
+      "connect.opensearch.protocol"   -> "https",
       CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "pass",
     ))
     try {
@@ -134,10 +140,13 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
   }
 
   test("C3: both username and password creates transport with basic-auth wired") {
-    val transport = OpenSearchTransportFactory.create(settings(
-      CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
-      CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "s3cr3t",
-    ))
+    val transport = OpenSearchTransportFactory.create(
+      settings(
+        "connect.opensearch.protocol"   -> "https",
+        CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
+        CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "s3cr3t",
+      ),
+    )
     try {
       transport shouldBe a[ApacheHttpClient5Transport]
     } finally transport.close()
@@ -164,13 +173,14 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
 
     val transport = OpenSearchTransportFactory.create(
       settings(
-        JWT_TOKEN_KEY             -> "my-jwt-token",
-        "ssl.keystore.location"   -> ksFile.toString,
-        "ssl.keystore.type"       -> "PKCS12",
-        "ssl.keystore.password"   -> "test",
-        "ssl.truststore.location" -> tsFile.toString,
-        "ssl.truststore.type"     -> "PKCS12",
-        "ssl.truststore.password" -> "test",
+        "connect.opensearch.protocol" -> "https",
+        JWT_TOKEN_KEY                 -> "my-jwt-token",
+        "ssl.keystore.location"       -> ksFile.toString,
+        "ssl.keystore.type"           -> "PKCS12",
+        "ssl.keystore.password"       -> "test",
+        "ssl.truststore.location"     -> tsFile.toString,
+        "ssl.truststore.type"         -> "PKCS12",
+        "ssl.truststore.password"     -> "test",
       ),
     )
     try {
@@ -191,11 +201,14 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
   }
 
   test("multi-host with basic auth: two hosts + credentials create transport without error") {
-    val transport = OpenSearchTransportFactory.create(settings(
-      HOSTS                           -> "host1,host2",
-      CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
-      CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "pass",
-    ))
+    val transport = OpenSearchTransportFactory.create(
+      settings(
+        "connect.opensearch.protocol"   -> "https",
+        HOSTS                           -> "host1,host2",
+        CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
+        CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "pass",
+      ),
+    )
     try {
       transport shouldBe a[ApacheHttpClient5Transport]
     } finally transport.close()
@@ -206,7 +219,8 @@ class OpenSearchTransportFactoryTest extends AnyFunSuite with Matchers with Befo
     // If there were a conflict (e.g. redirect interceptor overwriting JWT header),
     // the builder would throw or the transport would fail to construct.
     val transport = OpenSearchTransportFactory.create(settings(
-      JWT_TOKEN_KEY -> "eyJhbGciOiJSUzI1NiJ9.test-payload.sig",
+      "connect.opensearch.protocol" -> "https",
+      JWT_TOKEN_KEY                 -> "eyJhbGciOiJSUzI1NiJ9.test-payload.sig",
     ))
     try {
       // Both the no-op redirect strategy and the JwtBearerInterceptor are wired;
