@@ -28,7 +28,7 @@ class BuildLocalOutputStream(outputStream: BufferedOutputStream, topicPartition:
     extends CloudOutputStream
     with LazyLogging {
 
-  private var pointer = 0
+  private var pointer: Long = 0L
 
   override def write(bytes: Array[Byte], startOffset: Int, numberOfBytes: Int): Unit =
     if (bytes == null || bytes.isEmpty) {
@@ -59,6 +59,6 @@ class BuildLocalOutputStream(outputStream: BufferedOutputStream, topicPartition:
       FatalCloudSinkError(to.getMessage, topicPartition)
   }
 
-  override def getPointer: Long = pointer.toLong
+  override def getPointer: Long = pointer
 
 }

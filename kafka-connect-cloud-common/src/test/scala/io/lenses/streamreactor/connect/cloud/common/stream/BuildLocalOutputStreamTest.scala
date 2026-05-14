@@ -23,6 +23,8 @@ import org.scalatest.BeforeAndAfter
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.io.BufferedOutputStream
+import java.io.OutputStream
 import java.nio.file.Files
 import scala.io.Source
 
@@ -83,6 +85,20 @@ class BuildLocalOutputStreamTest extends AnyFlatSpec with Matchers with Using wi
     an[IllegalArgumentException] should be thrownBy {
       target.write(bytes, Int.MaxValue, 1)
     }
+  }
+
+  "getPointer" should "not overflow when more than 2 GiB are written" in {
+    val nullBuffered = new BufferedOutputStream(OutputStream.nullOutputStream())
+    val stream       = new BuildLocalOutputStream(nullBuffered, Topic("testTopic").withPartition(1))
+    val chunkSize    = 1024 * 1024
+    val chunk        = new Array[Byte](chunkSize)
+    val iterations   = 2049
+    for (_ <- 1 to iterations) {
+      stream.write(chunk, 0, chunkSize)
+    }
+    val expected = iterations.toLong * chunkSize
+    stream.getPointer should be(expected)
+    stream.getPointer should be > Int.MaxValue.toLong
   }
 
   private def readFileContents =
