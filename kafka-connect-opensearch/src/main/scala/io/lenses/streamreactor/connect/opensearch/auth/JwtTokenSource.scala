@@ -22,6 +22,7 @@ import java.nio.file.Files
 import java.nio.file.Paths
 import java.time.Clock
 import java.time.Instant
+import scala.jdk.CollectionConverters._
 
 /**
  * Source of a JWT bearer token.
@@ -74,7 +75,15 @@ class FileJwtTokenSource(path: String, refreshInterval: Long, clock: Clock = Clo
   }
 
   private def readFile(): String = {
-    val p = Paths.get(path)
+    // Normalize and make absolute so that relative segments are collapsed before use.
+    // Connector configuration is an admin-only trust boundary (same as keystore/truststore
+    // paths elsewhere in this codebase), so a full allowed-directory whitelist is not
+    // enforced, but we reject any path that still contains ".." after normalization as a
+    // basic defence against accidental or malicious path traversal.
+    val p = Paths.get(path).normalize().toAbsolutePath
+    if (p.iterator().asScala.exists(_.toString == "..")) {
+      throw new ConnectException(s"JWT token file path rejected (path traversal detected): $path")
+    }
     val bytes: Array[Byte] =
       try Files.readAllBytes(p)
       catch {

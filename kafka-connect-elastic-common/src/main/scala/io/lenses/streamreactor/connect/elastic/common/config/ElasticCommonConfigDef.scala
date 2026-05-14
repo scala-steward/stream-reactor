@@ -62,7 +62,7 @@ object ElasticCommonConfigDef {
         "Connection",
         3,
         ConfigDef.Width.MEDIUM,
-        s"$prefix.$HOSTS_SUFFIX",
+        s"$prefix.$ES_PORT_SUFFIX",
       )
       .define(
         s"$prefix.$ES_PREFIX_SUFFIX",
@@ -73,7 +73,7 @@ object ElasticCommonConfigDef {
         "Connection",
         4,
         ConfigDef.Width.MEDIUM,
-        s"$prefix.$HOSTS_SUFFIX",
+        s"$prefix.$ES_PREFIX_SUFFIX",
       )
       .define(
         s"$prefix.$WRITE_TIMEOUT_SUFFIX_",
