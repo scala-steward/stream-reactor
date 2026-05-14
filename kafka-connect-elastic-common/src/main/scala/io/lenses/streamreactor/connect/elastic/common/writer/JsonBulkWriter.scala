@@ -113,15 +113,11 @@ class JsonBulkWriter(client: KBulkClient, val settings: ElasticCommonSettings) e
     m
   }
 
-  private def fetchNullValueBehaviorProperty(kcql: Kcql): String = {
-    val nullBehaviorKeyOption =
-      kcql.getProperties.asScala.keys.find(k => BEHAVIOR_ON_NULL_VALUES_PROPERTY.equals(k.toLowerCase))
-    // Preserve the verbatim `() => BEHAVIOR_ON_NULL_VALUES_PROPERTY` thunk from the ES7 original.
-    // The thunk is a Function0[String], not a String — java.util.HashMap.get(Object) never matches it,
-    // so the lookup falls back to null → NullValueBehavior.fromString(null) → IGNORE.
-    // This is a pre-existing latent oddity preserved verbatim per the parity contract.
-    kcql.getProperties.get(nullBehaviorKeyOption.getOrElse(() => BEHAVIOR_ON_NULL_VALUES_PROPERTY))
-  }
+  private def fetchNullValueBehaviorProperty(kcql: Kcql): String =
+    kcql.getProperties.asScala.keys
+      .find(_.toLowerCase == BEHAVIOR_ON_NULL_VALUES_PROPERTY)
+      .map(kcql.getProperties.get)
+      .orNull
 
   def close(): Unit = client.close()
 

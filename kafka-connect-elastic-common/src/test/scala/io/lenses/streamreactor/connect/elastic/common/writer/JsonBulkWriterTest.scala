@@ -299,13 +299,12 @@ class JsonBulkWriterTest
     op.pipeline shouldBe None
   }
 
-  // ---- Parity-contract: fetchNullValueBehaviorProperty thunk quirk -----------------------
-  // When the KCQL PROPERTIES map does NOT contain behavior.on.null.values, the thunk
-  // `() => BEHAVIOR_ON_NULL_VALUES_PROPERTY` is passed to HashMap.get, which never matches
-  // any key (Function0 != String), so null is returned → NullValueBehavior.fromString(null)
-  // → IGNORE. A tombstone must therefore be silently dropped (the ES7 preserved default).
+  // ---- Parity-contract: fetchNullValueBehaviorProperty absent-key default -----------------------
+  // When the KCQL PROPERTIES map does NOT contain behavior.on.null.values, the lookup returns
+  // null → NullValueBehavior.fromString(null) → IGNORE.
+  // A tombstone must therefore be silently dropped (the preserved default).
 
-  test("tombstone with no null-value property configured defaults to IGNORE (thunk quirk)") {
+  test("tombstone with no null-value property configured defaults to IGNORE") {
     val recording = new RecordingBulkClient
     val writer =
       new JsonBulkWriter(recording, kcqlSettings("INSERT INTO ts-default-idx SELECT * FROM ts-default-topic"))

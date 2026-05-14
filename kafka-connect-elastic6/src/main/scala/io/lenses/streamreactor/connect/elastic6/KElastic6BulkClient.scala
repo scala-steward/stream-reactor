@@ -18,6 +18,7 @@ package io.lenses.streamreactor.connect.elastic6
 import com.sksamuel.elastic4s.Index
 import com.sksamuel.elastic4s.http.ElasticDsl
 import com.typesafe.scalalogging.StrictLogging
+import io.lenses.streamreactor.connect.elastic.common.bulk.BulkItemError
 import io.lenses.streamreactor.connect.elastic.common.bulk.BulkOp
 import io.lenses.streamreactor.connect.elastic.common.bulk.BulkResult
 import io.lenses.streamreactor.connect.elastic.common.bulk.DeleteOp
@@ -74,18 +75,19 @@ class KElastic6BulkClient(client: KElasticClient, writeTimeoutMs: Int) extends K
     val result     = response.result
     val tookMillis = result.took
 
-    val itemErrorMessages = result.items
+    val itemErrors: Seq[BulkItemError] = result.items
       .filter(_.error.isDefined)
-      .map(item => s"[${item.index}/${item.id}] ${item.error.map(_.reason).getOrElse("")}")
+      .map(item => BulkItemError(item.index, item.id, item.error.map(_.reason).getOrElse("")))
 
-    if (itemErrorMessages.nonEmpty) {
+    if (itemErrors.nonEmpty) {
       logger.warn(
-        s"Bulk write completed with ${itemErrorMessages.size} item-level errors (ES6 tolerant mode): $itemErrorMessages",
+        s"Bulk write completed with ${itemErrors.size} item-level errors: " +
+          itemErrors.map(e => s"[${e.index}/${e.id}] ${e.reason}").mkString(", "),
       )
     }
 
     logger.info(s"Bulk write completed: took=${tookMillis}ms, items=${result.items.size}")
-    BulkResult(took = tookMillis, errors = false, itemErrors = Seq.empty)
+    BulkResult(took = tookMillis, errors = itemErrors.nonEmpty, itemErrors = itemErrors)
   }
 
   override def createIndex(name: String): Try[Unit] = Try {

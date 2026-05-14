@@ -202,9 +202,11 @@ class OpenSearchConfigTest extends AnyFunSuite with Matchers {
 
   // ---- Positive: mTLS combinations ----
 
-  test("mTLS + basic auth parse cleanly") {
-    // No keystore/truststore files exist in test environment, so just verify config parses without auth errors
+  test("mTLS + basic auth parse cleanly over HTTPS") {
+    // No keystore/truststore files exist in test environment, so just verify config parses without auth errors.
+    // protocol=https is required when credentials are configured.
     val s = settings(
+      PROTOCOL                        -> "https",
       CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
       CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "pass",
     )
@@ -214,16 +216,17 @@ class OpenSearchConfigTest extends AnyFunSuite with Matchers {
     s.awsSigningEnabled shouldBe false
   }
 
-  test("JWT static token source created") {
-    val s = settings(JWT_TOKEN_KEY -> "my-jwt-token")
+  test("JWT static token source created over HTTPS") {
+    val s = settings(PROTOCOL -> "https", JWT_TOKEN_KEY -> "my-jwt-token")
     s.jwtTokenSource should be(defined)
     s.common.httpBasicAuthUsername shouldBe ""
   }
 
-  test("JWT file token source created with valid refresh interval") {
+  test("JWT file token source created with valid refresh interval over HTTPS") {
     val tmpJwt = Files.createTempFile("test-jwt", ".jwt")
     Files.write(tmpJwt, "my-test-jwt-token".getBytes(StandardCharsets.UTF_8))
     val s = settings(
+      PROTOCOL                 -> "https",
       JWT_TOKEN_FILE_KEY       -> tmpJwt.toString,
       JWT_REFRESH_INTERVAL_KEY -> "30000",
     )
@@ -319,6 +322,65 @@ class OpenSearchConfigTest extends AnyFunSuite with Matchers {
       KCQL    -> "INSERT INTO idx SELECT * FROM topic;",
     )))
     s.common.kcqls should have size 1
+  }
+
+  // ---- Cleartext-auth guard (Bug 3) ----
+
+  test("protocol=http + basic auth is rejected by default") {
+    val ex = intercept[ConfigException](
+      settings(
+        CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
+        CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "pass",
+      ),
+    )
+    ex.getMessage should include("cleartext")
+    ex.getMessage should include(ALLOW_INSECURE_AUTH_KEY)
+  }
+
+  test("protocol=http + JWT static token is rejected by default") {
+    val ex = intercept[ConfigException](
+      settings(JWT_TOKEN_KEY -> "some-token"),
+    )
+    ex.getMessage should include("cleartext")
+    ex.getMessage should include(ALLOW_INSECURE_AUTH_KEY)
+  }
+
+  test("protocol=http + JWT token file is rejected by default") {
+    val ex = intercept[ConfigException](
+      settings(
+        JWT_TOKEN_FILE_KEY       -> "/tmp/token.jwt",
+        JWT_REFRESH_INTERVAL_KEY -> "60000",
+      ),
+    )
+    ex.getMessage should include("cleartext")
+    ex.getMessage should include(ALLOW_INSECURE_AUTH_KEY)
+  }
+
+  test("protocol=http + basic auth + allow.insecure.auth=true parses successfully") {
+    val s = settings(
+      CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
+      CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "pass",
+      ALLOW_INSECURE_AUTH_KEY         -> "true",
+    )
+    s.common.httpBasicAuthUsername shouldBe "user"
+    s.protocol shouldBe "http"
+  }
+
+  test("protocol=https + basic auth parses without needing opt-out") {
+    val s = settings(
+      PROTOCOL                        -> "https",
+      CLIENT_HTTP_BASIC_AUTH_USERNAME -> "user",
+      CLIENT_HTTP_BASIC_AUTH_PASSWORD -> "pass",
+    )
+    s.common.httpBasicAuthUsername shouldBe "user"
+    s.protocol shouldBe "https"
+  }
+
+  test("protocol=http with no auth configured is accepted") {
+    val s = settings()
+    s.protocol shouldBe "http"
+    s.common.httpBasicAuthUsername shouldBe ""
+    s.jwtTokenSource shouldBe None
   }
 
   // ---- Progress-counter key ----

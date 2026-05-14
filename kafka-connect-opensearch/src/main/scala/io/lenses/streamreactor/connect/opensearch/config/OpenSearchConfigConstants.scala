@@ -122,4 +122,15 @@ object OpenSearchConfigConstants {
       "Default: 25 (HC5 PoolingAsyncClientConnectionManager default). " +
       "Set to at least max.connections.per.route × number of nodes."
   val MAX_CONNECTIONS_TOTAL_DEFAULT = 25
+
+  // Security: cleartext-auth guard opt-out
+  val ALLOW_INSECURE_AUTH_KEY = s"$CONNECTOR_PREFIX.security.allow.insecure.auth"
+  val ALLOW_INSECURE_AUTH_DOC =
+    """By default the connector rejects protocol=http when HTTP Basic auth or JWT bearer authentication is
+      |configured, because credentials would be transmitted over cleartext and could be intercepted by an
+      |on-path attacker.  Set this to true ONLY when TLS termination is handled by a trusted local
+      |sidecar or service mesh so that the connector itself communicates over unencrypted HTTP while
+      |end-to-end encryption is still guaranteed externally.  A WARN-level message is emitted at startup
+      |when this override is active.""".stripMargin
+  val ALLOW_INSECURE_AUTH_DEFAULT = false
 }

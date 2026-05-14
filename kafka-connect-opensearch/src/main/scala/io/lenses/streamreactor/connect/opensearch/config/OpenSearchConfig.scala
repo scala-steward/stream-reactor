@@ -102,4 +102,11 @@ object OpenSearchConfig {
             Importance.LOW,
             MAX_CONNECTIONS_TOTAL_DOC,
     )
+    // Security: opt-out from cleartext-auth protection
+    .define(ALLOW_INSECURE_AUTH_KEY,
+            Type.BOOLEAN,
+            ALLOW_INSECURE_AUTH_DEFAULT,
+            Importance.MEDIUM,
+            ALLOW_INSECURE_AUTH_DOC,
+    )
 }

@@ -207,6 +207,26 @@ object OpenSearchSettings extends StrictLogging {
       }
     }
 
+    // Reject cleartext auth: protocol=http with Basic or JWT credentials is insecure unless the
+    // operator explicitly acknowledges the risk via ALLOW_INSECURE_AUTH_KEY.
+    val allowInsecureAuth = config.getBoolean(ALLOW_INSECURE_AUTH_KEY)
+    val hasBasicAuth      = username.nonEmpty || password.nonEmpty
+    val hasJwt            = jwtToken.nonEmpty || jwtTokenFile.nonEmpty
+    if (!awsSigningEnabled && protocol != "https" && (hasBasicAuth || hasJwt) && !allowInsecureAuth) {
+      val mech = if (hasBasicAuth) "HTTP basic auth" else "JWT bearer authentication"
+      throw new ConfigException(
+        s"connect.opensearch.protocol='$protocol' would send $mech credentials over cleartext HTTP. " +
+          s"Set connect.opensearch.protocol=https, or if TLS is terminated by a trusted local sidecar " +
+          s"explicitly set $ALLOW_INSECURE_AUTH_KEY=true.",
+      )
+    }
+    if (allowInsecureAuth && protocol != "https" && (hasBasicAuth || hasJwt)) {
+      logger.warn(
+        s"$ALLOW_INSECURE_AUTH_KEY=true — sending authentication credentials over $protocol. " +
+          "Ensure TLS is terminated by a trusted local sidecar/mesh; otherwise rotate credentials immediately.",
+      )
+    }
+
     // Warn: protocol=http with TLS material
     val sslKeystoreLocation = Try(Option(config.getString("ssl.keystore.location"))).toOption.flatten.filter(_.nonEmpty)
     val sslTruststoreLocation =
