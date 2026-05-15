@@ -22,7 +22,6 @@ import com.sksamuel.elastic4s.http.bulk.BulkError
 import com.sksamuel.elastic4s.http.bulk.BulkResponse
 import com.sksamuel.elastic4s.http.bulk.BulkResponseItem
 import com.sksamuel.elastic4s.http.bulk.BulkResponseItems
-import io.lenses.streamreactor.connect.elastic.common.bulk.BulkItemError
 import io.lenses.streamreactor.connect.elastic.common.bulk.InsertOp
 import org.mockito.ArgumentMatchersSugar
 import org.mockito.MockitoSugar
@@ -59,7 +58,7 @@ class KElastic6BulkClientTest extends AnyWordSpec with Matchers with MockitoSuga
       result.get.itemErrors shouldBe empty
     }
 
-    "return errors=true and populated itemErrors when an item has a bulk-level error" in {
+    "log item-level errors but return errors=false (ES6 tolerant mode / ES7 parity)" in {
       val (client, elasticClient) = setup()
 
       val err = BulkError(`type` = "mapper_parsing_exception",
@@ -76,16 +75,11 @@ class KElastic6BulkClientTest extends AnyWordSpec with Matchers with MockitoSuga
       val result = client.bulk(sampleOps)
       result.isSuccess shouldBe true
       val br = result.get
-      br.errors shouldBe true
-      br.itemErrors should have size 1
-      br.itemErrors.head shouldBe BulkItemError(
-        index  = "myindex",
-        id     = "doc1",
-        reason = "failed to parse field [foo]",
-      )
+      br.errors shouldBe false
+      br.itemErrors shouldBe empty
     }
 
-    "return errors=true for each item error present even when the transport-level errors flag is false" in {
+    "log multiple item-level errors but return errors=false regardless of transport errors flag" in {
       val (client, elasticClient) = setup()
 
       val err1 =
@@ -109,8 +103,8 @@ class KElastic6BulkClientTest extends AnyWordSpec with Matchers with MockitoSuga
       val result = client.bulk(sampleOps)
       result.isSuccess shouldBe true
       val br = result.get
-      br.errors shouldBe true
-      br.itemErrors should have size 2
+      br.errors shouldBe false
+      br.itemErrors shouldBe empty
     }
 
     "surface a transport-level error as a Failure" in {

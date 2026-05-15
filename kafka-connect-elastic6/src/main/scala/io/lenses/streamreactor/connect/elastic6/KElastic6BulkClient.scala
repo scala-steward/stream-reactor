@@ -18,7 +18,6 @@ package io.lenses.streamreactor.connect.elastic6
 import com.sksamuel.elastic4s.Index
 import com.sksamuel.elastic4s.http.ElasticDsl
 import com.typesafe.scalalogging.StrictLogging
-import io.lenses.streamreactor.connect.elastic.common.bulk.BulkItemError
 import io.lenses.streamreactor.connect.elastic.common.bulk.BulkOp
 import io.lenses.streamreactor.connect.elastic.common.bulk.BulkResult
 import io.lenses.streamreactor.connect.elastic.common.bulk.DeleteOp
@@ -36,6 +35,11 @@ import scala.util.Try
  * Elastic 6 requires a document type in index/update/delete operations.
  * The fallback (per original [[ElasticJsonWriter]] behaviour) is to use the index name
  * as the document type when the KCQL `WITHDOCTYPE` clause is absent.
+ *
+ * Error handling preserves ES6 parity with the pre-refactor [[ElasticJsonWriter]]:
+ * HTTP-transport errors are surfaced via the returned `Try`; per-item bulk errors
+ * (e.g. mapping conflicts, version conflicts) are logged at WARN but treated as
+ * non-fatal, matching ES7 behaviour.
  *
  * @param writeTimeoutMs timeout in milliseconds, matching the config key `connect.elastic.write.timeout`
  *                       (documented in millis, default 300000 = 5 minutes).
@@ -75,19 +79,20 @@ class KElastic6BulkClient(client: KElasticClient, writeTimeoutMs: Int) extends K
     val result     = response.result
     val tookMillis = result.took
 
-    val itemErrors: Seq[BulkItemError] = result.items
+    // ES6 parity: item-level errors are logged at WARN but treated as non-fatal,
+    // matching the pre-refactor ElasticJsonWriter behaviour and the ES7 client.
+    val itemErrorMessages = result.items
       .filter(_.error.isDefined)
-      .map(item => BulkItemError(item.index, item.id, item.error.map(_.reason).getOrElse("")))
+      .map(item => s"[${item.index}/${item.id}] ${item.error.map(_.reason).getOrElse("")}")
 
-    if (itemErrors.nonEmpty) {
+    if (itemErrorMessages.nonEmpty) {
       logger.warn(
-        s"Bulk write completed with ${itemErrors.size} item-level errors: " +
-          itemErrors.map(e => s"[${e.index}/${e.id}] ${e.reason}").mkString(", "),
+        s"Bulk write completed with ${itemErrorMessages.size} item-level errors (ES6 tolerant mode): $itemErrorMessages",
       )
     }
 
     logger.info(s"Bulk write completed: took=${tookMillis}ms, items=${result.items.size}")
-    BulkResult(took = tookMillis, errors = itemErrors.nonEmpty, itemErrors = itemErrors)
+    BulkResult(took = tookMillis, errors = false, itemErrors = Seq.empty)
   }
 
   override def createIndex(name: String): Try[Unit] = Try {
