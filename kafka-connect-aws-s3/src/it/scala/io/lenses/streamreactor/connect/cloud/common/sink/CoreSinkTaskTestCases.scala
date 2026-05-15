@@ -2350,6 +2350,41 @@ abstract class CoreSinkTaskTestCases[
     files.exists(_.contains("000000000003-000000000005-3.")) shouldBe true
   }
 
+  unitUnderTest should "write two objects with templated keys and no padding when object.key.template is configured" in {
+    val task     = createSinkTask()
+    val template = "{start-offset}-{end-offset}-{record-count}.{extension}"
+    val kcql =
+      s"insert into $BucketName:$PrefixName select * from $TopicName PROPERTIES('${FlushCount.entryName}'=3,'object.key.template'='$template')"
+    val props = (defaultProps ++ Map(
+      s"$prefix.kcql"             -> kcql,
+      s"$prefix.padding.strategy" -> "NoOp",
+    )).asJava
+
+    task.start(props)
+    task.open(Seq(new TopicPartition(TopicName, 1)).asJava)
+
+    // First flush: offsets 0, 1, 2
+    task.put(records.asJava)
+
+    // Second flush: offsets 3, 4, 5
+    val secondBatch = firstUsers.zipWithIndex.map {
+      case (user, k) =>
+        new SinkRecord(TopicName, 1, null, null, schema, user, (k + 3).toLong, k + 3, TimestampType.CREATE_TIME)
+    }
+    task.put(secondBatch.asJava)
+
+    task.close(Seq(new TopicPartition(TopicName, 1)).asJava)
+    task.stop()
+
+    val files = listBucketPath(BucketName, s"$PrefixName/$TopicName/1/")
+    files should have size 2
+
+    // Without padding: start-offset=0, end-offset=2, record-count=3
+    files should contain(s"$PrefixName/$TopicName/1/0-2-3.json")
+    // Without padding: start-offset=3, end-offset=5, record-count=3
+    files should contain(s"$PrefixName/$TopicName/1/3-5-3.json")
+  }
+
   unitUnderTest should "use legacy namer when object.key.template is absent alongside a templated KCQL" in {
     val task     = createSinkTask()
     val topic2   = "myTopic2"
