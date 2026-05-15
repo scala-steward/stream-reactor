@@ -54,7 +54,7 @@ object Dependencies {
 
     val http4sVersion    = "1.0.0-M32"
     val http4sJdkVersion = "1.0.0-M1"
-    val avroVersion      = "1.12.0"
+    val avroVersion      = "1.12.1"
     val avro4sVersion    = "4.1.2"
 
     val catsEffectVersion     = "3.6.1"
@@ -91,7 +91,7 @@ object Dependencies {
     val gcpCloudStorageVersion            = "2.53.1"
 
     val woodstoxVersion     = "7.1.1"
-    val jacksonVersion      = "2.19.1"
+    val jacksonVersion      = "2.20.1"
     val json4sVersion       = "4.0.7"
     val mockitoScalaVersion = "2.0.0"
     val mockitoJavaVersion  = "5.2.0"

@@ -19,6 +19,7 @@ import cats.implicits.catsSyntaxEitherId
 import io.lenses.streamreactor.connect.avro.AvroDataFactory
 import io.lenses.streamreactor.connect.cloud.common.formats.reader.parquet.ParquetSeekableInputStream
 import io.lenses.streamreactor.connect.cloud.common.formats.reader.parquet.ParquetStreamingInputFile
+import org.apache.avro.generic.GenericData
 import org.apache.avro.generic.GenericRecord
 import org.apache.hadoop.conf.Configuration
 import org.apache.kafka.connect.data.SchemaAndValue
@@ -63,7 +64,13 @@ object ParquetStreamReader {
       val conf = new Configuration
       //allow deprecated INT96 to be read as FIXED and avoid runtime exception
       conf.setBoolean(READ_INT96_AS_FIXED, true)
-      AvroParquetReader.builder[GenericRecord](inputFile).withConf(conf).build()
+      // Avro 1.12.1 enables fastread by default, which decodes DATE logical-type fields
+      // as java.time.LocalDate rather than int. Confluent AvroData.toConnectData() expects
+      // a raw int for INT32 fields, so we disable fastread on this data model.
+      // withDataModel must be called before withConf to retain AvroParquetReader.Builder type.
+      val model = new GenericData()
+      model.setFastReaderEnabled(false)
+      AvroParquetReader.builder[GenericRecord](inputFile).withDataModel(model).withConf(conf).build()
     }
 
     new ParquetStreamReader(avroParquetReader).asRight

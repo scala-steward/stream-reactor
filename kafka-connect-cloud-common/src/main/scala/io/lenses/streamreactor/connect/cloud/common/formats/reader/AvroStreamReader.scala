@@ -16,7 +16,9 @@
 package io.lenses.streamreactor.connect.cloud.common.formats.reader
 
 import io.lenses.streamreactor.connect.avro.AvroDataFactory
+import org.apache.avro.Schema
 import org.apache.avro.file.DataFileStream
+import org.apache.avro.generic.GenericData
 import org.apache.avro.generic.GenericDatumReader
 import org.apache.avro.generic.GenericRecord
 import org.apache.kafka.connect.data.SchemaAndValue
@@ -27,7 +29,12 @@ import scala.util.Try
 class AvroStreamReader(input: InputStream) extends CloudDataIterator[SchemaAndValue] {
   private val avroDataConverter = AvroDataFactory.create()
 
-  private val datumReader = new GenericDatumReader[GenericRecord]()
+  // Avro 1.12.1 enables fastread by default, which decodes DATE logical-type fields
+  // as java.time.LocalDate rather than int. Confluent AvroData.toConnectData() expects
+  // a raw int for INT32 fields, so we disable fastread on this data model.
+  private val model = new GenericData()
+  model.setFastReaderEnabled(false)
+  private val datumReader = new GenericDatumReader[GenericRecord](null: Schema, null: Schema, model)
 
   private val stream = new DataFileStream[GenericRecord](input, datumReader)
 
