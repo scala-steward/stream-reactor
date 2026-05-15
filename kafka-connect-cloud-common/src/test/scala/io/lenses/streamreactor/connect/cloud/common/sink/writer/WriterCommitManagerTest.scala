@@ -60,7 +60,7 @@ class WriterCommitManagerTest
   private val partitionFieldB = PartitionField(Seq("_value_b")).value
 
   private def uploadingState: Uploading =
-    Uploading(CommitState(topicPartition, None), new File("nonexistent-staging"), Offset(1), Offset(1), 1L, 1L)
+    Uploading(CommitState(topicPartition, None), new File("nonexistent-staging"), Offset(1), Offset(1), 1L, 1L, 1L)
 
   private def writingState: Writing = {
     val fw = mock[FormatWriter]
@@ -97,7 +97,7 @@ class WriterCommitManagerTest
 
     failWith match {
       case None =>
-        when(objectKeyBld.build(any[Offset], any[Long], any[Long]))
+        when(objectKeyBld.build(any[Offset], any[Offset], any[Long], any[Long], any[Long]))
           .thenReturn(Right(CloudLocation("test-bucket", path = Some("test/path"))))
         when(
           pendingOps.processPendingOperations(
@@ -111,7 +111,7 @@ class WriterCommitManagerTest
           ),
         ).thenReturn(Right(Some(Offset(1))))
       case Some(err) =>
-        when(objectKeyBld.build(any[Offset], any[Long], any[Long])).thenReturn(Left(err))
+        when(objectKeyBld.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenReturn(Left(err))
     }
 
     val writer = new Writer[FileMetadata](

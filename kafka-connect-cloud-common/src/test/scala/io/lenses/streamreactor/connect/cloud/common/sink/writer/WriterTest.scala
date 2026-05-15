@@ -123,6 +123,7 @@ class WriterTest extends AnyFunSuiteLike with Matchers with MockitoSugar with Ar
         Offset(150),
         earliestRecordTimestamp = 1L,
         latestRecordTimestamp   = 1L,
+        recordCount             = 1L,
       ),
     )
     writer.shouldSkip(Offset(150)) shouldBe true
@@ -141,7 +142,14 @@ class WriterTest extends AnyFunSuiteLike with Matchers with MockitoSugar with Ar
                                           pendingOperationsProcessors,
     )
     writer.forceWriteState(
-      Uploading(CommitState(topicPartition, Some(Offset(100))), new File("test-file"), Offset(100), Offset(150), 1L, 1L),
+      Uploading(CommitState(topicPartition, Some(Offset(100))),
+                new File("test-file"),
+                Offset(100),
+                Offset(150),
+                1L,
+                1L,
+                1L,
+      ),
     )
     writer.shouldSkip(Offset(151)) shouldBe false
   }
@@ -374,7 +382,7 @@ class WriterTest extends AnyFunSuiteLike with Matchers with MockitoSugar with Ar
                                           pendingOperationsProcessors,
     )
     writer.forceWriteState(
-      Uploading(CommitState(topicPartition, Some(Offset(100))), tmpFile, Offset(100), Offset(150), 1L, 1L),
+      Uploading(CommitState(topicPartition, Some(Offset(100))), tmpFile, Offset(100), Offset(150), 1L, 1L, 1L),
     )
 
     writer.close()
@@ -461,6 +469,7 @@ class WriterTest extends AnyFunSuiteLike with Matchers with MockitoSugar with Ar
                                      new File("test"),
                                      Offset(42),
                                      Offset(50),
+                                     1L,
                                      1L,
                                      1L,
     ))
@@ -581,6 +590,7 @@ class WriterTest extends AnyFunSuiteLike with Matchers with MockitoSugar with Ar
       uncommittedOffset       = Offset(55),
       earliestRecordTimestamp = 1L,
       latestRecordTimestamp   = 2L,
+      recordCount             = 1L,
     )
 
     val result = uploadState.toNoWriter(None)
@@ -621,7 +631,7 @@ class WriterTest extends AnyFunSuiteLike with Matchers with MockitoSugar with Ar
       ),
     ).thenReturn(Right(Some(newOffset)))
 
-    when(objectKeyBuilder.build(any[Offset], any[Long], any[Long]))
+    when(objectKeyBuilder.build(any[Offset], any[Offset], any[Long], any[Long], any[Long]))
       .thenReturn(Right(CloudLocation("bucket", path = Some("path/to/object"))))
 
     val tmpFile = File.createTempFile("writer-d19-", ".tmp")
@@ -646,6 +656,7 @@ class WriterTest extends AnyFunSuiteLike with Matchers with MockitoSugar with Ar
         uncommittedOffset       = Offset(55),
         earliestRecordTimestamp = 1L,
         latestRecordTimestamp   = 2L,
+        recordCount             = 1L,
       ),
     )
 
@@ -702,7 +713,7 @@ class WriterTest extends AnyFunSuiteLike with Matchers with MockitoSugar with Ar
       ),
     ).thenReturn(Left(accessDeniedErr))
 
-    when(objectKeyBuilder.build(any[Offset], any[Long], any[Long]))
+    when(objectKeyBuilder.build(any[Offset], any[Offset], any[Long], any[Long], any[Long]))
       .thenReturn(Right(CloudLocation("bucket", path = Some("path/to/object"))))
 
     val tmpFile = File.createTempFile("writer-d27a-lock-", ".tmp")
@@ -727,6 +738,7 @@ class WriterTest extends AnyFunSuiteLike with Matchers with MockitoSugar with Ar
         uncommittedOffset       = Offset(60),
         earliestRecordTimestamp = 1L,
         latestRecordTimestamp   = 2L,
+        recordCount             = 1L,
       ),
     )
 

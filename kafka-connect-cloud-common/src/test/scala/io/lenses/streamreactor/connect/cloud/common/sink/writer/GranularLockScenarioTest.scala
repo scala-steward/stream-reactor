@@ -377,6 +377,7 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
         uncommittedOffset   = Offset(95),
         1L,
         1L,
+        1L,
       ),
     )
 
@@ -578,6 +579,7 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
         uncommittedOffset   = Offset(103),
         1L,
         1L,
+        1L,
       ),
     )
     writerUploading.isIdle shouldBe false
@@ -769,7 +771,15 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     when(mockCP.shouldFlush(any[CommitContext])).thenReturn(true)
 
     val mockOKB = mock[ObjectKeyBuilder]
-    when(mockOKB.build(Offset(ArgumentMatchers.anyLong()), ArgumentMatchers.anyLong(), ArgumentMatchers.anyLong()))
+    when(
+      mockOKB.build(
+        Offset(ArgumentMatchers.anyLong()),
+        Offset(ArgumentMatchers.anyLong()),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+      ),
+    )
       .thenReturn(Right(CloudLocation("bucket", Some("prefix"), Some("prefix/file.parquet"))))
 
     val mockPOP = mock[PendingOperationsProcessors]
@@ -878,7 +888,15 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     when(mockCP.shouldFlush(any[CommitContext])).thenReturn(true)
 
     val mockOKB = mock[ObjectKeyBuilder]
-    when(mockOKB.build(Offset(ArgumentMatchers.anyLong()), ArgumentMatchers.anyLong(), ArgumentMatchers.anyLong()))
+    when(
+      mockOKB.build(
+        Offset(ArgumentMatchers.anyLong()),
+        Offset(ArgumentMatchers.anyLong()),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+      ),
+    )
       .thenReturn(Right(CloudLocation("bucket", Some("prefix"), Some("prefix/file.parquet"))))
 
     type IndexUpdateFn = (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]]
@@ -1061,7 +1079,15 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     when(mockCP.shouldFlush(any[CommitContext])).thenReturn(true)
 
     val mockOKB = mock[ObjectKeyBuilder]
-    when(mockOKB.build(Offset(ArgumentMatchers.anyLong()), ArgumentMatchers.anyLong(), ArgumentMatchers.anyLong()))
+    when(
+      mockOKB.build(
+        Offset(ArgumentMatchers.anyLong()),
+        Offset(ArgumentMatchers.anyLong()),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+      ),
+    )
       .thenReturn(Right(CloudLocation("bucket", Some("prefix"), Some("prefix/file.parquet"))))
 
     type IndexUpdateFn = (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]]
@@ -1166,7 +1192,15 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     when(mockCP.shouldFlush(any[CommitContext])).thenReturn(true)
 
     val mockOKB = mock[ObjectKeyBuilder]
-    when(mockOKB.build(Offset(ArgumentMatchers.anyLong()), ArgumentMatchers.anyLong(), ArgumentMatchers.anyLong()))
+    when(
+      mockOKB.build(
+        Offset(ArgumentMatchers.anyLong()),
+        Offset(ArgumentMatchers.anyLong()),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+      ),
+    )
       .thenReturn(Right(CloudLocation("bucket", Some("prefix"), Some("prefix/file.parquet"))))
 
     val mockValue = mock[io.lenses.streamreactor.connect.cloud.common.sink.conversion.SinkData]
@@ -1273,7 +1307,15 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     when(mockCP.shouldFlush(any[CommitContext])).thenReturn(true)
 
     val mockOKB = mock[ObjectKeyBuilder]
-    when(mockOKB.build(Offset(ArgumentMatchers.anyLong()), ArgumentMatchers.anyLong(), ArgumentMatchers.anyLong()))
+    when(
+      mockOKB.build(
+        Offset(ArgumentMatchers.anyLong()),
+        Offset(ArgumentMatchers.anyLong()),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+      ),
+    )
       .thenReturn(Right(CloudLocation("bucket", Some("prefix"), Some("prefix/file.parquet"))))
 
     type IndexUpdateFn = (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]]
@@ -1380,7 +1422,15 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     when(mockCP.shouldFlush(any[CommitContext])).thenReturn(false)
 
     val mockOKB = mock[ObjectKeyBuilder]
-    when(mockOKB.build(Offset(ArgumentMatchers.anyLong()), ArgumentMatchers.anyLong(), ArgumentMatchers.anyLong()))
+    when(
+      mockOKB.build(
+        Offset(ArgumentMatchers.anyLong()),
+        Offset(ArgumentMatchers.anyLong()),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+      ),
+    )
       .thenReturn(Right(CloudLocation("bucket", Some("prefix"), Some("prefix/file.parquet"))))
 
     type IndexUpdateFn = (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]]
@@ -1481,7 +1531,15 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     when(mockCP.shouldFlush(any[CommitContext])).thenReturn(false)
 
     val mockOKB = mock[ObjectKeyBuilder]
-    when(mockOKB.build(Offset(ArgumentMatchers.anyLong()), ArgumentMatchers.anyLong(), ArgumentMatchers.anyLong()))
+    when(
+      mockOKB.build(
+        Offset(ArgumentMatchers.anyLong()),
+        Offset(ArgumentMatchers.anyLong()),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+      ),
+    )
       .thenReturn(Right(CloudLocation("bucket", Some("prefix"), Some("prefix/file.parquet"))))
 
     type IndexUpdateFn = (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]]
@@ -1708,7 +1766,15 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
       .thenAnswer((_: TopicPartition, _: String, co: Option[Offset], _: Option[PendingState]) => Right(co))
 
     val mockOKB = mock[ObjectKeyBuilder]
-    when(mockOKB.build(Offset(ArgumentMatchers.anyLong()), ArgumentMatchers.anyLong(), ArgumentMatchers.anyLong()))
+    when(
+      mockOKB.build(
+        Offset(ArgumentMatchers.anyLong()),
+        Offset(ArgumentMatchers.anyLong()),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+      ),
+    )
       .thenReturn(Right(CloudLocation("bucket", Some("prefix"), Some("prefix/file.jsonl"))))
 
     type IndexUpdateFn = (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]]
@@ -1839,7 +1905,15 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     when(mockCP.shouldFlush(any[CommitContext])).thenReturn(false)
 
     val mockOKB = mock[ObjectKeyBuilder]
-    when(mockOKB.build(Offset(ArgumentMatchers.anyLong()), ArgumentMatchers.anyLong(), ArgumentMatchers.anyLong()))
+    when(
+      mockOKB.build(
+        Offset(ArgumentMatchers.anyLong()),
+        Offset(ArgumentMatchers.anyLong()),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+        ArgumentMatchers.anyLong(),
+      ),
+    )
       .thenReturn(Right(CloudLocation("bucket", Some("prefix"), Some("prefix/file.parquet"))))
 
     type IndexUpdateFn = (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]]
