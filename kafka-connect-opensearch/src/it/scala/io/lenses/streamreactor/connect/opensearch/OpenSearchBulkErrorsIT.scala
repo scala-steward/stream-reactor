@@ -147,9 +147,16 @@ class OpenSearchBulkErrorsIT extends ITBase {
     val kClient   = new KOpenSearchClient(osClient, settings)
     val writer    = new JsonBulkWriter(kClient, settings.common)
 
-    // Step 3: Send a string value — mapping conflict with integer mapping
-    val schema: Schema     = SchemaBuilder.struct().field("id", Schema.STRING_SCHEMA).build()
-    val struct: Struct     = new Struct(schema).put("id", "not-a-number")
+    // Step 3: Send a string value in `field` — triggers the integer mapping conflict.
+    // The schema must include both `id` (PK) and `field` (the integer-mapped column);
+    // SELECT * FROM topic picks up all fields, so the JSON sent to OpenSearch will be
+    // {"id":"not-a-number","field":"not-a-number"} which collides with the integer mapping.
+    val schema: Schema =
+      SchemaBuilder.struct()
+        .field("id", Schema.STRING_SCHEMA)
+        .field("field", Schema.STRING_SCHEMA)
+        .build()
+    val struct: Struct     = new Struct(schema).put("id", "not-a-number").put("field", "not-a-number")
     val record: SinkRecord = new SinkRecord("topic", 0, Schema.STRING_SCHEMA, "key", schema, struct, 1L)
 
     // C9 assertion: the writer must throw ConnectException (THROW policy) on item-level errors

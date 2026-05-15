@@ -77,7 +77,7 @@ class JwtTokenSourceTest extends AnyFunSuite with Matchers {
       override def instant(): Instant = now
     }
 
-    val source = new FileJwtTokenSource(f.toString, 5000L, testClock)
+    val source = new FileJwtTokenSource(f.toString, 5000L, clock = testClock)
     source.getToken shouldBe "token-v1"
 
     // Update the file
@@ -103,7 +103,7 @@ class JwtTokenSourceTest extends AnyFunSuite with Matchers {
       override def instant(): Instant = now
     }
 
-    val source = new FileJwtTokenSource(f.toString, 100L, testClock)
+    val source = new FileJwtTokenSource(f.toString, 100L, clock = testClock)
     source.getToken shouldBe "initial-token"
 
     Files.delete(f)
@@ -130,7 +130,7 @@ class JwtTokenSourceTest extends AnyFunSuite with Matchers {
     }
 
     val refreshInterval = 1000L
-    val source          = new FileJwtTokenSource(f.toString, refreshInterval, testClock)
+    val source          = new FileJwtTokenSource(f.toString, refreshInterval, clock = testClock)
 
     // First read returns subject 1
     source.getToken shouldBe tokenSubject1
@@ -147,6 +147,51 @@ class JwtTokenSourceTest extends AnyFunSuite with Matchers {
     source.getToken shouldBe tokenSubject2
   }
 
+  // ---- Path traversal and base-directory guard ----
+
+  test("raw '..' component in path is rejected before normalization") {
+    val ex = intercept[ConnectException](new FileJwtTokenSource("../../etc/passwd", 60000L))
+    ex.getMessage should include("path traversal detected")
+  }
+
+  test("raw '..' on Windows-style separator is also rejected") {
+    val ex = intercept[ConnectException](new FileJwtTokenSource("..\\..\\etc\\passwd", 60000L))
+    ex.getMessage should include("path traversal detected")
+  }
+
+  test("absolute path inside base directory is accepted") {
+    val dir = Files.createTempDirectory("jwt-basedir-ok")
+    val f   = Files.createTempFile(dir, "token", ".jwt")
+    Files.write(f, "safe-token".getBytes(StandardCharsets.UTF_8))
+    val source = new FileJwtTokenSource(f.toString, 60000L, baseDir = Some(dir.toString))
+    source.getToken shouldBe "safe-token"
+  }
+
+  test("absolute path outside base directory is rejected") {
+    val allowedDir = Files.createTempDirectory("jwt-basedir-allowed")
+    val otherDir   = Files.createTempDirectory("jwt-basedir-other")
+    val f          = Files.createTempFile(otherDir, "secret", ".txt")
+    Files.write(f, "secret-contents".getBytes(StandardCharsets.UTF_8))
+    val ex = intercept[ConnectException](
+      new FileJwtTokenSource(f.toString, 60000L, baseDir = Some(allowedDir.toString)),
+    )
+    ex.getMessage should include("outside allowed base directory")
+  }
+
+  test("absolute path to sensitive file is accepted when no base directory is configured (backward-compat)") {
+    // Without baseDir the connector imposes no directory restriction —
+    // this is the existing admin-only trust model. The test documents it explicitly.
+    val f = Files.createTempFile("jwt-compat-", ".txt")
+    Files.write(f, "compat-token".getBytes(StandardCharsets.UTF_8))
+    val source = new FileJwtTokenSource(f.toString, 60000L)
+    source.getToken shouldBe "compat-token"
+  }
+
+  test("path with '..' component is rejected even when base directory is not set") {
+    val ex = intercept[ConnectException](new FileJwtTokenSource("subdir/../../../etc/passwd", 60000L))
+    ex.getMessage should include("path traversal detected")
+  }
+
   test("second call within interval after failed rotation also raises (cache stays empty)") {
     val f = Files.createTempFile("jwt-token-second-fail", ".txt")
     Files.write(f, "good-token".getBytes(StandardCharsets.UTF_8))
@@ -158,7 +203,7 @@ class JwtTokenSourceTest extends AnyFunSuite with Matchers {
       override def instant(): Instant = now
     }
 
-    val source = new FileJwtTokenSource(f.toString, 100L, testClock)
+    val source = new FileJwtTokenSource(f.toString, 100L, clock = testClock)
     source.getToken shouldBe "good-token"
 
     Files.delete(f)

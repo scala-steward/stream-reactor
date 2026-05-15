@@ -78,6 +78,7 @@ object OpenSearchSettings extends StrictLogging {
     val jwtToken     = config.getPassword(JWT_TOKEN_KEY).value()
     val jwtTokenFile = config.getString(JWT_TOKEN_FILE_KEY)
     val jwtRefreshMs = config.getLong(JWT_REFRESH_INTERVAL_KEY)
+    val jwtBaseDir   = Option(config.getString(JWT_TOKEN_BASE_DIR_KEY)).filter(_.nonEmpty)
 
     val username = config.getString(CLIENT_HTTP_BASIC_AUTH_USERNAME)
     val password = config.getPassword(CLIENT_HTTP_BASIC_AUTH_PASSWORD).value()
@@ -270,7 +271,7 @@ object OpenSearchSettings extends StrictLogging {
       if (jwtToken.nonEmpty) {
         Some(JwtTokenSource.fromStaticToken(jwtToken))
       } else if (jwtTokenFile.nonEmpty) {
-        Some(JwtTokenSource.fromFile(jwtTokenFile, jwtRefreshMs))
+        Some(JwtTokenSource.fromFile(jwtTokenFile, jwtRefreshMs, jwtBaseDir))
       } else {
         None
       }

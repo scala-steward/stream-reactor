@@ -32,7 +32,10 @@ trait FieldValueGetter {
         case Schema.Type.BOOLEAN | Schema.Type.FLOAT64 | Schema.Type.FLOAT32 | Schema.Type.INT64 | Schema.Type.INT32 |
             Schema.Type.INT16 | Schema.Type.INT8 | Schema.Type.BYTES | Schema.Type.STRING => Option(value)
 
-        case Schema.Type.ARRAY | Schema.Type.MAP | Schema.Type.STRUCT =>
+        case Schema.Type.STRUCT | Schema.Type.MAP =>
+          Option(value)
+
+        case Schema.Type.ARRAY =>
           throw new IllegalArgumentException(s"Can't select an element from an array(schema:$schema)")
 
         case other => throw new IllegalArgumentException(s"Invalid Avro schema type:$other")

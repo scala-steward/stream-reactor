@@ -79,7 +79,24 @@ class OpenSearchErrorPolicyIT extends AnyFunSuite with Matchers with BeforeAndAf
   }
 
   private val infoBody =
-    """{"name":"test","cluster_name":"test","version":{"number":"2.13.0","distribution":"opensearch"},"tagline":"The OpenSearch Project"}"""
+    """{
+      |  "name": "test",
+      |  "cluster_name": "test",
+      |  "cluster_uuid": "test-cluster-uuid",
+      |  "version": {
+      |    "distribution": "opensearch",
+      |    "number": "2.13.0",
+      |    "build_type": "tar",
+      |    "build_hash": "0000000000000000000000000000000000000000",
+      |    "build_date": "2024-01-01T00:00:00.000Z",
+      |    "build_snapshot": false,
+      |    "lucene_version": "9.10.0",
+      |    "minimum_wire_compatibility_version": "7.10.0",
+      |    "minimum_index_compatibility_version": "7.0.0",
+      |    "build_flavor": "default"
+      |  },
+      |  "tagline": "The OpenSearch Project"
+      |}""".stripMargin
 
   test("THROW policy: transport error from WireMock 503 surfaces as ConnectException") {
     wireMock.resetAll()

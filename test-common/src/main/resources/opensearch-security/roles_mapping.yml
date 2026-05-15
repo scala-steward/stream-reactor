@@ -9,9 +9,10 @@ all_access:
     - "connect-client"
   backend_roles:
     - "admin"
+    - "all_access"
   hosts: []
   and_backend_roles: []
-  description: "Map admin user, JWT 'kafka-connect' subject, and the connect-client cert CN to all_access"
+  description: "Map admin user, JWT 'kafka-connect' subject, connect-client cert CN, and JWT 'all_access' backend role to all_access"
 security_rest_api_access:
   reserved: false
   users:

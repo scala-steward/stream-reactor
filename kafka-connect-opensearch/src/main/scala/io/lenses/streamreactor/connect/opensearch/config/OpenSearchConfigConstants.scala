@@ -60,6 +60,14 @@ object OpenSearchConfigConstants {
   val JWT_REFRESH_INTERVAL_DOC     = "How often (in ms) to re-read the JWT token file. Must be > 0. Default is 60000ms."
   val JWT_REFRESH_INTERVAL_DEFAULT = 60000L
 
+  val JWT_TOKEN_BASE_DIR_KEY = s"$CONNECTOR_PREFIX.security.jwt.token.base.dir"
+  val JWT_TOKEN_BASE_DIR_DOC =
+    """Restricts JWT token file reads to this directory (and its subdirectories).
+      |When set, any path that resolves outside the base directory is rejected at read time.
+      |Strongly recommended in shared or multi-tenant Connect deployments to prevent a connector
+      |config from being used to read arbitrary worker-local files.""".stripMargin
+  val JWT_TOKEN_BASE_DIR_DEFAULT = ""
+
   // AWS SigV4 authentication keys
   val AWS_SIGNING_ENABLED_KEY = s"$CONNECTOR_PREFIX.aws.signing.enabled"
   val AWS_SIGNING_ENABLED_DOC =

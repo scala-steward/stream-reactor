@@ -42,13 +42,57 @@ class OpensearchContainer(
 
   val port: Int = 9200
 
-  override val container: JavaOpensearchContainer[_] =
-    new JavaOpensearchContainer(dockerImage.withTag(dockerTag))
-
-  container.withNetworkAliases(networkAlias)
-
   private var securityEnabled: Boolean                    = false
   private var pkiFixture:      Option[SecurityPkiFixture] = None
+
+  // ---------------------------------------------------------------------------
+  // The Java testcontainers OpensearchContainer.configure() overrides ANY wait
+  // strategy we set before start(). When security is enabled it installs an
+  // HttpWaitStrategy that accepts 200 or 401; but an uninitialised security
+  // backend returns 503 → the wait times out.
+  //
+  // SecuredContainer subclasses the Java container, calls super.configure()
+  // (so env vars, ports, etc. are set) and then replaces the wait strategy with
+  // one that also accepts 503.  securityadmin.sh is run AFTER start() returns.
+  //
+  // Using lazy val so the right container class is chosen once securityEnabled
+  // is known (withSecurityEnabled() is called before start()).
+  // ---------------------------------------------------------------------------
+
+  /**
+   * A subclass of the Java OpensearchContainer that overrides configure() to
+   * install a permissive HttpWaitStrategy (200 | 401 | 503) after the super
+   * call. This is the only way to prevent super.configure() from clobbering
+   * our strategy, since configure() is invoked inside tryStart().
+   */
+  private class SecuredContainer(image: DockerImageName) extends JavaOpensearchContainer[SecuredContainer](image) {
+
+    override def configure(): Unit = {
+      super.configure()
+      // super.configure() sets a strategy that accepts 200|401 only.
+      // The uninitialised security backend returns 503; override here so the
+      // container is considered "ready" once it is responding at all.
+      setWaitStrategy(
+        new HttpWaitStrategy()
+          .usingTls()
+          .allowInsecure()
+          .forPort(port)
+          .withBasicCredentials("admin", "admin")
+          .forStatusCodeMatching(code => code == 200 || code == 401 || code == 503)
+          .withReadTimeout(Duration.ofSeconds(10))
+          .withStartupTimeout(Duration.ofMinutes(3)),
+      )
+    }
+  }
+
+  /** Lazily-initialised underlying Java container (chosen based on securityEnabled). */
+  override lazy val container: JavaOpensearchContainer[_] = {
+    val c: JavaOpensearchContainer[_] =
+      if (securityEnabled) new SecuredContainer(dockerImage.withTag(dockerTag))
+      else new JavaOpensearchContainer(dockerImage.withTag(dockerTag))
+    c.withNetworkAliases(networkAlias)
+    c
+  }
 
   lazy val hostNetwork = new HostNetwork()
 
@@ -79,46 +123,50 @@ class OpensearchContainer(
   private def configureSecurityPlugin(): Unit = {
     val pki = pkiFixture.getOrElse(throw new IllegalStateException("PKI not initialised"))
 
-    // Security plugin environment variables — use individual statements to avoid wildcard-type chaining issues
-    container.withEnv("discovery.type", "single-node")
-    container.withEnv("plugins.security.disabled", "false")
-    container.withEnv("plugins.security.ssl.transport.pemcert_filepath", "node.pem")
-    container.withEnv("plugins.security.ssl.transport.pemkey_filepath", "node-key.pem")
-    container.withEnv("plugins.security.ssl.transport.pemtrustedcas_filepath", "root-ca.pem")
-    container.withEnv("plugins.security.ssl.http.enabled", "true")
-    container.withEnv("plugins.security.ssl.http.pemcert_filepath", "node.pem")
-    container.withEnv("plugins.security.ssl.http.pemkey_filepath", "node-key.pem")
-    container.withEnv("plugins.security.ssl.http.pemtrustedcas_filepath", "root-ca.pem")
-    container.withEnv("plugins.security.allow_unsafe_democertificates", "true")
-    container.withEnv("plugins.security.authcz.admin_dn", "CN=admin,O=lenses,L=test,C=GB")
-    container.withEnv("plugins.security.audit.type", "internal_opensearch")
-    container.withEnv("plugins.security.restapi.roles_enabled", "all_access,security_rest_api_access")
+    // Tell the Java testcontainer that security is on so configure() does NOT
+    // emit DISABLE_SECURITY_PLUGIN=true.
+    container.withSecurityEnabled()
 
-    // Mount PKI files into the container config directory
+    // Skip the image's built-in demo-config installer (install_demo_configuration.sh).
+    // From OpenSearch 2.12.0+ that script requires OPENSEARCH_INITIAL_ADMIN_PASSWORD and exits if
+    // not set.  We supply our own PKI certs and securityconfig YAMLs.
+    container.withEnv("DISABLE_INSTALL_DEMO_CONFIG", "true")
+
+    // Mount a fully-specified opensearch.yml. Docker env vars with dots in their
+    // names (e.g. plugins.security.ssl.*) are NOT reliably translated to -E params
+    // by the OpenSearch entrypoint script; an explicit opensearch.yml is the only
+    // fully portable approach.
+    val nodeYmlStream = getClass.getResourceAsStream("/opensearch-security-node.yml")
+    require(nodeYmlStream != null, "opensearch-security-node.yml resource not found")
+    val nodeYmlContent = new String(nodeYmlStream.readAllBytes(), StandardCharsets.UTF_8)
+    nodeYmlStream.close()
+    val nodeYmlTmp = Files.createTempFile("opensearch-node", ".yml")
+    Files.write(nodeYmlTmp, nodeYmlContent.getBytes(StandardCharsets.UTF_8))
+    // 420 → world-readable so the opensearch user inside the container can read it
+    nodeYmlTmp.toFile.setReadable(true, false)
+    container.withCopyFileToContainer(
+      MountableFile.forHostPath(nodeYmlTmp, 420),
+      "/usr/share/opensearch/config/opensearch.yml",
+    )
+
+    // Mount PKI files into the container config directory.
+    // 420 → world-readable so the opensearch user inside the container can read them.
     val configDir = "/usr/share/opensearch/config/"
-    container.withCopyFileToContainer(MountableFile.forHostPath(pki.rootCaPem), configDir + "root-ca.pem")
-    container.withCopyFileToContainer(MountableFile.forHostPath(pki.rootCaKeyPem), configDir + "root-ca-key.pem")
-    container.withCopyFileToContainer(MountableFile.forHostPath(pki.nodePem), configDir + "node.pem")
-    container.withCopyFileToContainer(MountableFile.forHostPath(pki.nodeKeyPem), configDir + "node-key.pem")
-    container.withCopyFileToContainer(MountableFile.forHostPath(pki.adminPem), configDir + "admin.pem")
-    container.withCopyFileToContainer(MountableFile.forHostPath(pki.adminKeyPem), configDir + "admin-key.pem")
-    container.withCopyFileToContainer(MountableFile.forHostPath(pki.clientPem), configDir + "connect-client.pem")
-    container.withCopyFileToContainer(MountableFile.forHostPath(pki.clientKeyPem), configDir + "connect-client-key.pem")
+    def pkiFile(src: java.nio.file.Path, dst: String): Unit = {
+      val _ = container.withCopyFileToContainer(MountableFile.forHostPath(src, 420), configDir + dst)
+    }
+    pkiFile(pki.rootCaPem, "root-ca.pem")
+    pkiFile(pki.rootCaKeyPem, "root-ca-key.pem")
+    pkiFile(pki.nodePem, "node.pem")
+    pkiFile(pki.nodeKeyPem, "node-key.pem")
+    pkiFile(pki.adminPem, "admin.pem")
+    pkiFile(pki.adminKeyPem, "admin-key.pem")
+    pkiFile(pki.clientPem, "connect-client.pem")
+    pkiFile(pki.clientKeyPem, "connect-client-key.pem")
 
     // Mount securityconfig YAML files
     val securityDir = configDir + "opensearch-security/"
     mountSecurityConfigYaml(securityDir)
-
-    // Use HTTPS for health-check when security is enabled
-    container.setWaitStrategy(
-      new HttpWaitStrategy()
-        .forPort(port)
-        .forPath("/_cluster/health")
-        .withBasicCredentials("admin", "admin")
-        .usingTls()
-        .allowInsecure()
-        .withStartupTimeout(Duration.ofMinutes(3)),
-    )
   }
 
   private def mountSecurityConfigYaml(securityDir: String): Unit = {
@@ -129,7 +177,7 @@ class OpensearchContainer(
         val tmpFile = Files.createTempFile("opensearch-security-" + fileName.replace(".", "-"), ".yml")
         val content = new String(resource.readAllBytes(), StandardCharsets.UTF_8)
         Files.write(tmpFile, content.getBytes(StandardCharsets.UTF_8))
-        container.withCopyFileToContainer(MountableFile.forHostPath(tmpFile), securityDir + fileName)
+        container.withCopyFileToContainer(MountableFile.forHostPath(tmpFile, 420), securityDir + fileName)
       } else {
         logger.warn(s"SecurityPlugin: resource not found: $resourceBase$fileName")
       }
@@ -145,7 +193,7 @@ class OpensearchContainer(
     val tmpFile  = Files.createTempFile("opensearch-security-config", ".yml")
     Files.write(tmpFile, resolved.getBytes(StandardCharsets.UTF_8))
     container.withCopyFileToContainer(
-      MountableFile.forHostPath(tmpFile),
+      MountableFile.forHostPath(tmpFile, 420),
       "/usr/share/opensearch/config/opensearch-security/config.yml",
     )
     this
@@ -182,7 +230,42 @@ class OpensearchContainer(
         s"securityadmin.sh exited with code ${result.getExitCode}: ${result.getStderr}",
       )
     }
-    logger.info("SecurityPlugin: security configuration applied successfully")
+    logger.info("SecurityPlugin: security configuration applied; waiting for backend to reload")
+
+    // After securityadmin writes the security config to the index, the BackendRegistry
+    // needs a few seconds to reload.  Poll /_cluster/health until we get HTTP 200.
+    awaitSecurityReady()
+  }
+
+  private def awaitSecurityReady(): Unit = {
+    val maxAttempts = 30
+    var attempt     = 0
+    var ready       = false
+    while (!ready && attempt < maxAttempts) {
+      val check = container.execInContainer(
+        "curl",
+        "-sk",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}",
+        "--user",
+        "admin:admin",
+        "https://localhost:9200/_cluster/health",
+      )
+      val code = check.getStdout.trim
+      if (code == "200") {
+        ready = true
+        logger.info("SecurityPlugin: backend ready (HTTP 200 from health endpoint)")
+      } else {
+        attempt += 1
+        logger.info(s"SecurityPlugin: health check returned $code, retrying (attempt $attempt/$maxAttempts)")
+        Thread.sleep(1000)
+      }
+    }
+    if (!ready) {
+      throw new RuntimeException("Timed out waiting for OpenSearch security backend to become ready")
+    }
   }
 }
 

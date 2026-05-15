@@ -4,9 +4,19 @@ _meta:
 config:
   dynamic:
     authc:
-      jwt_auth_domain:
+      clientcert_auth_domain:
         http_enabled: true
         order: 0
+        http_authenticator:
+          type: clientcert
+          config:
+            username_attribute: cn
+          challenge: false
+        authentication_backend:
+          type: noop
+      jwt_auth_domain:
+        http_enabled: true
+        order: 1
         http_authenticator:
           type: jwt
           challenge: false
@@ -19,19 +29,9 @@ config:
           type: noop
       basic_internal_auth_domain:
         http_enabled: true
-        order: 1
+        order: 2
         http_authenticator:
           type: basic
           challenge: true
         authentication_backend:
           type: internal
-      clientcert_auth_domain:
-        http_enabled: true
-        order: 2
-        http_authenticator:
-          type: clientcert
-          config:
-            username_attribute: cn
-          challenge: false
-        authentication_backend:
-          type: noop

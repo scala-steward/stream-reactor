@@ -8,7 +8,7 @@ admin:
     - "admin"
   description: "Demo admin user used by the basic-auth IT cases"
 kafka-connect:
-  hash: "$2y$12$RQ8u6c8qm/wLi6mObdo74OQGQVR1V7C5cGtpQjF7nHk7HxYlbGKia"
+  hash: "$2y$12$/d3.Ow3ZmGzCW6YZyGqvJutuYc.M1MgCiPvJ/7..7j8sScu1j6RC."
   reserved: false
   backend_roles:
     - "kafka-connect"

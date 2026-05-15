@@ -20,10 +20,25 @@ import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock._
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import io.lenses.streamreactor.connect.elastic.common.bulk.InsertOp
+import io.lenses.streamreactor.connect.opensearch.config.OpenSearchConfig
 import io.lenses.streamreactor.connect.opensearch.config.OpenSearchConfigConstants._
+import io.lenses.streamreactor.connect.opensearch.config.OpenSearchSettings
+import org.opensearch.client.json.jackson.JacksonJsonpMapper
+import org.opensearch.client.opensearch.OpenSearchClient
+import org.opensearch.client.transport.aws.AwsSdk2Transport
+import org.opensearch.client.transport.aws.AwsSdk2TransportOptions
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider
+import software.amazon.awssdk.http.ExecutableHttpRequest
+import software.amazon.awssdk.http.HttpExecuteRequest
+import software.amazon.awssdk.http.SdkHttpClient
+import software.amazon.awssdk.http.apache.ApacheHttpClient
+import software.amazon.awssdk.regions.Region
+
+import java.time.Duration
 
 /**
  * Integration tests for AWS SigV4 signing using WireMock as the target.
@@ -60,32 +75,97 @@ class OpenSearchSigV4WireMockIT extends AnyFunSuite with Matchers with BeforeAnd
 
   private def doc = JsonNodeFactory.instance.objectNode().put("field", "value")
 
+  /**
+   * Thin [[SdkHttpClient]] wrapper that downgrades the URI scheme from `https` to `http` before
+   * forwarding to the underlying client.
+   *
+   * [[AwsSdk2Transport]] always builds HTTPS URIs and adds the SigV4 `Authorization` header BEFORE
+   * calling `prepareRequest`, so by the time this wrapper sees the request the header is already
+   * present. Downgrading to HTTP here lets the actual TCP call reach plain-HTTP WireMock while
+   * keeping the signed header intact — which is all this IT needs to assert.
+   */
+  private class HttpDowngradeClient(delegate: SdkHttpClient) extends SdkHttpClient {
+    override def prepareRequest(req: HttpExecuteRequest): ExecutableHttpRequest = {
+      val modified = req.httpRequest().toBuilder.protocol("http").build()
+      delegate.prepareRequest(
+        HttpExecuteRequest.builder()
+          .request(modified)
+          .contentStreamProvider(req.contentStreamProvider().orElse(null))
+          .build(),
+      )
+    }
+    override def close():      Unit   = delegate.close()
+    override def clientName(): String = delegate.clientName()
+  }
+
+  /**
+   * Build a [[KOpenSearchClient]] backed by a real [[AwsSdk2Transport]] pointed at the WireMock HTTP
+   * server on the given `service` name.
+   *
+   * We construct the transport directly rather than routing through [[OpenSearchTransportFactory]] /
+   * [[OpenSearchSettings]] to avoid the HTTPS-enforcement guard that exists in production code
+   * (signing over HTTP exposes credentials in a real deployment but is acceptable for a local
+   * WireMock IT whose sole job is to assert that the `Authorization` header is present and
+   * well-formed on every outbound request).
+   *
+   * [[AwsSdk2Transport]] always uses HTTPS internally; [[HttpDowngradeClient]] intercepts the
+   * signed request and downgrades the URI scheme to HTTP so it reaches the plain-HTTP WireMock
+   * server while the `Authorization` header remains intact.
+   */
   private def makeSigV4Client(service: String): KOpenSearchClient = {
     val host = "localhost"
     val port = wireMock.port()
-    val props = Map(
-      HOSTS                        -> host,
-      ES_PORT                      -> port.toString,
-      KCQL                         -> "INSERT INTO idx SELECT * FROM topic",
-      AWS_SIGNING_ENABLED_KEY      -> "true",
-      AWS_REGION_KEY               -> "us-east-1",
-      AWS_SIGNING_SERVICE_KEY      -> service,
-      AWS_CREDENTIALS_PROVIDER_KEY -> "STATIC",
-      AWS_ACCESS_KEY_ID_KEY        -> "AKIAIOSFODNN7EXAMPLE",
-      AWS_SECRET_ACCESS_KEY_KEY    -> "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+
+    val credentials = AwsBasicCredentials.create(
+      "AKIAIOSFODNN7EXAMPLE",
+      "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
     )
-    import io.lenses.streamreactor.connect.opensearch.config.OpenSearchConfig
-    import io.lenses.streamreactor.connect.opensearch.config.OpenSearchSettings
-    import org.opensearch.client.opensearch.OpenSearchClient
-    val config    = OpenSearchConfig(props)
-    val settings  = OpenSearchSettings(config)
-    val transport = OpenSearchTransportFactory.create(settings)
+    val apacheClient = ApacheHttpClient.builder()
+      .socketTimeout(Duration.ofMillis(10000))
+      .connectionTimeout(Duration.ofMillis(10000))
+      .build()
+    val httpClient = new HttpDowngradeClient(apacheClient)
+    val options = AwsSdk2TransportOptions.builder()
+      .setMapper(new JacksonJsonpMapper())
+      .setCredentials(StaticCredentialsProvider.create(credentials))
+      .build()
+    val transport = new AwsSdk2Transport(httpClient, s"$host:$port", service, Region.of("us-east-1"), options)
     val osClient  = new OpenSearchClient(transport)
-    new KOpenSearchClient(osClient, settings)
+
+    // Settings are needed only for KOpenSearchClient's strictItemErrors / lifecycle behaviour;
+    // they do NOT affect the transport's signing — that is entirely owned by AwsSdk2Transport above.
+    val settingsProps = Map(
+      HOSTS   -> host,
+      ES_PORT -> port.toString,
+      KCQL    -> "INSERT INTO idx SELECT * FROM topic",
+    )
+    val settings = OpenSearchSettings(OpenSearchConfig(settingsProps))
+    val kClient  = new KOpenSearchClient(osClient, settings)
+    // Trigger the info probe (GET /) so its Authorization header is captured by WireMock.
+    // Each test sets up the GET / stub before calling makeSigV4Client.
+    kClient.start().fold(throw _, identity)
+    kClient
   }
 
   private val infoBody =
-    """{"name":"test","cluster_name":"test","version":{"number":"2.13.0","distribution":"opensearch"},"tagline":"The OpenSearch Project"}"""
+    """{
+      |  "name": "test",
+      |  "cluster_name": "test",
+      |  "cluster_uuid": "test-cluster-uuid",
+      |  "version": {
+      |    "distribution": "opensearch",
+      |    "number": "2.13.0",
+      |    "build_type": "tar",
+      |    "build_hash": "0000000000000000000000000000000000000000",
+      |    "build_date": "2024-01-01T00:00:00.000Z",
+      |    "build_snapshot": false,
+      |    "lucene_version": "9.10.0",
+      |    "minimum_wire_compatibility_version": "7.10.0",
+      |    "minimum_index_compatibility_version": "7.0.0",
+      |    "build_flavor": "default"
+      |  },
+      |  "tagline": "The OpenSearch Project"
+      |}""".stripMargin
 
   test("B2: signed bulk POST reaches WireMock with Authorization header on both info probe and bulk") {
     wireMock.resetAll()

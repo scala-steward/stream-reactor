@@ -22,7 +22,6 @@ import java.nio.file.Files
 import java.nio.file.Paths
 import java.time.Clock
 import java.time.Instant
-import scala.jdk.CollectionConverters._
 
 /**
  * Source of a JWT bearer token.
@@ -47,12 +46,19 @@ class StaticJwtTokenSource(token: String) extends JwtTokenSource {
 /**
  * A file-backed JWT bearer token that is re-read at a configurable interval.
  *
- * @param path           Path to the file containing the bearer token.
+ * @param path            Path to the file containing the bearer token.
  * @param refreshInterval How often (in ms) to re-read the file.
- * @param clock          Clock for time-based refresh decisions.
+ * @param baseDir         When [[Some]], every read validates that the resolved absolute path
+ *                        starts with this directory. Prevents a connector configuration from
+ *                        being used to read arbitrary worker-local files.
+ * @param clock           Clock for time-based refresh decisions.
  */
-class FileJwtTokenSource(path: String, refreshInterval: Long, clock: Clock = Clock.systemUTC())
-    extends JwtTokenSource
+class FileJwtTokenSource(
+  path:            String,
+  refreshInterval: Long,
+  baseDir:         Option[String] = None,
+  clock:           Clock          = Clock.systemUTC(),
+) extends JwtTokenSource
     with StrictLogging {
 
   // None means "failed / not yet loaded"; Some(token) means a good cached value.
@@ -75,15 +81,29 @@ class FileJwtTokenSource(path: String, refreshInterval: Long, clock: Clock = Clo
   }
 
   private def readFile(): String = {
-    // Normalize and make absolute so that relative segments are collapsed before use.
-    // Connector configuration is an admin-only trust boundary (same as keystore/truststore
-    // paths elsewhere in this codebase), so a full allowed-directory whitelist is not
-    // enforced, but we reject any path that still contains ".." after normalization as a
-    // basic defence against accidental or malicious path traversal.
-    val p = Paths.get(path).normalize().toAbsolutePath
-    if (p.iterator().asScala.exists(_.toString == "..")) {
+    // Reject any path whose raw form contains ".." components before normalization.
+    // This catches relative traversal attempts (e.g. "../../etc/passwd") early and
+    // is independent of the base-directory check below.
+    if (path.split("[/\\\\]").contains("..")) {
       throw new ConnectException(s"JWT token file path rejected (path traversal detected): $path")
     }
+
+    val p = Paths.get(path).normalize().toAbsolutePath
+
+    // When a base directory is configured, verify that the resolved path is
+    // contained within it. This is the primary guard against absolute paths that
+    // point at arbitrary worker-local files (e.g. /etc/passwd,
+    // /var/run/secrets/kubernetes.io/serviceaccount/token). Without this check,
+    // any absolute path accepted by the OS is reachable.
+    baseDir.foreach { bd =>
+      val base = Paths.get(bd).normalize().toAbsolutePath
+      if (!p.startsWith(base)) {
+        throw new ConnectException(
+          s"JWT token file path rejected (outside allowed base directory '$bd'): $path",
+        )
+      }
+    }
+
     val bytes: Array[Byte] =
       try Files.readAllBytes(p)
       catch {
@@ -109,6 +129,6 @@ object JwtTokenSource extends StrictLogging {
     new StaticJwtTokenSource(token)
   }
 
-  def fromFile(path: String, refreshIntervalMs: Long): JwtTokenSource =
-    new FileJwtTokenSource(path, refreshIntervalMs)
+  def fromFile(path: String, refreshIntervalMs: Long, baseDir: Option[String] = None): JwtTokenSource =
+    new FileJwtTokenSource(path, refreshIntervalMs, baseDir)
 }
