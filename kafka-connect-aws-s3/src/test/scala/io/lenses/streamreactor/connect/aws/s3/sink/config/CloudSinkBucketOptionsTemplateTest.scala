@@ -136,6 +136,15 @@ class CloudSinkBucketOptionsTemplateTest extends AnyFunSuite with Matchers with 
     name shouldEqual "topic-a_5.json"
   }
 
+  test("TemplateFileNamer: literal extension in template is emitted verbatim — {extension} is optional") {
+    val name = fileName(
+      s"INSERT INTO my-bucket SELECT * FROM topic-a PROPERTIES('object.key.template'='{topic}-{record-count}.xyz')",
+      tpoA,
+      recCount = 5L,
+    )
+    name shouldEqual "topic-a-5.xyz"
+  }
+
   test("invalid template placeholder is rejected at construction time") {
     val result = CloudSinkBucketOptions(
       connectorTaskId,
