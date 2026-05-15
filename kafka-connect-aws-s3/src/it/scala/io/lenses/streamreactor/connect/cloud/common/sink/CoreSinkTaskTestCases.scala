@@ -2372,16 +2372,15 @@ abstract class CoreSinkTaskTestCases[
     task.close(Seq(new TopicPartition(TopicName, 1), new TopicPartition(topic2, 1)).asJava)
     task.stop()
 
-    // Template topic: filename is "{record-count}.{extension}" => "3.json"
+    // Template topic uses TemplateFileNamer with "{record-count}.{extension}" => "3.json"
     val templateFiles = listBucketPath(BucketName, s"$PrefixName/$TopicName/1/")
     templateFiles should have size 1
-    templateFiles.head should endWith("3.json")
+    templateFiles.head shouldBe s"$PrefixName/$TopicName/1/3.json"
 
-    // Legacy topic: filename is offset-based (OffsetFileNamer), does NOT start with "3."
+    // Legacy topic uses OffsetFileNamer => "<paddedEndOffset>_<earliestTs>_<latestTs>.<extension>"
     val legacyFiles = listBucketPath(BucketName, s"$PrefixName/$topic2/1/")
     legacyFiles should have size 1
-    legacyFiles.head should not endWith "3.json"
-    legacyFiles.head should endWith(".json")
+    legacyFiles.head shouldBe s"$PrefixName/$topic2/1/000000000002_0_2.json"
   }
 
   @nowarn
