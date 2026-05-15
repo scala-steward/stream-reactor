@@ -42,7 +42,6 @@ import java.util
 import scala.util.Failure
 import scala.util.Success
 import scala.jdk.CollectionConverters._
-import scala.jdk.CollectionConverters.ListHasAsScala
 
 class JsonBulkWriter(client: KBulkClient, val settings: ElasticCommonSettings) extends ErrorHandler with StrictLogging {
 
@@ -173,7 +172,7 @@ class JsonBulkWriter(client: KBulkClient, val settings: ElasticCommonSettings) e
           case (Some(n), key) if n.isObject => Option(n.get(key)).filter(_.isObject)
           case _                            => None
         }.collect { case o: ObjectNode => o }
-        parent.getOrElse(copy).remove(f.name)
+        parent.foreach(_.remove(f.name))
       }
       copy
     }
