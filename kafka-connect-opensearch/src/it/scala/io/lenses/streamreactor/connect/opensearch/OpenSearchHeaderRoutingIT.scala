@@ -111,7 +111,7 @@ class OpenSearchHeaderRoutingIT extends ITBase {
       docB.found() shouldBe true
       docB.source().get("msg").asText() shouldBe "from-topic2"
     } finally {
-      Try(writer.close())
+      val _ = Try(writer.close())
     }
   }
 
@@ -150,7 +150,7 @@ class OpenSearchHeaderRoutingIT extends ITBase {
       doc2.found() shouldBe true
       doc2.source().get("msg").asText() shouldBe "record-two"
     } finally {
-      Try(writer.close())
+      val _ = Try(writer.close())
     }
   }
 
@@ -180,7 +180,7 @@ class OpenSearchHeaderRoutingIT extends ITBase {
       doc.found() shouldBe true
       doc.source().get("msg").asText() shouldBe "version-two"
     } finally {
-      Try(writer.close())
+      val _ = Try(writer.close())
     }
   }
 }
