@@ -120,7 +120,9 @@ object JsonSimpleConverter extends StrictLogging {
   private def handleArray(name: String, arr: List[_root_.org.json4s.JsonAST.JValue]) =
     arr match {
       case Nil =>
-        new SchemaAndValue(SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).optional().build(), new util.ArrayList[AnyRef]())
+        new SchemaAndValue(SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).optional().build(),
+                           new util.ArrayList[AnyRef](),
+        )
       case head :: tail =>
         val values = new util.ArrayList[AnyRef]()
         val sv     = convert(name, head)
