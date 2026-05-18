@@ -897,3 +897,139 @@ The following counters are exposed on `CloudSinkMetrics`:
 | **Writer accumulation** | N/A (single writer per partition) | Idle writers eagerly evicted on every new writer creation; active writers pinned. Cache grows/shrinks in lockstep -- no desync. |
 | **Migration** | N/A | Fully transparent, zero-downtime upgrade |
 | **Rollback** | N/A | Safe: master lock is backward-compatible, granular locks are ignored by old code |
+
+---
+
+## JMX metrics
+
+All data lake sink tasks (S3, GCS, Azure Data Lake) expose a single MBean per task:
+
+```
+io.lenses.streamreactor.connect.cloud.sink:type=metrics,name=<connectorName>,task=<taskNo>
+```
+
+The MBean is registered at task start and unregistered at task stop. Attributes are purely additive — existing dashboards for granular-lock and GC metrics keep working without changes.
+
+### A. Ingest throughput
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `PutBatchesTotal` | counter | Cumulative `put()` invocations from Kafka Connect. |
+| `RecordsReceivedTotal` | counter | Cumulative records in all `put()` calls. |
+| `RecordsWrittenTotal` | counter | Records forwarded to `writerManager.write` (null-filtered, skip-filtered). |
+| `NullRecordsSkippedTotal` | counter | Records dropped because value was null and `skipNullValues` is enabled. |
+| `PutEmptyBatchesTotal` | counter | `put()` calls with 0 records (trigger time-based flush). |
+| `LastPutEpochMillis` | gauge | Wall-clock epoch of the last completed `put`. 0 before first call — primary liveness signal. |
+| `PutTimerCount` | timer | Number of `put` invocations timed. |
+| `PutTimerSumMillis` | timer | Sum of all `put` latencies. |
+| `PutTimerMaxMillis` | timer | Maximum single `put` latency observed. |
+| `PutTimerMinMillis` | timer | Minimum single `put` latency observed. |
+| `PutTimerLastMillis` | timer | Latency of the most recent `put`. |
+
+### B. File / commit lifecycle
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `FilesOpenedTotal` | counter | New files started (NoWriter → Writing transitions). |
+| `FilesCommittedTotal` | counter | Successful commits (upload + index update complete). |
+| `FilesFailedTotal` | counter | Failed commit attempts (includes transient failures that are later retried). |
+| `BytesWrittenTotal` | counter | Cumulative bytes written to cloud storage across committed files. |
+| `RecordsCommittedTotal` | counter | Cumulative records included in committed files. |
+| `FlushDecisionTrueTotal` | counter | Times `shouldFlush` returned `true` (a file was eligible to close). |
+| `FlushDecisionFalseTotal` | counter | Times `shouldFlush` returned `false`. Ratio `true/(true+false)` shows flush efficiency. |
+| `CommitTimerCount` | timer | Number of commits timed. |
+| `CommitTimerSumMillis` | timer | Sum of commit latencies (seal + upload + index update). |
+| `CommitTimerMaxMillis` | timer | Maximum single commit latency. |
+| `CommitTimerMinMillis` | timer | Minimum single commit latency. |
+| `CommitTimerLastMillis` | timer | Latency of the most recent commit. |
+
+### C. Per-cloud storage SDK timings
+
+The following attributes are instrumented uniformly for S3, GCS, and Azure Data Lake via the `StorageInterfaceWithMetrics` decorator. Timer components follow the same `Count/SumMillis/MaxMillis/MinMillis/LastMillis` pattern.
+
+| Attribute prefix | Wraps | Notes |
+|-----------------|-------|-------|
+| `StorageUploadTimer*` + `StorageUploadErrorsTotal` | `uploadFile` | Hot-path write to cloud storage. |
+| `StorageCopyTimer*` + `StorageCopyErrorsTotal` | `mvFile` | Copy-then-delete in indexed-mode commit and master-lock path. |
+| `StorageDeleteTimer*` + `StorageDeleteErrorsTotal` | `deleteFile` / `deleteFiles` | GC drain and indexed-mode temp-file deletion. |
+| `StorageGetTimer*` + `StorageGetErrorsTotal` | `getBlobAsStringAndEtag` | Granular/master lock reads and sweep loads. |
+| `StorageListTimer*` + `StorageListErrorsTotal` | `listKeysRecursive` / `listFileMetaRecursive` | Orphan sweep and index manager listings. |
+
+Full attribute list for uploads (same pattern for Copy/Delete/Get/List):
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `StorageUploadTimerCount` | timer | Number of `uploadFile` calls. |
+| `StorageUploadTimerSumMillis` | timer | Sum of `uploadFile` latencies. |
+| `StorageUploadTimerMaxMillis` | timer | Maximum `uploadFile` latency. |
+| `StorageUploadTimerMinMillis` | timer | Minimum `uploadFile` latency. |
+| `StorageUploadTimerLastMillis` | timer | Most recent `uploadFile` latency. |
+| `StorageUploadErrorsTotal` | counter | Failed `uploadFile` calls. |
+
+### D. Pending-operation retries & error classification
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `RecommitPendingInvocationsTotal` | counter | `recommitPending()` calls at the start of every `put`. |
+| `PendingOperationRetriesTotal` | counter | Transient upload failures deferred to the next `recommitPending`. Each increment means the file is still on disk and will be retried. |
+| `SinkErrorsFatalTotal` | counter | Errors classified as Fatal — task fails immediately. |
+| `SinkErrorsRetriableTotal` | counter | Errors classified as Retriable — Kafka Connect re-delivers the batch. |
+| `SinkErrorsNonFatalTotal` | counter | Errors classified as NonFatal — may be swallowed depending on error policy. |
+
+### E. Schema / skip / seek diagnostics
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `SchemaRolloversTotal` | counter | Schema rollover events — full TP flush triggered by an incompatible schema change. |
+| `DuplicateRecordsSkippedTotal` | counter | Records skipped because the offset was already committed (index dedup). |
+| `SeekOnOpenAppliedTotal` | counter | Partitions for which `context.offset(...)` was called during `open` (consumer seek-back). |
+| `RebalanceClosesTotal` | counter | `close(partitions)` calls from Kafka Connect. A high rate signals an unstable consumer group. |
+
+### F. Current state gauges
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `InFlightUploads` | gauge | Writers currently in `Uploading` state. Sustained elevation signals slow storage or a stalled retry loop. |
+| `OldestOpenFileAgeMillis` | gauge | Age of the oldest currently-open (Writing state) file in ms. 0 if no files are open. Alert if this consistently exceeds `flush.interval` + grace period. |
+| `MillisSinceLastCommit` | gauge | Milliseconds since the last successful commit. 0 before first commit. Primary "task stuck" signal — pair with `FilesCommittedTotal` rate. |
+
+### Existing attributes (unchanged)
+
+`WriterCount`, `IdleWriterEvictions`, `GranularCacheSize/Hits/Misses`, `GcQueueDepth`, `GcLocksEnqueued/Deleted/SkippedReclaimed/SkippedRevoked`, `GcDeleteFailures/Retries`, `MasterLockUpdates/Failures/WriteSkipped/WriteForcedRevoke/Stop/PostCleanUp`, `MasterLockWriteForcedRevoke/StopFailures/PostCleanUpFailures`, `MasterLockDirtyWindowCycles`, `MasterLockDirty`, `SafeOffsetBarrierWriters`, `SweepRuns`, `SweepOrphansEnqueued`, `SweepGetBudgetUsed`.
+
+### Recommended `jmx_exporter` rules
+
+Add the following block to your Prometheus JMX exporter configuration to scrape all lake-sink MBean attributes with the task and connector labels:
+
+```yaml
+rules:
+  # Existing lake-sink MBean — matches all attributes including the 65 new ones
+  - pattern: >-
+      io\.lenses\.streamreactor\.connect\.cloud\.sink<type=metrics,
+      name=([^,]+),task=(\d+)><>(\w+)
+    name: lenses_cloud_sink_$3
+    type: GAUGE
+    labels:
+      connector: "$1"
+      task: "$2"
+    attrNameSnakeCase: true
+```
+
+**Rate / alert rules** (PromQL examples):
+
+```promql
+# Is the task processing records?
+rate(lenses_cloud_sink_records_received_total[5m]) > 0
+
+# Task-stuck alert: no commit in the last 5 minutes
+lenses_cloud_sink_millis_since_last_commit > 300000
+
+# Upload error rate (any cloud)
+rate(lenses_cloud_sink_storage_upload_errors_total[5m]) / rate(lenses_cloud_sink_storage_upload_timer_count[5m])
+
+# Transient upload retry pressure
+rate(lenses_cloud_sink_pending_operation_retries_total[5m]) > 0
+
+# Fatal errors (task will fail soon)
+increase(lenses_cloud_sink_sink_errors_fatal_total[1m]) > 0
+```
