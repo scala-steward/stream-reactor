@@ -15,10 +15,11 @@
  */
 package io.lenses.streamreactor.connect.elastic6
 
+import com.sksamuel.elastic4s.http.ElasticNodeEndpoint
+import io.lenses.streamreactor.connect.elastic.common.writer.JsonBulkWriter
 import io.lenses.streamreactor.connect.elastic6.config.ElasticConfig
 import io.lenses.streamreactor.connect.elastic6.config.ElasticConfigConstants
 import io.lenses.streamreactor.connect.elastic6.config.ElasticSettings
-import com.sksamuel.elastic4s.http.ElasticNodeEndpoint
 
 import scala.util.Failure
 import scala.util.Success
@@ -26,14 +27,7 @@ import scala.util.Try
 
 object ElasticWriter {
 
-  /**
-   * Construct a JSONWriter.
-   *
-   * @param config An elasticSinkConfig to extract settings from.
-   * @return An ElasticJsonWriter to write records from Kafka to ElasticSearch.
-   */
-  def apply(config: ElasticConfig): ElasticJsonWriter = {
-
+  def apply(config: ElasticConfig): JsonBulkWriter = {
     val hostNames = config.getString(ElasticConfigConstants.HOSTS).split(",")
     val protocol  = config.getString(ElasticConfigConstants.PROTOCOL)
     val port      = config.getInt(ElasticConfigConstants.ES_PORT)
@@ -45,13 +39,15 @@ object ElasticWriter {
 
     val settings = ElasticSettings(config)
 
-    new ElasticJsonWriter(
-      KElasticClient.createHttpClient(settings, endpoints(hostNames, protocol, port, prefix).toIndexedSeq),
+    new JsonBulkWriter(
+      new KElastic6BulkClient(
+        KElasticClient.createHttpClient(settings, endpoints(hostNames, protocol, port, prefix).toIndexedSeq),
+        settings.writeTimeout,
+      ),
       settings,
     )
   }
 
   private def endpoints(hostNames: Array[String], protocol: String, port: Integer, prefix: Option[String]) =
-    hostNames
-      .map(hostname => ElasticNodeEndpoint(protocol, hostname, port, prefix))
+    hostNames.map(hostname => ElasticNodeEndpoint(protocol, hostname, port, prefix))
 }

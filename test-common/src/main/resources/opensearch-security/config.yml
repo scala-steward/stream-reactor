@@ -1,0 +1,37 @@
+_meta:
+  type: "config"
+  config_version: 2
+config:
+  dynamic:
+    authc:
+      clientcert_auth_domain:
+        http_enabled: true
+        order: 0
+        http_authenticator:
+          type: clientcert
+          config:
+            username_attribute: cn
+          challenge: false
+        authentication_backend:
+          type: noop
+      jwt_auth_domain:
+        http_enabled: true
+        order: 1
+        http_authenticator:
+          type: jwt
+          challenge: false
+          config:
+            signing_key: "${BASE64_HMAC_KEY}"
+            jwt_header: "Authorization"
+            subject_key: "sub"
+            roles_key: "roles"
+        authentication_backend:
+          type: noop
+      basic_internal_auth_domain:
+        http_enabled: true
+        order: 2
+        http_authenticator:
+          type: basic
+          challenge: true
+        authentication_backend:
+          type: internal

@@ -1,0 +1,4 @@
+connectors/*.jar
+secrets/*.jks
+secrets/*.pem
+secrets/*.der

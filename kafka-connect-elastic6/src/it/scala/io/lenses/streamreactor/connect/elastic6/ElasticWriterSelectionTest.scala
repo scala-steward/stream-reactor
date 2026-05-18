@@ -19,6 +19,7 @@ package io.lenses.streamreactor.connect.elastic6
 import io.lenses.streamreactor.connect.elastic6.CreateLocalNodeClientUtil.createLocalNode
 import io.lenses.streamreactor.connect.elastic6.config.ElasticConfig
 import io.lenses.streamreactor.connect.elastic6.config.ElasticSettings
+import io.lenses.streamreactor.connect.elastic.common.writer.JsonBulkWriter
 import com.sksamuel.elastic4s.http.ElasticClient
 import com.sksamuel.elastic4s.http.ElasticDsl._
 import org.apache.kafka.connect.sink.SinkTaskContext
@@ -45,7 +46,8 @@ class ElasticWriterSelectionTest extends ITBase with MockitoSugar {
     //get writer
 
     val settings = ElasticSettings(config)
-    val writer   = new ElasticJsonWriter(new HttpKElasticClient(client), settings)
+    val writer =
+      new JsonBulkWriter(new KElastic6BulkClient(new HttpKElasticClient(client), settings.writeTimeout), settings)
     //write records to elastic
     writer.write(testRecords)
 
@@ -78,7 +80,8 @@ class ElasticWriterSelectionTest extends ITBase with MockitoSugar {
     //get writer
 
     val settings = ElasticSettings(config)
-    val writer   = new ElasticJsonWriter(new HttpKElasticClient(client), settings)
+    val writer =
+      new JsonBulkWriter(new KElastic6BulkClient(new HttpKElasticClient(client), settings.writeTimeout), settings)
     //write records to elastic
     writer.write(testRecords)
 
@@ -108,7 +111,8 @@ class ElasticWriterSelectionTest extends ITBase with MockitoSugar {
     val localNode = createLocalNode()
     val client: ElasticClient = CreateLocalNodeClientUtil.createLocalNodeClient(localNode)
     val settings = ElasticSettings(config)
-    val writer   = new ElasticJsonWriter(new HttpKElasticClient(client), settings)
+    val writer =
+      new JsonBulkWriter(new KElastic6BulkClient(new HttpKElasticClient(client), settings.writeTimeout), settings)
     //First run writes records to elastic
     writer.write(testRecords)
 
@@ -154,7 +158,8 @@ class ElasticWriterSelectionTest extends ITBase with MockitoSugar {
     val localNode = createLocalNode()
     val client: ElasticClient = CreateLocalNodeClientUtil.createLocalNodeClient(localNode)
     val settings = ElasticSettings(config)
-    val writer   = new ElasticJsonWriter(new HttpKElasticClient(client), settings)
+    val writer =
+      new JsonBulkWriter(new KElastic6BulkClient(new HttpKElasticClient(client), settings.writeTimeout), settings)
     //First run writes records to elastic
     writer.write(testRecords)
 

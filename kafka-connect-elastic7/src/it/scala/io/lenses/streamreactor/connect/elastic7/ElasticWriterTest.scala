@@ -19,6 +19,7 @@ package io.lenses.streamreactor.connect.elastic7
 import io.lenses.streamreactor.connect.elastic7.CreateLocalNodeClientUtil._
 import io.lenses.streamreactor.connect.elastic7.config.ElasticConfig
 import io.lenses.streamreactor.connect.elastic7.config.ElasticSettings
+import io.lenses.streamreactor.connect.elastic.common.writer.JsonBulkWriter
 import com.sksamuel.elastic4s.ElasticClient
 import com.sksamuel.elastic4s.ElasticDsl._
 import org.elasticsearch.common.settings.Settings
@@ -59,7 +60,9 @@ class ElasticWriterTest extends ITBase with MockitoSugar with BeforeAndAfterEach
 
       val client: ElasticClient = createLocalNodeClient(localNode)
 
-      val writer = new ElasticJsonWriter(new HttpKElasticClient(client), ElasticSettings(ElasticConfig(props)))
+      val settings = ElasticSettings(ElasticConfig(props))
+      val writer =
+        new JsonBulkWriter(new KElasticBulkClient(new HttpKElasticClient(client), settings.writeTimeout), settings)
 
       writer.write(TestRecords)
       (localNode, client, writer)
@@ -69,7 +72,7 @@ class ElasticWriterTest extends ITBase with MockitoSugar with BeforeAndAfterEach
 
   "A ElasticWriter should insert into Elastic Search a number of records" in new TestContext {
 
-    val (node: ElasticsearchContainer, client: ElasticClient, writer: ElasticJsonWriter) = writeTestRecords(
+    val (node: ElasticsearchContainer, client: ElasticClient, writer: JsonBulkWriter) = writeTestRecords(
       getElasticSinkConfigProps(RandomClusterName),
     )
 
@@ -88,7 +91,7 @@ class ElasticWriterTest extends ITBase with MockitoSugar with BeforeAndAfterEach
   }
 
   "A ElasticWriter should update a number of records in Elastic Search" in new TestContext {
-    val (node: ElasticsearchContainer, client: ElasticClient, writer: ElasticJsonWriter) = writeTestRecords(
+    val (node: ElasticsearchContainer, client: ElasticClient, writer: JsonBulkWriter) = writeTestRecords(
       getElasticSinkUpdateConfigProps(RandomClusterName),
     )
 
@@ -119,7 +122,7 @@ class ElasticWriterTest extends ITBase with MockitoSugar with BeforeAndAfterEach
 
   "A ElasticWriter should update a number of records in Elastic Search with index suffix defined" in new TestContext {
 
-    val (node: ElasticsearchContainer, client: ElasticClient, writer: ElasticJsonWriter) = writeTestRecords(
+    val (node: ElasticsearchContainer, client: ElasticClient, writer: JsonBulkWriter) = writeTestRecords(
       getElasticSinkConfigPropsWithDateSuffixAndIndexAutoCreation(autoCreate = true),
     )
 
@@ -139,7 +142,7 @@ class ElasticWriterTest extends ITBase with MockitoSugar with BeforeAndAfterEach
 
   "It should fail writing to a non-existent index when auto creation is disabled" ignore new TestContext {
 
-    val (node: ElasticsearchContainer, client: ElasticClient, writer: ElasticJsonWriter) = writeTestRecords(
+    val (node: ElasticsearchContainer, client: ElasticClient, writer: JsonBulkWriter) = writeTestRecords(
       getElasticSinkConfigPropsWithDateSuffixAndIndexAutoCreation(autoCreate = false, RandomClusterName),
     )
 
@@ -160,7 +163,7 @@ class ElasticWriterTest extends ITBase with MockitoSugar with BeforeAndAfterEach
 
   "A ElasticWriter should insert into Elastic Search a number of records with the HTTP Client" in new TestContext {
 
-    val (node: ElasticsearchContainer, client: ElasticClient, writer: ElasticJsonWriter) = writeTestRecords(
+    val (node: ElasticsearchContainer, client: ElasticClient, writer: JsonBulkWriter) = writeTestRecords(
       getElasticSinkConfigPropsHTTPClient(),
     )
 
@@ -179,7 +182,7 @@ class ElasticWriterTest extends ITBase with MockitoSugar with BeforeAndAfterEach
 
   "A ElasticWriter should insert into with PK Elastic Search a number of records" in new TestContext {
 
-    val (node: ElasticsearchContainer, client: ElasticClient, writer: ElasticJsonWriter) = writeTestRecords(
+    val (node: ElasticsearchContainer, client: ElasticClient, writer: JsonBulkWriter) = writeTestRecords(
       getElasticSinkConfigPropsPk(RandomClusterName),
     )
 
@@ -207,7 +210,7 @@ class ElasticWriterTest extends ITBase with MockitoSugar with BeforeAndAfterEach
 
   "A ElasticWriter should insert into without PK Elastic Search a number of records" in new TestContext {
 
-    val (node: ElasticsearchContainer, client: ElasticClient, writer: ElasticJsonWriter) = writeTestRecords(
+    val (node: ElasticsearchContainer, client: ElasticClient, writer: JsonBulkWriter) = writeTestRecords(
       getElasticSinkConfigProps(RandomClusterName),
     )
 

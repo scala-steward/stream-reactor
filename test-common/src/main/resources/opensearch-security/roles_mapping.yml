@@ -1,0 +1,20 @@
+_meta:
+  type: "rolesmapping"
+  config_version: 2
+all_access:
+  reserved: false
+  users:
+    - "admin"
+    - "kafka-connect"
+    - "connect-client"
+  backend_roles:
+    - "admin"
+    - "all_access"
+  hosts: []
+  and_backend_roles: []
+  description: "Map admin user, JWT 'kafka-connect' subject, connect-client cert CN, and JWT 'all_access' backend role to all_access"
+security_rest_api_access:
+  reserved: false
+  users:
+    - "admin"
+  description: "Allow the admin user to call the security REST API for securityadmin.sh"

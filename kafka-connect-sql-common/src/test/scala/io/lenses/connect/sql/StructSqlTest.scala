@@ -20,6 +20,8 @@ import com.sksamuel.avro4s.RecordFormat
 import com.sksamuel.avro4s.SchemaFor
 import com.sksamuel.avro4s.ToRecord
 import io.lenses.streamreactor.connect.avro.AvroDataFactory
+import org.apache.kafka.connect.data.Schema
+import org.apache.kafka.connect.data.SchemaBuilder
 import org.apache.kafka.connect.data.Struct
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
@@ -243,6 +245,27 @@ class StructSqlTest extends AnyWordSpec with Matchers {
       val struct = avroData.toConnectData(SchemaFor[SimpleAddress].schema, record).value.asInstanceOf[Struct]
 
       val actual = struct.sql("SELECT * FROM simpleAddress")
+      actual shouldBe struct
+    }
+
+    "handle 'SELECT * FROM topic' for a struct containing a nested struct field" in {
+      val person = Person("Rick", Address(Street("Rock St"), None, "MtV", "CA", "94041", "USA"))
+      val record = RecordFormat[Person].to(person)
+      val struct = avroData.toConnectData(SchemaFor[Person].schema, record).value.asInstanceOf[Struct]
+      val actual = struct.sql("SELECT * FROM topic")
+      actual shouldBe struct
+    }
+
+    "handle 'SELECT * FROM topic' for a struct containing a MAP field" in {
+      val schema = SchemaBuilder.struct()
+        .field("id", Schema.INT32_SCHEMA)
+        .field("props", SchemaBuilder.map(Schema.STRING_SCHEMA, Schema.STRING_SCHEMA).optional().build())
+        .build()
+      val props = new java.util.HashMap[String, String]()
+      props.put("k1", "v1")
+      props.put("k2", "v2")
+      val struct = new Struct(schema).put("id", Int.box(42)).put("props", props)
+      val actual = struct.sql("SELECT * FROM topic")
       actual shouldBe struct
     }
 
