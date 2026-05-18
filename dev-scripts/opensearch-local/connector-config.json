@@ -1,0 +1,22 @@
+{
+  "connector.class": "io.lenses.streamreactor.connect.opensearch.OpenSearchSinkConnector",
+  "tasks.max": "1",
+  "topics": "elastic-dr-topic,elastic-dr-topic2",
+
+  "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter.schemas.enable": "false",
+  "header.converter": "org.apache.kafka.connect.storage.StringConverter",
+
+  "connect.opensearch.kcql": "UPSERT INTO _header.index_name SELECT * FROM elastic-dr-topic PK _key; UPSERT INTO _header.index_name SELECT * FROM elastic-dr-topic2 PK _key",
+
+  "connect.opensearch.hosts": "node-0.example.com",
+  "connect.opensearch.port": "9200",
+  "connect.opensearch.protocol": "https",
+
+  "connect.opensearch.use.http.username": "admin",
+  "connect.opensearch.use.http.password": "bY7!qX3@hV9#kM2",
+
+  "ssl.truststore.location": "/etc/secrets/opensearch-truststore.jks",
+  "ssl.truststore.password": "changeit"
+}

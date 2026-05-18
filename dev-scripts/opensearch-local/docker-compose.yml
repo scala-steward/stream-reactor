@@ -1,0 +1,135 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # Kafka 4.1 in KRaft mode (single node acts as both broker and controller).
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:4.1.0
+    container_name: kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"   # external (host-accessible)
+    environment:
+      # KRaft — combined broker+controller
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+
+      # Listeners
+      # EXTERNAL → host access on 9092
+      # INTERNAL → Connect → broker inside the Docker network on 19092
+      # CONTROLLER → KRaft controller on 9093 (not exposed to host)
+      KAFKA_LISTENERS: "EXTERNAL://0.0.0.0:9092,INTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "EXTERNAL://localhost:9092,INTERNAL://kafka:19092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # Single-node defaults
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_IN_SYNC_REPLICAS: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+      CLUSTER_ID: "local-opensearch-dev-01"
+
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "kafka:19092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # OpenSearch 2.13.0 with demo security (TLS + basic auth admin / see OPENSEARCH_INITIAL_ADMIN_PASSWORD).
+  # ---------------------------------------------------------------------------
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: opensearch
+    hostname: opensearch
+    # The OpenSearch demo certificate's SAN list is [node-0.example.com, localhost].
+    # We add 'node-0.example.com' as a network alias so the Connect container can
+    # reach this service via a hostname that passes TLS hostname verification.
+    networks:
+      default:
+        aliases:
+          - node-0.example.com
+    ports:
+      - "9200:9200"
+    environment:
+      discovery.type: single-node
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: "bY7!qX3@hV9#kM2"
+      # Keep demo security certificates and config in place
+      plugins.security.disabled: "false"
+      # Constrain JVM heap to avoid OOM in memory-limited Docker Desktop environments
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      # Exit 0 on any HTTP reply (200 / 401 / 503) — only fails on connection refused
+      # or timeout. Avoids grep/pipe quoting issues and handles the security-plugin
+      # init window where 503s are returned before securityadmin.sh completes.
+      test: ["CMD-SHELL", "curl -sk --max-time 5 https://localhost:9200 -o /dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 24
+      start_period: 120s
+
+  # ---------------------------------------------------------------------------
+  # Kafka Connect 4.1 (Confluent CP 8.1.0 — Kafka 4.1 wire-compatible).
+  # The opensearch connector fat-jar is mounted in from ./connectors/.
+  # The generated truststore is mounted in from ./secrets/.
+  # ---------------------------------------------------------------------------
+  connect:
+    image: confluentinc/cp-kafka-connect-base:8.1.0
+    container_name: connect
+    hostname: connect
+    ports:
+      - "8083:8083"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    volumes:
+      - ./connectors:/connectors:ro
+      - ./secrets:/etc/secrets:ro
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: "kafka:19092"
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: "opensearch-local"
+
+      # Internal topics (RF=1 for single-node)
+      CONNECT_CONFIG_STORAGE_TOPIC: "connect-configs"
+      CONNECT_OFFSET_STORAGE_TOPIC: "connect-offsets"
+      CONNECT_STATUS_STORAGE_TOPIC: "connect-status"
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+
+      # Default converters (connector configs override per-topic)
+      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.storage.StringConverter"
+      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+
+      # Plugin path: /connectors is the mounted fat-jar directory
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/connectors"
+
+      CONNECT_REST_ADVERTISED_HOST_NAME: "connect"
+
+      # Pass through truststore JVM args so the JVM itself trusts the OpenSearch cert
+      KAFKA_OPTS: "-Djavax.net.ssl.trustStore=/etc/secrets/opensearch-truststore.jks -Djavax.net.ssl.trustStorePassword=changeit"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
