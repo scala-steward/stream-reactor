@@ -44,8 +44,9 @@ object ElasticConfigConstants {
   val KCQL     = s"${CONNECTOR_PREFIX}.${KCQL_PROP_SUFFIX}"
   val KCQL_DOC = "KCQL expression describing field selection and routes."
 
-  val WRITE_TIMEOUT_CONFIG  = s"${CONNECTOR_PREFIX}.${WRITE_TIMEOUT_SUFFIX}"
-  val WRITE_TIMEOUT_DOC     = "The time to wait in millis. Default is 5 minutes."
+  val WRITE_TIMEOUT_CONFIG = s"${CONNECTOR_PREFIX}.${WRITE_TIMEOUT_SUFFIX}"
+  val WRITE_TIMEOUT_DOC =
+    "The time to wait in seconds for a bulk request to complete. Default 300000 (effectively unbounded; preserves pre-2026 ES6 behaviour)."
   val WRITE_TIMEOUT_DISPLAY = "Write timeout"
   val WRITE_TIMEOUT_DEFAULT = 300000
 

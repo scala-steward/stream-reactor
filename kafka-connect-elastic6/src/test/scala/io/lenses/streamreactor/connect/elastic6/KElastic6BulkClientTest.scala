@@ -123,7 +123,7 @@ class KElastic6BulkClientTest extends AnyWordSpec with Matchers with MockitoSuga
         ),
       )
 
-      val client = new KElastic6BulkClient(elasticClient, writeTimeoutMs = 5000)
+      val client = new KElastic6BulkClient(elasticClient, writeTimeoutSeconds = 5000)
       val result = client.bulk(sampleOps)
       result.isFailure shouldBe true
       result.failed.get.getMessage should include("transport error")
@@ -135,7 +135,7 @@ class KElastic6BulkClientTest extends AnyWordSpec with Matchers with MockitoSuga
     val mockResp      = mock[Response[BulkResponse]]
     when(elasticClient.execute(any[BulkRequest])).thenReturn(Future.successful(mockResp))
     when(mockResp.isError).thenReturn(false)
-    val client = new KElastic6BulkClient(elasticClient, writeTimeoutMs = 5000)
+    val client = new KElastic6BulkClient(elasticClient, writeTimeoutSeconds = 5000)
     (client, mockResp)
   }
 

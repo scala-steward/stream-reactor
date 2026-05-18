@@ -42,8 +42,9 @@ import org.scalatest.matchers.should.Matchers
  * 4. [[WITHDOCTYPE]] KCQL clause is silently ignored on OpenSearch (and ES7). It is NOT ignored
  *    on ES6, where `KElastic6BulkClient.supportsDocumentType == true` prevents the warning.
  *
- * 5. `write.timeout` is interpreted as **milliseconds** on both ES7 (fixed) and OpenSearch.
- *    The default 300 000 = 5 minutes.
+ * 5. `write.timeout` unit differs by connector. ES6 and ES7 interpret it as **seconds** to preserve
+ *    pre-refactor behaviour (default 300 000 ≈ 83h, effectively unbounded). OpenSearch interprets it
+ *    as **milliseconds** (default 300 000 = 5 minutes), matching the HTTP-client request-timeout API.
  */
 class OpenSearchParityContractTest extends AnyFunSuite with Matchers {
 
@@ -108,10 +109,12 @@ class OpenSearchParityContractTest extends AnyFunSuite with Matchers {
     kClient.supportsDocumentType shouldBe false
   }
 
-  // --- 5. write.timeout unit is milliseconds ---
+  // --- 5. write.timeout unit differs across connectors ---
 
-  test("PARITY-5: write.timeout default of 300000 equals 5 minutes in milliseconds") {
+  test("PARITY-5: write.timeout default is 300000 (seconds on ES6/ES7, millis on OpenSearch)") {
     import io.lenses.streamreactor.connect.elastic.common.config.ElasticCommonConfigConstants
     ElasticCommonConfigConstants.WRITE_TIMEOUT_DEFAULT shouldBe 300000
+    // ES6/ES7: 300_000.seconds ≈ 83h (legacy, unbounded-in-practice)
+    // OpenSearch: 300_000.millis = 5 minutes (intentional)
   }
 }

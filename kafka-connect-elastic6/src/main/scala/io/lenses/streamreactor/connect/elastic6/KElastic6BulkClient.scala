@@ -41,10 +41,14 @@ import scala.util.Try
  * (e.g. mapping conflicts, version conflicts) are logged at WARN but treated as
  * non-fatal, matching ES7 behaviour.
  *
- * @param writeTimeoutMs timeout in milliseconds, matching the config key `connect.elastic.write.timeout`
- *                       (documented in millis, default 300000 = 5 minutes).
+ * @param writeTimeoutSeconds timeout in **seconds**, preserving the pre-refactor ES6 interpretation of
+ *                            `connect.elastic.write.timeout` (default 300000 ≈ 83 hours, effectively
+ *                            unbounded). Despite the config doc historically claiming "millis", the old
+ *                            `ElasticJsonWriter` always passed this value to `Await.result` as `.seconds`.
+ *                            We preserve that here to avoid breaking existing deployments. OpenSearch uses
+ *                            milliseconds instead (see OpenSearchTransportFactory).
  */
-class KElastic6BulkClient(client: KElasticClient, writeTimeoutMs: Int) extends KBulkClient with StrictLogging {
+class KElastic6BulkClient(client: KElasticClient, writeTimeoutSeconds: Int) extends KBulkClient with StrictLogging {
 
   override def supportsDocumentType: Boolean = true
 
@@ -70,7 +74,7 @@ class KElastic6BulkClient(client: KElasticClient, writeTimeoutMs: Int) extends K
         deleteById(new Index(index), docType, id)
     }
 
-    val response = Await.result(client.execute(ElasticDsl.bulk(elasticRequests)), writeTimeoutMs.milliseconds)
+    val response = Await.result(client.execute(ElasticDsl.bulk(elasticRequests)), writeTimeoutSeconds.seconds)
 
     if (response.isError) {
       throw new RuntimeException(s"Elastic bulk transport error: ${response.error.reason}")
