@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 # import-public-pr.sh — Import a PR from the public lensesio/stream-reactor mirror
-# into this lensesio-dev/stream-reactor fork, preserving authorship, and open a PR.
+# into the lensesio-dev/stream-reactor private repo, preserving all commits and
+# authorship exactly, and open a PR for review.
 #
 # Usage:
 #   ./import-public-pr.sh <public-pr-number>
 #
 # Optional env overrides:
-#   PUBLIC_REPO   — public GitHub repo slug (default: lensesio/stream-reactor)
-#   DEV_REMOTE    — git remote name for the dev repo (default: origin)
-#   BASE_BRANCH   — target branch for the new PR (default: master)
+#   PUBLIC_REPO   — public GitHub repo slug  (default: lensesio/stream-reactor)
+#   DEV_REMOTE    — remote name in the current working copy whose URL is used
+#                   as the SSH URL of the private repo  (default: origin)
+#   BASE_BRANCH   — base branch for the new PR  (default: master)
+#
+# Process (no cherry-pick — commits are preserved verbatim):
+#   1. Clone the private repo to a temp dir.
+#   2. Add the contributor's fork as a second remote ("prsource").
+#   3. Checkout the PR branch as public-pr-<N>.
+#   4. Push public-pr-<N> to the private repo.
+#   5. Delete the temp dir (EXIT trap).
+#   6. Open the PR via gh.
 
 set -euo pipefail
 
@@ -19,11 +29,12 @@ PR="${1:-}"
 PUBLIC_REPO="${PUBLIC_REPO:-lensesio/stream-reactor}"
 DEV_REMOTE="${DEV_REMOTE:-origin}"
 BASE_BRANCH="${BASE_BRANCH:-master}"
+IMPORT_BRANCH="public-pr-${PR}"
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-die() { echo "ERROR: $*" >&2; exit 1; }
+die()  { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
 
 # ---------------------------------------------------------------------------
@@ -39,129 +50,94 @@ done
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "Must be run from inside a git work tree."
 
 if [[ -n "$(git status --porcelain | grep -v '^??')" ]]; then
-  die "Working tree has staged or modified tracked files. Please commit or stash your changes before importing."
+  die "Working tree has staged or modified tracked files. Please commit or stash before importing."
 fi
 
-# Resolve the dev repo slug from the remote URL
-DEV_REMOTE_URL="$(git remote get-url "$DEV_REMOTE")"
-# Handle both HTTPS and SSH URL formats
-DEV_REPO_SLUG="$(echo "$DEV_REMOTE_URL" \
+# Resolve the SSH URL of the private repo from the current working copy's remote
+DEV_SSH_URL="$(git remote get-url "$DEV_REMOTE")"
+DEV_REPO_SLUG="$(echo "$DEV_SSH_URL" \
   | sed -E 's|^git@github\.com:||; s|^https://github\.com/||; s|\.git$||')"
-info "Dev repo: $DEV_REPO_SLUG"
+info "Private repo : $DEV_REPO_SLUG  ($DEV_SSH_URL)"
 
 # ---------------------------------------------------------------------------
 # Fetch PR metadata from the public repo
 # ---------------------------------------------------------------------------
 info "Fetching metadata for $PUBLIC_REPO #$PR ..."
 PR_JSON="$(gh pr view "$PR" --repo "$PUBLIC_REPO" \
-  --json number,title,author,headRefName,headRefOid,baseRefName,body,url,commits)"
+  --json number,title,author,headRefName,headRepositoryOwner,headRepository,url,body,commits)"
 
-PR_TITLE="$(echo "$PR_JSON"   | jq -r '.title')"
-PR_AUTHOR="$(echo "$PR_JSON"  | jq -r '.author.login')"
+PR_TITLE="$(echo  "$PR_JSON" | jq -r '.title')"
+PR_AUTHOR="$(echo "$PR_JSON" | jq -r '.author.login')"
 PR_HEAD_REF="$(echo "$PR_JSON" | jq -r '.headRefName')"
-PR_URL="$(echo "$PR_JSON"     | jq -r '.url')"
-PR_BODY="$(echo "$PR_JSON"    | jq -r '.body')"
-# Build newline-separated list of commit OIDs in order
+PR_FORK_OWNER="$(echo "$PR_JSON" | jq -r '.headRepositoryOwner.login')"
+PR_FORK_NAME="$(echo "$PR_JSON" | jq -r '.headRepository.name')"
+PR_URL="$(echo   "$PR_JSON" | jq -r '.url')"
+PR_BODY="$(echo  "$PR_JSON" | jq -r '.body')"
 COMMIT_OIDS="$(echo "$PR_JSON" | jq -r '.commits[].oid')"
 
-info "Title  : $PR_TITLE"
-info "Author : $PR_AUTHOR"
-info "Branch : $PR_HEAD_REF"
-info "Commits: $(echo "$COMMIT_OIDS" | wc -l | tr -d ' ')"
+FORK_URL="https://github.com/${PR_FORK_OWNER}/${PR_FORK_NAME}.git"
+
+info "Title        : $PR_TITLE"
+info "Author       : $PR_AUTHOR"
+info "Fork         : $FORK_URL"
+info "Fork branch  : $PR_HEAD_REF"
+info "Import branch: $IMPORT_BRANCH"
+info "Commits      : $(echo "$COMMIT_OIDS" | wc -l | tr -d ' ')"
 
 # ---------------------------------------------------------------------------
-# Guard: refuse to overwrite an existing local or remote branch
+# Guard: refuse if the import branch already exists locally or on remote
 # ---------------------------------------------------------------------------
-if git show-ref --verify --quiet "refs/heads/$PR_HEAD_REF"; then
-  die "Local branch '$PR_HEAD_REF' already exists. Delete it first:\n  git branch -D '$PR_HEAD_REF'"
+if git show-ref --verify --quiet "refs/heads/$IMPORT_BRANCH"; then
+  die "Local branch '$IMPORT_BRANCH' already exists. Delete it first:
+  git branch -D '$IMPORT_BRANCH'"
 fi
-if git ls-remote --exit-code "$DEV_REMOTE" "refs/heads/$PR_HEAD_REF" >/dev/null 2>&1; then
-  die "Remote branch '$PR_HEAD_REF' already exists on $DEV_REMOTE. Delete it first:\n  git push $DEV_REMOTE --delete '$PR_HEAD_REF'"
+if git ls-remote --exit-code "$DEV_REMOTE" "refs/heads/$IMPORT_BRANCH" >/dev/null 2>&1; then
+  die "Remote branch '$IMPORT_BRANCH' already exists on $DEV_REMOTE. Delete it first:
+  git push $DEV_REMOTE --delete '$IMPORT_BRANCH'"
 fi
 
 # ---------------------------------------------------------------------------
-# Temp dir — always cleaned up on exit
+# Temp dir — always deleted on exit (success or failure)
 # ---------------------------------------------------------------------------
 TMP="$(mktemp -d)"
-REMOTE_ADDED=false
-BRANCH_CREATED=false
-ORIG_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+trap 'rm -rf "$TMP"' EXIT
 
-cleanup() {
-  local exit_code=$?
-  info "Cleaning up ..."
-
-  if [[ "$BRANCH_CREATED" == true ]] && [[ $exit_code -ne 0 ]]; then
-    info "Removing partially created branch '$PR_HEAD_REF' due to error ..."
-    git checkout "$ORIG_BRANCH" --quiet 2>/dev/null || true
-    git branch -D "$PR_HEAD_REF" 2>/dev/null || true
-  fi
-
-  if [[ "$REMOTE_ADDED" == true ]]; then
-    git remote remove public-import 2>/dev/null || true
-  fi
-
-  rm -rf "$TMP"
-  info "Cleanup done."
-}
-trap cleanup EXIT
+CLONE_DIR="$TMP/clone"
 
 # ---------------------------------------------------------------------------
-# Clone the public repo into the temp dir and fetch the PR ref
+# Clone the private repo into the temp dir
 # ---------------------------------------------------------------------------
-info "Cloning public repo $PUBLIC_REPO into temp dir ..."
-git clone --no-tags --quiet "https://github.com/${PUBLIC_REPO}.git" "$TMP/public"
-
-info "Fetching pull/$PR/head from public repo ..."
-git -C "$TMP/public" fetch --quiet origin "pull/${PR}/head:pr-${PR}"
+info "Cloning private repo into temp dir ..."
+git clone --quiet "$DEV_SSH_URL" "$CLONE_DIR"
 
 # ---------------------------------------------------------------------------
-# Add temp clone as a remote in the dev repo and fetch the commits
+# Add the contributor's fork and fetch
 # ---------------------------------------------------------------------------
-info "Adding public-import remote ..."
-git remote add public-import "$TMP/public"
-REMOTE_ADDED=true
+info "Adding fork remote: $FORK_URL ..."
+git -C "$CLONE_DIR" remote add prsource "$FORK_URL"
 
-git fetch --quiet public-import "pr-${PR}:refs/remotes/public-import/pr-${PR}"
-
-# ---------------------------------------------------------------------------
-# Create target branch off of origin/master
-# ---------------------------------------------------------------------------
-info "Fetching $DEV_REMOTE/$BASE_BRANCH ..."
-git fetch --quiet "$DEV_REMOTE" "$BASE_BRANCH"
-
-info "Creating branch '$PR_HEAD_REF' from $DEV_REMOTE/$BASE_BRANCH ..."
-git checkout -b "$PR_HEAD_REF" "$DEV_REMOTE/$BASE_BRANCH" --quiet
-BRANCH_CREATED=true
+info "Fetching from fork ..."
+git -C "$CLONE_DIR" fetch --quiet prsource
 
 # ---------------------------------------------------------------------------
-# Cherry-pick commits in order
+# Create the import branch from the fork's PR branch
 # ---------------------------------------------------------------------------
-info "Cherry-picking $(echo "$COMMIT_OIDS" | wc -l | tr -d ' ') commit(s) ..."
-while IFS= read -r oid; do
-  info "  cherry-pick $oid ..."
-  if ! git cherry-pick -x "$oid"; then
-    echo ""
-    echo "CONFLICT during cherry-pick of $oid."
-    echo "Resolve conflicts, then run:"
-    echo "  git cherry-pick --continue"
-    echo "  git push -u $DEV_REMOTE $PR_HEAD_REF"
-    echo "  gh pr create --repo $DEV_REPO_SLUG --base $BASE_BRANCH --head $PR_HEAD_REF \\"
-    echo "    --title \"[import #$PR] $PR_TITLE\" --body \"Imports $PR_URL\""
-    # Don't let cleanup delete the branch — user needs it to resolve
-    BRANCH_CREATED=false
-    exit 1
-  fi
-done <<< "$COMMIT_OIDS"
+info "Creating branch '$IMPORT_BRANCH' from prsource/$PR_HEAD_REF ..."
+git -C "$CLONE_DIR" checkout -b "$IMPORT_BRANCH" "prsource/$PR_HEAD_REF" --quiet
 
 # ---------------------------------------------------------------------------
-# Push the branch
+# Push the import branch to the private repo
+# (master is never checked out — structural guarantee)
 # ---------------------------------------------------------------------------
-info "Pushing '$PR_HEAD_REF' to $DEV_REMOTE ..."
-git push --quiet -u "$DEV_REMOTE" "$PR_HEAD_REF"
+info "Pushing '$IMPORT_BRANCH' to private repo ..."
+git -C "$CLONE_DIR" push --quiet --set-upstream origin "$IMPORT_BRANCH"
 
 # ---------------------------------------------------------------------------
-# Open the PR
+# Temp dir is removed here by the EXIT trap
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Open the PR against the private repo
 # ---------------------------------------------------------------------------
 info "Opening PR against $DEV_REPO_SLUG:$BASE_BRANCH ..."
 
@@ -171,7 +147,8 @@ PR_IMPORT_BODY="$(cat <<EOF
 Imports ${PR_URL}
 
 **Original author:** @${PR_AUTHOR}
-**Commits cherry-picked:**
+**Fork branch:** \`${PR_FORK_OWNER}:${PR_HEAD_REF}\`
+**Commits:**
 $(echo "$COMMIT_OIDS" | sed 's/^/- /')
 
 ---
@@ -183,12 +160,9 @@ EOF
 NEW_PR_URL="$(gh pr create \
   --repo "$DEV_REPO_SLUG" \
   --base "$BASE_BRANCH" \
-  --head "$PR_HEAD_REF" \
+  --head "$IMPORT_BRANCH" \
   --title "$PR_IMPORT_TITLE" \
   --body "$PR_IMPORT_BODY")"
-
-# Success — don't roll back branch on cleanup
-BRANCH_CREATED=false
 
 echo ""
 echo "Done! New PR: $NEW_PR_URL"
