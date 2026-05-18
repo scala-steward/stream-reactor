@@ -227,7 +227,7 @@ object ToAvroDataConverter {
         value match {
           case b: Byte  => b.toInt
           case s: Short => s.toInt
-          case other    => other
+          case other => other
         }
       case _ => value
     }
