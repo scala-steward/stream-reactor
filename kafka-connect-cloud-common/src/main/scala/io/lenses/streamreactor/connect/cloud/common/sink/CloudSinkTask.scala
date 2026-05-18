@@ -37,6 +37,7 @@ import io.lenses.streamreactor.connect.cloud.common.sink.conversion.ValueToSinkD
 import io.lenses.streamreactor.connect.cloud.common.sink.optimization.AttachLatestSchemaOptimizer
 import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
 import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetricsRegistrar
+import io.lenses.streamreactor.connect.cloud.common.sink.metrics.StorageInterfaceWithMetrics
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.writer.WriterManager
 import io.lenses.streamreactor.connect.cloud.common.storage.FileMetadata
@@ -78,6 +79,7 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
   private[sink] var writerManager: WriterManager[MD] = _
   private var indexManager:        IndexManager      = _
   private var config:              C                 = _
+  private var metrics:             CloudSinkMetrics  = _
   private val attachLatestSchemaOptimizer = new AttachLatestSchemaOptimizer()
   implicit var connectorTaskId: ConnectorTaskId = _
 
@@ -121,14 +123,19 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
         //   NonFatal          → ConnectException        (RETRY wraps in RetriableException; NOOP swallows)
         error match {
           case _: FatalCloudSinkError =>
+            Option(metrics).foreach(_.incrementSinkErrorsFatalTotal())
             throw new FatalConnectException(error.message(), error.exception().orNull)
           case b: BatchCloudSinkError if b.fatal.nonEmpty =>
+            Option(metrics).foreach(_.incrementSinkErrorsFatalTotal())
             throw new FatalConnectException(error.message(), error.exception().orNull)
           case n: NonFatalCloudSinkError if !n.swallowable =>
+            Option(metrics).foreach(_.incrementSinkErrorsRetriableTotal())
             throw new RetriableIntegrityException(error.message(), error.exception().orNull)
           case b: BatchCloudSinkError if b.hasUnswallowable =>
+            Option(metrics).foreach(_.incrementSinkErrorsRetriableTotal())
             throw new RetriableIntegrityException(error.message(), error.exception().orNull)
           case _ =>
+            Option(metrics).foreach(_.incrementSinkErrorsNonFatalTotal())
             throw new ConnectException(error.message(), error.exception().orNull)
         }
       case Right(_) =>
@@ -171,6 +178,10 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
               .toList.sortBy(_._1).map { case (k, v) => s"$k=$v" }.mkString(";")}",
           )
 
+          metrics.incrementPutBatchesTotal()
+          metrics.addRecordsReceivedTotal(records.size().toLong)
+          if (records.isEmpty) metrics.incrementPutEmptyBatchesTotal()
+
           // a failure in recommitPending will prevent the processing of further records
           handleErrors(writerManager.recommitPending())
 
@@ -194,6 +205,7 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
               val messageValue = ValueToSinkDataConverter(record.value(), Option(record.valueSchema()))
               messageValue match {
                 case NullSinkData(_) if writerManager.shouldSkipNullValues() =>
+                  metrics.incrementNullRecordsSkippedTotal()
                   logger.debug(
                     "[{}] Skipping null value for tpo {}/{}/{}",
                     connectorTaskId.show,
@@ -229,6 +241,8 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
       }
       ()
     } { e =>
+      metrics.recordPutTimer(e)
+      metrics.setLastPutEpochMillis(System.currentTimeMillis())
       if (logMetrics) {
         logger.info(s"[${connectorTaskId.show}] put records=${records.size()} took $e ms")
       }
@@ -284,7 +298,10 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
             logger.debug(
               s"[${connectorTaskId.show}] Seeking to ${topicPartition.topic.value}-${topicPartition.partition}:${offset.map(_.value)}",
             )
-            offset.foreach(o => context.offset(topicPartition.toKafka, o.value))
+            offset.foreach { o =>
+              context.offset(topicPartition.toKafka, o.value)
+              Option(metrics).foreach(_.incrementSeekOnOpenAppliedTotal())
+            }
         }
       },
     )
@@ -308,6 +325,7 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
       Option(connectorTaskId).map(_.show).getOrElse("Unnamed"),
       partitions.size(),
     )
+    Option(metrics).foreach(_.incrementRebalanceClosesTotal())
 
     // Suspend background GC/sweep threads before closing writers. This is a best-effort
     // gate that prevents new scheduled invocations from starting during the close → open
@@ -360,13 +378,17 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
     props: Map[String, String],
   ): Either[Throwable, (IndexManager, WriterManager[MD], C)] =
     for {
-      config          <- convertPropsToConfig(connectorTaskId, props)
-      s3Client        <- createClient(config.connectionConfig)
-      storageInterface = createStorageInterface(connectorTaskId, config, s3Client)
+      config   <- convertPropsToConfig(connectorTaskId, props)
+      s3Client <- createClient(config.connectionConfig)
+      // metrics is created before storageInterface so the decorator can reference it.
+      // StorageInterfaceWithMetrics MUST be the outermost wrapper applied to the real
+      // implementation; do not add additional wrappers outside this decorator.
+      taskMetrics      = new CloudSinkMetrics()
+      rawStorageInterface = createStorageInterface(connectorTaskId, config, s3Client)
+      storageInterface    = new StorageInterfaceWithMetrics(rawStorageInterface, taskMetrics)
       _               <- setRetryInterval(config)
-      metrics          = new CloudSinkMetrics()
       (indexManager, writerManager) <- Try(
-        writerManagerCreator.from(config, metrics)(connectorTaskId, storageInterface),
+        writerManagerCreator.from(config, taskMetrics)(connectorTaskId, storageInterface),
       ).toEither
       // Init-failure teardown: tagged `Revoke` (harmless — `writers` is empty so the force
       // path is a no-op). Wraps each close in Try so neither masks the original failure.
@@ -383,12 +405,13 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
       // above is the last step that unwinds via left.map). A register failure
       // would otherwise leave indexManager's background threads and any
       // writerManager-held resources with no owner, so we close both explicitly.
-      _ <- Try(CloudSinkMetricsRegistrar.register(metrics, connectorTaskId)).toEither.left.map { err =>
+      _ <- Try(CloudSinkMetricsRegistrar.register(taskMetrics, connectorTaskId)).toEither.left.map { err =>
         closeOnFailure()
         err
       }
     } yield {
       logMetrics = config.logMetrics
+      metrics = taskMetrics
       (indexManager, writerManager, config)
     }
 

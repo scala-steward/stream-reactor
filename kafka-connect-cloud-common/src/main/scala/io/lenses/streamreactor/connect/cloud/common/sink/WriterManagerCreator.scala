@@ -135,7 +135,7 @@ class WriterManagerCreator[MD <: FileMetadata, SC <: CloudSinkConfig[_]] extends
           case None => FatalCloudSinkError("Can't find format choice in config", topicPartition).asLeft
         }
 
-    val pendingOperationsProcessors = new PendingOperationsProcessors(storageInterface)
+    val pendingOperationsProcessors = new PendingOperationsProcessors(storageInterface, metrics)
 
     val indexManager: IndexManager = config.indexOptions.map(io =>
       new IndexManagerV2(

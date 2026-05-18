@@ -34,6 +34,7 @@ import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.CopyOperation
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.DeleteOperation
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.FileOperation
+import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingOperationsProcessors
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState
@@ -57,8 +58,9 @@ class Writer[SM <: FileMetadata](
   formatWriterFn:              File => Either[SinkError, FormatWriter],
   schemaChangeDetector:        SchemaChangeDetector,
   pendingOperationsProcessors: PendingOperationsProcessors,
-  partitionKey:                Option[String] = None,
-  lastSeekedOffset:            Option[Offset] = None,
+  partitionKey:                Option[String]     = None,
+  lastSeekedOffset:            Option[Offset]     = None,
+  metrics:                     CloudSinkMetrics   = new CloudSinkMetrics(),
 )(
   implicit
   connectorTaskId: ConnectorTaskId,
@@ -92,6 +94,7 @@ class Writer[SM <: FileMetadata](
         case Right(_) =>
           writeState =
             writingState.update(messageDetail.offset, messageDetail.epochTimestamp, messageDetail.value.schema())
+          metrics.incrementRecordsWrittenTotal()
           ().asRight
       }
 
@@ -108,6 +111,7 @@ class Writer[SM <: FileMetadata](
         } yield writingState
         writingStateEither.flatMap { writingState =>
           writeState = writingState
+          metrics.incrementFilesOpenedTotal()
           innerMessageWrite(writingState)
         }
 
@@ -133,6 +137,9 @@ class Writer[SM <: FileMetadata](
         return ().asRight
     }
 
+    val commitStartMillis = System.currentTimeMillis()
+    metrics.incrementInFlightUploads()
+
     writeState match {
       case uploadState @ Uploading(commitState,
                                    file,
@@ -142,12 +149,13 @@ class Writer[SM <: FileMetadata](
                                    latestRecordTimestamp,
                                    recordCount,
           ) =>
+        val fileSize = file.length()
         val fnIndexUpdate: (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]] =
           partitionKey match {
             case Some(pk) => (tp, co, ps) => indexManager.updateForPartitionKey(tp, pk, co, ps)
             case None     => (tp, co, ps) => indexManager.update(tp, co, ps)
           }
-        for {
+        val result = for {
           key <- objectKeyBuilder.build(firstBufferedOffset,
                                         uncommittedOffset,
                                         earliestRecordTimestamp,
@@ -202,7 +210,21 @@ class Writer[SM <: FileMetadata](
             logger.debug(s"[{}] Writer.resetState: New state $writeState", connectorTaskId.show)
           }
         } yield ()
+        val elapsed = System.currentTimeMillis() - commitStartMillis
+        metrics.decrementInFlightUploads()
+        result match {
+          case Right(_) =>
+            metrics.recordCommitTimer(elapsed)
+            metrics.incrementFilesCommittedTotal()
+            metrics.addBytesWrittenTotal(fileSize)
+            metrics.addRecordsCommittedTotal(recordCount)
+            metrics.setLastCommitEpochMillis(System.currentTimeMillis())
+          case Left(_) =>
+            metrics.incrementFilesFailedTotal()
+        }
+        result
       case other =>
+        metrics.decrementInFlightUploads()
         FatalCloudSinkError(s"Other $other error detected, abort", topicPartition).asLeft
 
     }
@@ -235,8 +257,8 @@ class Writer[SM <: FileMetadata](
       case u: Uploading => Some(u.firstBufferedOffset)
     }
 
-  def shouldFlush: Boolean =
-    writeState match {
+  def shouldFlush: Boolean = {
+    val result = writeState match {
       case Writing(commitState, _, file, _, uncommittedOffset, _, _) => commitPolicy.shouldFlush(
           CloudCommitContext(
             topicPartition.withOffset(uncommittedOffset),
@@ -247,9 +269,13 @@ class Writer[SM <: FileMetadata](
             file.getName,
           ),
         )
-      case NoWriter(_) => false
+      case NoWriter(_)  => false
       case _: Uploading => false
     }
+    if (result) metrics.incrementFlushDecisionTrue()
+    else metrics.incrementFlushDecisionFalse()
+    result
+  }
 
   /**
    * If the offsets provided by Kafka Connect have already been processed, then they must be skipped to avoid duplicate records and protect the integrity of the data files.

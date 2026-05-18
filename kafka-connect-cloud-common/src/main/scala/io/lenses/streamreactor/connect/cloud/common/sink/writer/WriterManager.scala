@@ -146,6 +146,7 @@ class WriterManager[SM <: FileMetadata](
 
   def recommitPending(): Either[SinkError, Unit] = {
     logger.debug(s"[{}] Retry Pending", connectorTaskId.show)
+    metrics.incrementRecommitPendingInvocationsTotal()
     val result = writerCommitManager.commitPending()
     logger.debug(s"[{}] Retry Pending Complete", connectorTaskId.show)
     result
@@ -318,9 +319,10 @@ class WriterManager[SM <: FileMetadata](
     lastReturnedSafeOffset.clear()
     forceWriteAfterCleanUp.clear()
     metrics.clearAllMasterLockDirty()
-    // After every per-TP closePartition has run, refresh the writer-count gauge for the
-    // final value (in the steady-state path writers are now empty).
+    // After every per-TP closePartition has run, refresh the writer-count and oldest-file
+    // gauges for the final values (in the steady-state path writers are now empty).
     metrics.setWriterCount(writers.size)
+    updateOldestOpenFileMetrics()
   }
 
   /** `close(Stop)` — uses the `Stop` reason tag so `masterLockWriteForcedStop` is incremented. */
@@ -342,6 +344,7 @@ class WriterManager[SM <: FileMetadata](
             writeAndCommit(topicPartitionOffset, transformed, writer)
           }
         } else {
+          metrics.incrementDuplicateRecordsSkippedTotal()
           ().asRight
         }
     } yield resultIfNotSkipped
@@ -370,6 +373,7 @@ class WriterManager[SM <: FileMetadata](
       case Some(value: Schema) if writer.shouldRollover(value) =>
         // Schema rollover: flush all writers for the TP together to keep the format boundary
         // consistent. This is the one full-fan-out path; do NOT weaken to selective commit.
+        metrics.incrementSchemaRolloversTotal()
         writerCommitManager.commitForTopicPartition(topicPartition)
       case _ => ().asRight
     }
@@ -401,6 +405,7 @@ class WriterManager[SM <: FileMetadata](
               addToTpIndex(key, w)
               evictIdleWriters(key.topicPartition, Some(key))
               metrics.setWriterCount(writers.size)
+              updateOldestOpenFileMetrics()
               w
             }
       }
@@ -441,6 +446,7 @@ class WriterManager[SM <: FileMetadata](
         pendingOperationsProcessors,
         partitionKey,
         lastSeekedOffset,
+        metrics,
       )
     }
   }
@@ -685,6 +691,7 @@ class WriterManager[SM <: FileMetadata](
       metrics.incrementIdleWriterEvictions()
     }
     metrics.setWriterCount(writers.size)
+    updateOldestOpenFileMetrics()
   }
 
   private def addToTpIndex(key: MapKey, writer: Writer[SM]): Unit = {
@@ -697,6 +704,21 @@ class WriterManager[SM <: FileMetadata](
       bucket.remove(key)
       if (bucket.isEmpty) tpIndex.remove(key.topicPartition)
     }
+
+  /**
+   * Recomputes the creation timestamp of the oldest currently-open (Writing state) file
+   * and stores it in metrics so that `getOldestOpenFileAgeMillis` stays current.
+   * Call this after any writers map mutation (create, evict, close, commit).
+   */
+  private def updateOldestOpenFileMetrics(): Unit = {
+    val timestamps = writers.values.flatMap { w =>
+      w.currentWriteState match {
+        case Writing(cs, _, _, _, _, _, _) => Some(cs.createdTimestamp)
+        case _                             => None
+      }
+    }
+    metrics.setOldestOpenFileCreatedEpochMillis(if (timestamps.isEmpty) 0L else timestamps.min)
+  }
 
   private[writer] def writerCount: Int = writers.size
 
