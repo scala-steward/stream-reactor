@@ -420,21 +420,6 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
     metrics.getInFlightUploads shouldBe 1
   }
 
-  test("OldestOpenFileAgeMillis returns 0 when not set") {
-    metrics.getOldestOpenFileAgeMillis shouldBe 0L
-  }
-
-  test("OldestOpenFileAgeMillis returns positive value when oldest timestamp is set") {
-    metrics.setOldestOpenFileCreatedEpochMillis(System.currentTimeMillis() - 5000L)
-    metrics.getOldestOpenFileAgeMillis should be > 0L
-  }
-
-  test("OldestOpenFileAgeMillis returns 0 after oldest timestamp is cleared") {
-    metrics.setOldestOpenFileCreatedEpochMillis(System.currentTimeMillis() - 5000L)
-    metrics.setOldestOpenFileCreatedEpochMillis(0L)
-    metrics.getOldestOpenFileAgeMillis shouldBe 0L
-  }
-
   // =========================================================================
   // JMX attribute exposure for new attributes
   // =========================================================================

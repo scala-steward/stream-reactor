@@ -990,7 +990,6 @@ Full attribute list for uploads (same pattern for Copy/Delete/Get/List):
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `InFlightUploads` | gauge | Writers currently in `Uploading` state. Sustained elevation signals slow storage or a stalled retry loop. |
-| `OldestOpenFileAgeMillis` | gauge | Age of the oldest currently-open (Writing state) file in ms. 0 if no files are open. Alert if this consistently exceeds `flush.interval` + grace period. |
 | `MillisSinceLastCommit` | gauge | Milliseconds since the last successful commit. 0 before first commit. Primary "task stuck" signal — pair with `FilesCommittedTotal` rate. |
 
 ### Existing attributes (unchanged)

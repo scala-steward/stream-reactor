@@ -403,14 +403,6 @@ trait CloudSinkMetricsMBean {
   def getInFlightUploads: Int
 
   /**
-   * Age in milliseconds of the oldest open (Writing state) file across all writers,
-   * measured from the file's creation time to now.  Returns 0 if there are no open files.
-   * Use with `flush.interval` alerting: if this value consistently exceeds the configured
-   * interval plus a grace period, the task may be stuck.
-   */
-  def getOldestOpenFileAgeMillis: Long
-
-  /**
    * Milliseconds elapsed since the last successful file commit.
    * Returns 0 before the first commit.  The primary liveness signal for an alert on
    * "task stuck" — pair with `getFilesCommittedTotal` rate to distinguish "busy but slow"
@@ -509,8 +501,7 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
 
   // --- F. Current state gauges ---
 
-  private val inFlightUploads                  = new AtomicInteger(0)
-  private val oldestOpenFileCreatedEpochMillis = new AtomicLong(0L)
+  private val inFlightUploads = new AtomicInteger(0)
 
   // =========================================================================
   // Getters — exposed via JMX
@@ -628,11 +619,6 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   // F. Current state gauges
   override def getInFlightUploads: Int = inFlightUploads.get()
 
-  override def getOldestOpenFileAgeMillis: Long = {
-    val created = oldestOpenFileCreatedEpochMillis.get()
-    if (created == 0L) 0L else System.currentTimeMillis() - created
-  }
-
   override def getMillisSinceLastCommit: Long = {
     val last = lastCommitEpochMillis.get()
     if (last == 0L) 0L else System.currentTimeMillis() - last
@@ -744,5 +730,4 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   // F. State gauge mutators
   def incrementInFlightUploads(): Unit = { val _ = inFlightUploads.incrementAndGet() }
   def decrementInFlightUploads(): Unit = { val _ = inFlightUploads.decrementAndGet() }
-  def setOldestOpenFileCreatedEpochMillis(ts: Long): Unit = oldestOpenFileCreatedEpochMillis.set(ts)
 }
