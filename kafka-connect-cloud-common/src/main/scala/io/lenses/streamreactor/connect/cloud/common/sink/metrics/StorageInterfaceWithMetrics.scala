@@ -50,19 +50,46 @@ class StorageInterfaceWithMetrics[SM <: FileMetadata](
   metrics:  CloudSinkMetrics,
 ) extends StorageInterface[SM] {
 
-  private def timed[A](f: => A): (A, Long) = {
+  /**
+   * Runs `f`, records elapsed time and whether the call failed (Left or thrown exception) via
+   * `record`, then returns (or rethrows) the result.  Always fires `record` — even on thrown
+   * exceptions — matching the contract of `Metrics.withTimer`.
+   */
+  private def timedWithErr[A, B](record: (Long, Boolean) => Unit)(f: => Either[A, B]): Either[A, B] = {
     val start  = System.currentTimeMillis()
-    val result = f
-    (result, System.currentTimeMillis() - start)
+    var failed = false
+    try {
+      val result = f
+      failed = result.isLeft
+      result
+    } catch {
+      case t: Throwable =>
+        failed = true
+        throw t
+    } finally {
+      record(System.currentTimeMillis() - start, failed)
+    }
   }
+
+  /**
+   * Runs `f`, calls `recordErr` if the result is Left or if `f` throws, then returns (or
+   * rethrows) the result.  Used for paths where only error counting — not latency — is exposed.
+   */
+  private def countErr[A, B](recordErr: () => Unit)(f: => Either[A, B]): Either[A, B] =
+    try {
+      val result = f
+      if (result.isLeft) recordErr()
+      result
+    } catch {
+      case t: Throwable =>
+        recordErr()
+        throw t
+    }
 
   override def system(): String = delegate.system()
 
-  override def uploadFile(source: UploadableFile, bucket: String, path: String): Either[UploadError, String] = {
-    val (result, elapsed) = timed(delegate.uploadFile(source, bucket, path))
-    metrics.recordStorageUpload(elapsed, result.isLeft)
-    result
-  }
+  override def uploadFile(source: UploadableFile, bucket: String, path: String): Either[UploadError, String] =
+    timedWithErr(metrics.recordStorageUpload)(delegate.uploadFile(source, bucket, path))
 
   override def close(): Unit = delegate.close()
 
@@ -80,20 +107,14 @@ class StorageInterfaceWithMetrics[SM <: FileMetadata](
   override def listFileMetaRecursive(
     bucket: String,
     prefix: Option[String],
-  ): Either[FileListError, Option[ListOfMetadataResponse[SM]]] = {
-    val result = delegate.listFileMetaRecursive(bucket, prefix)
-    if (result.isLeft) metrics.recordStorageListError()
-    result
-  }
+  ): Either[FileListError, Option[ListOfMetadataResponse[SM]]] =
+    countErr(() => metrics.recordStorageListError())(delegate.listFileMetaRecursive(bucket, prefix))
 
   override def listKeysRecursive(
     bucket: String,
     prefix: Option[String],
-  ): Either[FileListError, Option[ListOfKeysResponse[SM]]] = {
-    val result = delegate.listKeysRecursive(bucket, prefix)
-    if (result.isLeft) metrics.recordStorageListError()
-    result
-  }
+  ): Either[FileListError, Option[ListOfKeysResponse[SM]]] =
+    countErr(() => metrics.recordStorageListError())(delegate.listKeysRecursive(bucket, prefix))
 
   override def seekToFile(
     bucket:       String,
@@ -107,11 +128,8 @@ class StorageInterfaceWithMetrics[SM <: FileMetadata](
   override def getBlobAsString(bucket: String, path: String): Either[FileLoadError, String] =
     delegate.getBlobAsString(bucket, path)
 
-  override def getBlobAsStringAndEtag(bucket: String, path: String): Either[FileLoadError, (String, String)] = {
-    val (result, elapsed) = timed(delegate.getBlobAsStringAndEtag(bucket, path))
-    metrics.recordStorageGet(elapsed, result.isLeft)
-    result
-  }
+  override def getBlobAsStringAndEtag(bucket: String, path: String): Either[FileLoadError, (String, String)] =
+    timedWithErr(metrics.recordStorageGet)(delegate.getBlobAsStringAndEtag(bucket, path))
 
   override def getMetadata(bucket: String, path: String): Either[FileLoadError, ObjectMetadata] =
     delegate.getMetadata(bucket, path)
@@ -129,17 +147,11 @@ class StorageInterfaceWithMetrics[SM <: FileMetadata](
   ): Either[UploadError, ObjectWithETag[O]] =
     delegate.writeBlobToFile(bucket, path, objectProtection)
 
-  override def deleteFiles(bucket: String, files: Seq[String]): Either[FileDeleteError, Unit] = {
-    val result = delegate.deleteFiles(bucket, files)
-    if (result.isLeft) metrics.recordStorageDeleteError()
-    result
-  }
+  override def deleteFiles(bucket: String, files: Seq[String]): Either[FileDeleteError, Unit] =
+    countErr(() => metrics.recordStorageDeleteError())(delegate.deleteFiles(bucket, files))
 
-  override def deleteFile(bucket: String, file: String, eTag: String): Either[FileDeleteError, Unit] = {
-    val result = delegate.deleteFile(bucket, file, eTag)
-    if (result.isLeft) metrics.recordStorageDeleteError()
-    result
-  }
+  override def deleteFile(bucket: String, file: String, eTag: String): Either[FileDeleteError, Unit] =
+    countErr(() => metrics.recordStorageDeleteError())(delegate.deleteFile(bucket, file, eTag))
 
   override def mvFile(
     oldBucket: String,
@@ -147,11 +159,8 @@ class StorageInterfaceWithMetrics[SM <: FileMetadata](
     newBucket: String,
     newPath:   String,
     maybeEtag: Option[String],
-  ): Either[FileMoveError, Unit] = {
-    val (result, elapsed) = timed(delegate.mvFile(oldBucket, oldPath, newBucket, newPath, maybeEtag))
-    metrics.recordStorageCopy(elapsed, result.isLeft)
-    result
-  }
+  ): Either[FileMoveError, Unit] =
+    timedWithErr(metrics.recordStorageCopy)(delegate.mvFile(oldBucket, oldPath, newBucket, newPath, maybeEtag))
 
   override def createDirectoryIfNotExists(bucket: String, path: String): Either[FileCreateError, Unit] =
     delegate.createDirectoryIfNotExists(bucket, path)

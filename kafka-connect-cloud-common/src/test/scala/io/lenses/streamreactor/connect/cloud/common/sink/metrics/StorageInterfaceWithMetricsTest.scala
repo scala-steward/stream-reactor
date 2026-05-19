@@ -68,18 +68,28 @@ class StorageInterfaceWithMetricsTest
   }
 
   private class StubStorageInterface(
-    uploadResult:   Either[UploadError, String]                                             = Right("etag-123"),
-    mvResult:       Either[FileMoveError, Unit]                                             = Right(()),
-    deleteResult:   Either[FileDeleteError, Unit]                                           = Right(()),
-    deleteFilesRes: Either[FileDeleteError, Unit]                                           = Right(()),
-    getBlobResult:  Either[FileLoadError, (String, String)]                                 = Right(("content", "etag-abc")),
-    listKeysResult: Either[FileListError, Option[ListOfKeysResponse[StubFileMetadata]]]     = Right(None),
-    listMetaResult: Either[FileListError, Option[ListOfMetadataResponse[StubFileMetadata]]] = Right(None),
+    uploadResult:       Either[UploadError, String]                                             = Right("etag-123"),
+    mvResult:           Either[FileMoveError, Unit]                                             = Right(()),
+    deleteResult:       Either[FileDeleteError, Unit]                                           = Right(()),
+    deleteFilesRes:     Either[FileDeleteError, Unit]                                           = Right(()),
+    getBlobResult:      Either[FileLoadError, (String, String)]                                 = Right(("content", "etag-abc")),
+    listKeysResult:     Either[FileListError, Option[ListOfKeysResponse[StubFileMetadata]]]     = Right(None),
+    listMetaResult:     Either[FileListError, Option[ListOfMetadataResponse[StubFileMetadata]]] = Right(None),
+    throwOnUpload:      Option[Throwable]                                                       = None,
+    throwOnMv:          Option[Throwable]                                                       = None,
+    throwOnDelete:      Option[Throwable]                                                       = None,
+    throwOnDeleteFiles: Option[Throwable]                                                       = None,
+    throwOnGetBlob:     Option[Throwable]                                                       = None,
+    throwOnListKeys:    Option[Throwable]                                                       = None,
+    throwOnListMeta:    Option[Throwable]                                                       = None,
   ) extends StorageInterface[StubFileMetadata] {
+
+    private def orThrow[A](maybeThrow: Option[Throwable], value: => A): A =
+      maybeThrow.fold(value)(t => throw t)
 
     override def system(): String = "stub"
     override def uploadFile(source: UploadableFile, bucket: String, path: String): Either[UploadError, String] =
-      uploadResult
+      orThrow(throwOnUpload, uploadResult)
     override def close(): Unit = ()
     override def pathExists(bucket: String, path: String): Either[PathError, Boolean] = Right(false)
     override def list(
@@ -93,19 +103,19 @@ class StorageInterfaceWithMetricsTest
       bucket: String,
       prefix: Option[String],
     ): Either[FileListError, Option[ListOfMetadataResponse[StubFileMetadata]]] =
-      listMetaResult
+      orThrow(throwOnListMeta, listMetaResult)
     override def listKeysRecursive(
       bucket: String,
       prefix: Option[String],
     ): Either[FileListError, Option[ListOfKeysResponse[StubFileMetadata]]] =
-      listKeysResult
+      orThrow(throwOnListKeys, listKeysResult)
     override def seekToFile(bucket: String, fileName: String, lastModified: Option[Instant]): Option[StubFileMetadata] =
       None
     override def getBlob(bucket: String, path: String): Either[FileLoadError, InputStream] =
       Right(InputStream.nullInputStream())
     override def getBlobAsString(bucket:        String, path: String): Either[FileLoadError, String] = Right("")
     override def getBlobAsStringAndEtag(bucket: String, path: String): Either[FileLoadError, (String, String)] =
-      getBlobResult
+      orThrow(throwOnGetBlob, getBlobResult)
     override def getMetadata(bucket: String, path: String): Either[FileLoadError, ObjectMetadata] =
       Right(ObjectMetadata(0L, Instant.EPOCH))
     override def writeStringToFile(bucket: String, path: String, data: UploadableString): Either[UploadError, Unit] =
@@ -119,15 +129,17 @@ class StorageInterfaceWithMetricsTest
       encoder: io.circe.Encoder[O],
     ): Either[UploadError, ObjectWithETag[O]] =
       Left(UploadFailedError(new RuntimeException("not implemented in stub"), new File(".")))
-    override def deleteFiles(bucket: String, files: Seq[String]): Either[FileDeleteError, Unit] = deleteFilesRes
-    override def deleteFile(bucket:  String, file:  String, eTag: String): Either[FileDeleteError, Unit] = deleteResult
+    override def deleteFiles(bucket: String, files: Seq[String]): Either[FileDeleteError, Unit] =
+      orThrow(throwOnDeleteFiles, deleteFilesRes)
+    override def deleteFile(bucket: String, file: String, eTag: String): Either[FileDeleteError, Unit] =
+      orThrow(throwOnDelete, deleteResult)
     override def mvFile(
       oldBucket: String,
       oldPath:   String,
       newBucket: String,
       newPath:   String,
       maybeEtag: Option[String],
-    ): Either[FileMoveError, Unit] = mvResult
+    ): Either[FileMoveError, Unit] = orThrow(throwOnMv, mvResult)
     override def createDirectoryIfNotExists(bucket: String, path: String): Either[FileCreateError, Unit] = Right(())
     override def touchFile(bucket:                  String, path: String): Either[FileTouchError, Unit]  = Right(())
   }
@@ -279,5 +291,82 @@ class StorageInterfaceWithMetricsTest
     metrics.getStorageDeleteErrorsTotal shouldBe 0L
     metrics.getStorageGetTimerCount shouldBe 0L
     metrics.getStorageListErrorsTotal shouldBe 0L
+  }
+
+  // -------------------------------------------------------------------------
+  // Unchecked exception paths — timedWithErr / countErr must still record
+  // -------------------------------------------------------------------------
+
+  test("uploadFile thrown exception: timer and error counter still recorded, exception rethrown") {
+    val boom      = new RuntimeException("transport failure")
+    val stub      = new StubStorageInterface(throwOnUpload = Some(boom))
+    val decorator = new StorageInterfaceWithMetrics(stub, metrics)
+
+    val caught = intercept[RuntimeException](decorator.uploadFile(makeUploadFile(), "b", "k"))
+    caught shouldBe boom
+    metrics.getStorageUploadTimerCount shouldBe 1L
+    metrics.getStorageUploadErrorsTotal shouldBe 1L
+  }
+
+  test("mvFile thrown exception: copy timer and error counter still recorded, exception rethrown") {
+    val boom      = new RuntimeException("network reset")
+    val stub      = new StubStorageInterface(throwOnMv = Some(boom))
+    val decorator = new StorageInterfaceWithMetrics(stub, metrics)
+
+    val caught = intercept[RuntimeException](decorator.mvFile("b", "src", "b", "dst", None))
+    caught shouldBe boom
+    metrics.getStorageCopyTimerCount shouldBe 1L
+    metrics.getStorageCopyErrorsTotal shouldBe 1L
+  }
+
+  test("getBlobAsStringAndEtag thrown exception: get timer and error counter still recorded, exception rethrown") {
+    val boom      = new RuntimeException("read timeout")
+    val stub      = new StubStorageInterface(throwOnGetBlob = Some(boom))
+    val decorator = new StorageInterfaceWithMetrics(stub, metrics)
+
+    val caught = intercept[RuntimeException](decorator.getBlobAsStringAndEtag("b", "p"))
+    caught shouldBe boom
+    metrics.getStorageGetTimerCount shouldBe 1L
+    metrics.getStorageGetErrorsTotal shouldBe 1L
+  }
+
+  test("deleteFile thrown exception: delete error counter still recorded, exception rethrown") {
+    val boom      = new RuntimeException("connection refused")
+    val stub      = new StubStorageInterface(throwOnDelete = Some(boom))
+    val decorator = new StorageInterfaceWithMetrics(stub, metrics)
+
+    val caught = intercept[RuntimeException](decorator.deleteFile("b", "f", "etag"))
+    caught shouldBe boom
+    metrics.getStorageDeleteErrorsTotal shouldBe 1L
+  }
+
+  test("deleteFiles thrown exception: delete error counter still recorded, exception rethrown") {
+    val boom      = new RuntimeException("bulk delete failure")
+    val stub      = new StubStorageInterface(throwOnDeleteFiles = Some(boom))
+    val decorator = new StorageInterfaceWithMetrics(stub, metrics)
+
+    val caught = intercept[RuntimeException](decorator.deleteFiles("b", Seq("f1", "f2")))
+    caught shouldBe boom
+    metrics.getStorageDeleteErrorsTotal shouldBe 1L
+  }
+
+  test("listKeysRecursive thrown exception: list error counter still recorded, exception rethrown") {
+    val boom      = new RuntimeException("list timeout")
+    val stub      = new StubStorageInterface(throwOnListKeys = Some(boom))
+    val decorator = new StorageInterfaceWithMetrics(stub, metrics)
+
+    val caught = intercept[RuntimeException](decorator.listKeysRecursive("b", None))
+    caught shouldBe boom
+    metrics.getStorageListErrorsTotal shouldBe 1L
+  }
+
+  test("listFileMetaRecursive thrown exception: list error counter still recorded, exception rethrown") {
+    val boom      = new RuntimeException("meta list timeout")
+    val stub      = new StubStorageInterface(throwOnListMeta = Some(boom))
+    val decorator = new StorageInterfaceWithMetrics(stub, metrics)
+
+    val caught = intercept[RuntimeException](decorator.listFileMetaRecursive("b", None))
+    caught shouldBe boom
+    metrics.getStorageListErrorsTotal shouldBe 1L
   }
 }
