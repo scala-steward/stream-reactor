@@ -139,94 +139,94 @@ class Writer[SM <: FileMetadata](
 
     val commitStartMillis = System.currentTimeMillis()
     metrics.incrementInFlightUploads()
-
-    writeState match {
-      case uploadState @ Uploading(commitState,
-                                   file,
-                                   firstBufferedOffset,
-                                   uncommittedOffset,
-                                   earliestRecordTimestamp,
-                                   latestRecordTimestamp,
-                                   recordCount,
-          ) =>
-        val fileSize = file.length()
-        val fnIndexUpdate: (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]] =
-          partitionKey match {
-            case Some(pk) => (tp, co, ps) => indexManager.updateForPartitionKey(tp, pk, co, ps)
-            case None     => (tp, co, ps) => indexManager.update(tp, co, ps)
-          }
-        val result = for {
-          key <- objectKeyBuilder.build(firstBufferedOffset,
-                                        uncommittedOffset,
-                                        earliestRecordTimestamp,
-                                        latestRecordTimestamp,
-                                        recordCount,
-          )
-          path <- key.path.toRight(NonFatalCloudSinkError("No path exists within cloud location"))
-          pendingOperations =
-            if (indexManager.indexingEnabled) {
-              val tempFileUuid = UUID.randomUUID().toString
-              val tempFileName = path.prependedAll(
-                s".temp-upload/${topicPartition.topic}/${topicPartition.partition}/$tempFileUuid",
-              )
-
-              NonEmptyList.of[FileOperation](
-                UploadOperation(key.bucket, file, tempFileName),
-                CopyOperation(key.bucket, tempFileName, path, "placeholder"),
-                DeleteOperation(key.bucket, tempFileName, "placeholder"),
-              )
-            } else
-              NonEmptyList.of[FileOperation](
-                UploadOperation(key.bucket, file, path),
-              )
-
-          newOffset <- pendingOperationsProcessors.processPendingOperations(
-            topicPartition,
-            getCommittedOffset,
-            PendingState(uncommittedOffset, pendingOperations),
-            fnIndexUpdate,
-            escalateOnCancel = true,
-            partitionKey     = partitionKey,
-            stagingFile      = Some(file),
-          )
-          _ = {
-            logger.debug(s"[{}] Writer.resetState: Resetting state $writeState", connectorTaskId.show)
-            writeState = uploadState.toNoWriter(newOffset)
-            // The cloud commit has already succeeded at this point. A failure to
-            // delete the local temp file is a hygiene issue (disk leak) -- not a
-            // correctness issue -- so we must not propagate it as a FatalCloudSinkError.
-            // Doing so would fail the task AFTER data was durably written, which risks
-            // re-running the upload on restart and violating at-most-once for the
-            // same record offsets.
-            Try(file.delete()) match {
-              case Success(_) =>
-              case Failure(e) =>
-                logger.warn(
-                  s"[${connectorTaskId.show}] Failed to delete temp file ${file.getAbsolutePath} after successful commit; " +
-                    s"continuing (the cloud commit already succeeded)",
-                  e,
-                )
+    try {
+      writeState match {
+        case uploadState @ Uploading(commitState,
+                                     file,
+                                     firstBufferedOffset,
+                                     uncommittedOffset,
+                                     earliestRecordTimestamp,
+                                     latestRecordTimestamp,
+                                     recordCount,
+            ) =>
+          val fileSize = file.length()
+          val fnIndexUpdate: (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]] =
+            partitionKey match {
+              case Some(pk) => (tp, co, ps) => indexManager.updateForPartitionKey(tp, pk, co, ps)
+              case None     => (tp, co, ps) => indexManager.update(tp, co, ps)
             }
-            logger.debug(s"[{}] Writer.resetState: New state $writeState", connectorTaskId.show)
-          }
-        } yield ()
-        val elapsed = System.currentTimeMillis() - commitStartMillis
-        metrics.decrementInFlightUploads()
-        result match {
-          case Right(_) =>
-            metrics.recordCommitTimer(elapsed)
-            metrics.incrementFilesCommittedTotal()
-            metrics.addBytesWrittenTotal(fileSize)
-            metrics.addRecordsCommittedTotal(recordCount)
-            metrics.setLastCommitEpochMillis(System.currentTimeMillis())
-          case Left(_) =>
-            metrics.incrementFilesFailedTotal()
-        }
-        result
-      case other =>
-        metrics.decrementInFlightUploads()
-        FatalCloudSinkError(s"Other $other error detected, abort", topicPartition).asLeft
+          val result = for {
+            key <- objectKeyBuilder.build(firstBufferedOffset,
+                                          uncommittedOffset,
+                                          earliestRecordTimestamp,
+                                          latestRecordTimestamp,
+                                          recordCount,
+            )
+            path <- key.path.toRight(NonFatalCloudSinkError("No path exists within cloud location"))
+            pendingOperations =
+              if (indexManager.indexingEnabled) {
+                val tempFileUuid = UUID.randomUUID().toString
+                val tempFileName = path.prependedAll(
+                  s".temp-upload/${topicPartition.topic}/${topicPartition.partition}/$tempFileUuid",
+                )
 
+                NonEmptyList.of[FileOperation](
+                  UploadOperation(key.bucket, file, tempFileName),
+                  CopyOperation(key.bucket, tempFileName, path, "placeholder"),
+                  DeleteOperation(key.bucket, tempFileName, "placeholder"),
+                )
+              } else
+                NonEmptyList.of[FileOperation](
+                  UploadOperation(key.bucket, file, path),
+                )
+
+            newOffset <- pendingOperationsProcessors.processPendingOperations(
+              topicPartition,
+              getCommittedOffset,
+              PendingState(uncommittedOffset, pendingOperations),
+              fnIndexUpdate,
+              escalateOnCancel = true,
+              partitionKey     = partitionKey,
+              stagingFile      = Some(file),
+            )
+            _ = {
+              logger.debug(s"[{}] Writer.resetState: Resetting state $writeState", connectorTaskId.show)
+              writeState = uploadState.toNoWriter(newOffset)
+              // The cloud commit has already succeeded at this point. A failure to
+              // delete the local temp file is a hygiene issue (disk leak) -- not a
+              // correctness issue -- so we must not propagate it as a FatalCloudSinkError.
+              // Doing so would fail the task AFTER data was durably written, which risks
+              // re-running the upload on restart and violating at-most-once for the
+              // same record offsets.
+              Try(file.delete()) match {
+                case Success(_) =>
+                case Failure(e) =>
+                  logger.warn(
+                    s"[${connectorTaskId.show}] Failed to delete temp file ${file.getAbsolutePath} after successful commit; " +
+                      s"continuing (the cloud commit already succeeded)",
+                    e,
+                  )
+              }
+              logger.debug(s"[{}] Writer.resetState: New state $writeState", connectorTaskId.show)
+            }
+          } yield ()
+          val elapsed = System.currentTimeMillis() - commitStartMillis
+          result match {
+            case Right(_) =>
+              metrics.recordCommitTimer(elapsed)
+              metrics.incrementFilesCommittedTotal()
+              metrics.addBytesWrittenTotal(fileSize)
+              metrics.addRecordsCommittedTotal(recordCount)
+              metrics.setLastCommitEpochMillis(System.currentTimeMillis())
+            case Left(_) =>
+              metrics.incrementFilesFailedTotal()
+          }
+          result
+        case other =>
+          FatalCloudSinkError(s"Other $other error detected, abort", topicPartition).asLeft
+      }
+    } finally {
+      metrics.decrementInFlightUploads()
     }
   }
 
@@ -257,22 +257,19 @@ class Writer[SM <: FileMetadata](
       case u: Uploading => Some(u.firstBufferedOffset)
     }
 
-  def shouldFlush: Boolean = {
-    val result = writeState match {
-      case Writing(commitState, _, file, _, uncommittedOffset, _, _) => commitPolicy.shouldFlush(
-          CloudCommitContext(
-            topicPartition.withOffset(uncommittedOffset),
-            commitState.recordCount,
-            commitState.lastKnownFileSize,
-            commitState.createdTimestamp,
-            commitState.lastFlushedTime,
-            file.getName,
-          ),
-        )
-      case NoWriter(_) => false
-      case _: Uploading => false
-    }
-    result
+  def shouldFlush: Boolean = writeState match {
+    case Writing(commitState, _, file, _, uncommittedOffset, _, _) => commitPolicy.shouldFlush(
+        CloudCommitContext(
+          topicPartition.withOffset(uncommittedOffset),
+          commitState.recordCount,
+          commitState.lastKnownFileSize,
+          commitState.createdTimestamp,
+          commitState.lastFlushedTime,
+          file.getName,
+        ),
+      )
+    case NoWriter(_)  => false
+    case _: Uploading => false
   }
 
   /**

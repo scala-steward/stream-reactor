@@ -352,16 +352,14 @@ class WriterManager[SM <: FileMetadata](
     topicPartitionOffset: TopicPartitionOffset,
     messageDetail:        MessageDetail,
     writer:               Writer[SM],
-  ): Either[SinkError, Unit] = {
-    val result = for {
+  ): Either[SinkError, Unit] =
+    for {
       // commitException can not be recovered from
       _ <- rollOverTopicPartitionWriters(writer, topicPartitionOffset.toTopicPartition, messageDetail)
       // a processErr can potentially be recovered from in the next iteration.  Can be due to network problems
       _         <- writer.write(messageDetail)
       commitRes <- writerCommitManager.commitFlushableWritersForTopicPartition(topicPartitionOffset.toTopicPartition)
     } yield commitRes
-    result
-  }
 
   private def rollOverTopicPartitionWriters(
     writer:         Writer[SM],
