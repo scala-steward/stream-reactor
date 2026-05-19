@@ -383,10 +383,10 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
       // metrics is created before storageInterface so the decorator can reference it.
       // StorageInterfaceWithMetrics MUST be the outermost wrapper applied to the real
       // implementation; do not add additional wrappers outside this decorator.
-      taskMetrics      = new CloudSinkMetrics()
+      taskMetrics         = new CloudSinkMetrics()
       rawStorageInterface = createStorageInterface(connectorTaskId, config, s3Client)
       storageInterface    = new StorageInterfaceWithMetrics(rawStorageInterface, taskMetrics)
-      _               <- setRetryInterval(config)
+      _                  <- setRetryInterval(config)
       (indexManager, writerManager) <- Try(
         writerManagerCreator.from(config, taskMetrics)(connectorTaskId, storageInterface),
       ).toEither
@@ -411,7 +411,7 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
       }
     } yield {
       logMetrics = config.logMetrics
-      metrics = taskMetrics
+      metrics    = taskMetrics
       (indexManager, writerManager, config)
     }
 

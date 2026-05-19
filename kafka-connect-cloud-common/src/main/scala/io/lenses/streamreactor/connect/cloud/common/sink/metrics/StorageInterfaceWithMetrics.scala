@@ -123,7 +123,10 @@ class StorageInterfaceWithMetrics[SM <: FileMetadata](
     bucket:           String,
     path:             String,
     objectProtection: ObjectProtection[O],
-  )(implicit encoder: Encoder[O]): Either[UploadError, ObjectWithETag[O]] =
+  )(
+    implicit
+    encoder: Encoder[O],
+  ): Either[UploadError, ObjectWithETag[O]] =
     delegate.writeBlobToFile(bucket, path, objectProtection)
 
   override def deleteFiles(bucket: String, files: Seq[String]): Either[FileDeleteError, Unit] = {

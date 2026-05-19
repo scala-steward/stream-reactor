@@ -25,20 +25,20 @@ class OpTimerTest extends AnyFunSuiteLike with Matchers {
 
   test("defaults to zero before any observation") {
     val t = new OpTimer()
-    t.count      shouldBe 0L
-    t.sumMillis  shouldBe 0L
-    t.maxMillis  shouldBe 0L
-    t.minMillis  shouldBe 0L
+    t.count shouldBe 0L
+    t.sumMillis shouldBe 0L
+    t.maxMillis shouldBe 0L
+    t.minMillis shouldBe 0L
     t.lastMillis shouldBe 0L
   }
 
   test("single observation is reflected in all fields") {
     val t = new OpTimer()
     t.record(42L)
-    t.count      shouldBe 1L
-    t.sumMillis  shouldBe 42L
-    t.maxMillis  shouldBe 42L
-    t.minMillis  shouldBe 42L
+    t.count shouldBe 1L
+    t.sumMillis shouldBe 42L
+    t.maxMillis shouldBe 42L
+    t.minMillis shouldBe 42L
     t.lastMillis shouldBe 42L
   }
 
@@ -47,7 +47,7 @@ class OpTimerTest extends AnyFunSuiteLike with Matchers {
     t.record(10L)
     t.record(20L)
     t.record(30L)
-    t.count     shouldBe 3L
+    t.count shouldBe 3L
     t.sumMillis shouldBe 60L
   }
 
@@ -78,19 +78,19 @@ class OpTimerTest extends AnyFunSuiteLike with Matchers {
   test("zero observation is valid and does not corrupt accumulators") {
     val t = new OpTimer()
     t.record(0L)
-    t.count      shouldBe 1L
-    t.sumMillis  shouldBe 0L
-    t.maxMillis  shouldBe 0L
-    t.minMillis  shouldBe 0L
+    t.count shouldBe 1L
+    t.sumMillis shouldBe 0L
+    t.maxMillis shouldBe 0L
+    t.minMillis shouldBe 0L
     t.lastMillis shouldBe 0L
   }
 
   test("concurrent records are all counted (thread-safety)") {
-    val numThreads = 8
+    val numThreads    = 8
     val recsPerThread = 1000
-    val t = new OpTimer()
-    val executor = Executors.newFixedThreadPool(numThreads)
-    val latch = new CountDownLatch(numThreads)
+    val t             = new OpTimer()
+    val executor      = Executors.newFixedThreadPool(numThreads)
+    val latch         = new CountDownLatch(numThreads)
 
     (1 to numThreads).foreach { _ =>
       executor.submit(new Runnable {
@@ -103,7 +103,7 @@ class OpTimerTest extends AnyFunSuiteLike with Matchers {
     latch.await()
     executor.shutdown()
 
-    t.count     shouldBe (numThreads * recsPerThread).toLong
+    t.count shouldBe (numThreads * recsPerThread).toLong
     t.sumMillis shouldBe (numThreads * recsPerThread).toLong
     t.minMillis shouldBe 1L
     t.maxMillis shouldBe 1L

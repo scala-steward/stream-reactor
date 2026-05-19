@@ -57,7 +57,7 @@ class StorageInterfaceWithMetricsTest
   // -------------------------------------------------------------------------
 
   private class StubFileMetadata extends FileMetadata {
-    override def file: String = "stub"
+    override def file:         String  = "stub"
     override def lastModified: Instant = Instant.EPOCH
   }
 
@@ -68,12 +68,12 @@ class StorageInterfaceWithMetricsTest
   }
 
   private class StubStorageInterface(
-    uploadResult:   Either[UploadError, String]                         = Right("etag-123"),
-    mvResult:       Either[FileMoveError, Unit]                         = Right(()),
-    deleteResult:   Either[FileDeleteError, Unit]                       = Right(()),
-    deleteFilesRes: Either[FileDeleteError, Unit]                       = Right(()),
-    getBlobResult:  Either[FileLoadError, (String, String)]             = Right(("content", "etag-abc")),
-    listKeysResult: Either[FileListError, Option[ListOfKeysResponse[StubFileMetadata]]] = Right(None),
+    uploadResult:   Either[UploadError, String]                                             = Right("etag-123"),
+    mvResult:       Either[FileMoveError, Unit]                                             = Right(()),
+    deleteResult:   Either[FileDeleteError, Unit]                                           = Right(()),
+    deleteFilesRes: Either[FileDeleteError, Unit]                                           = Right(()),
+    getBlobResult:  Either[FileLoadError, (String, String)]                                 = Right(("content", "etag-abc")),
+    listKeysResult: Either[FileListError, Option[ListOfKeysResponse[StubFileMetadata]]]     = Right(None),
     listMetaResult: Either[FileListError, Option[ListOfMetadataResponse[StubFileMetadata]]] = Right(None),
   ) extends StorageInterface[StubFileMetadata] {
 
@@ -82,29 +82,54 @@ class StorageInterfaceWithMetricsTest
       uploadResult
     override def close(): Unit = ()
     override def pathExists(bucket: String, path: String): Either[PathError, Boolean] = Right(false)
-    override def list(bucket: String, prefix: Option[String], lastFile: Option[StubFileMetadata], numResults: Int): Either[FileListError, Option[ListOfKeysResponse[StubFileMetadata]]] =
+    override def list(
+      bucket:     String,
+      prefix:     Option[String],
+      lastFile:   Option[StubFileMetadata],
+      numResults: Int,
+    ): Either[FileListError, Option[ListOfKeysResponse[StubFileMetadata]]] =
       Right(None)
-    override def listFileMetaRecursive(bucket: String, prefix: Option[String]): Either[FileListError, Option[ListOfMetadataResponse[StubFileMetadata]]] =
+    override def listFileMetaRecursive(
+      bucket: String,
+      prefix: Option[String],
+    ): Either[FileListError, Option[ListOfMetadataResponse[StubFileMetadata]]] =
       listMetaResult
-    override def listKeysRecursive(bucket: String, prefix: Option[String]): Either[FileListError, Option[ListOfKeysResponse[StubFileMetadata]]] =
+    override def listKeysRecursive(
+      bucket: String,
+      prefix: Option[String],
+    ): Either[FileListError, Option[ListOfKeysResponse[StubFileMetadata]]] =
       listKeysResult
-    override def seekToFile(bucket: String, fileName: String, lastModified: Option[Instant]): Option[StubFileMetadata] = None
+    override def seekToFile(bucket: String, fileName: String, lastModified: Option[Instant]): Option[StubFileMetadata] =
+      None
     override def getBlob(bucket: String, path: String): Either[FileLoadError, InputStream] =
       Right(InputStream.nullInputStream())
-    override def getBlobAsString(bucket: String, path: String): Either[FileLoadError, String] = Right("")
+    override def getBlobAsString(bucket:        String, path: String): Either[FileLoadError, String] = Right("")
     override def getBlobAsStringAndEtag(bucket: String, path: String): Either[FileLoadError, (String, String)] =
       getBlobResult
     override def getMetadata(bucket: String, path: String): Either[FileLoadError, ObjectMetadata] =
       Right(ObjectMetadata(0L, Instant.EPOCH))
     override def writeStringToFile(bucket: String, path: String, data: UploadableString): Either[UploadError, Unit] =
       Right(())
-    override def writeBlobToFile[O](bucket: String, path: String, objectProtection: ObjectProtection[O])(implicit encoder: io.circe.Encoder[O]): Either[UploadError, ObjectWithETag[O]] =
+    override def writeBlobToFile[O](
+      bucket:           String,
+      path:             String,
+      objectProtection: ObjectProtection[O],
+    )(
+      implicit
+      encoder: io.circe.Encoder[O],
+    ): Either[UploadError, ObjectWithETag[O]] =
       Left(UploadFailedError(new RuntimeException("not implemented in stub"), new File(".")))
     override def deleteFiles(bucket: String, files: Seq[String]): Either[FileDeleteError, Unit] = deleteFilesRes
-    override def deleteFile(bucket: String, file: String, eTag: String): Either[FileDeleteError, Unit] = deleteResult
-    override def mvFile(oldBucket: String, oldPath: String, newBucket: String, newPath: String, maybeEtag: Option[String]): Either[FileMoveError, Unit] = mvResult
+    override def deleteFile(bucket:  String, file:  String, eTag: String): Either[FileDeleteError, Unit] = deleteResult
+    override def mvFile(
+      oldBucket: String,
+      oldPath:   String,
+      newBucket: String,
+      newPath:   String,
+      maybeEtag: Option[String],
+    ): Either[FileMoveError, Unit] = mvResult
     override def createDirectoryIfNotExists(bucket: String, path: String): Either[FileCreateError, Unit] = Right(())
-    override def touchFile(bucket: String, path: String): Either[FileTouchError, Unit] = Right(())
+    override def touchFile(bucket:                  String, path: String): Either[FileTouchError, Unit]  = Right(())
   }
 
   // -------------------------------------------------------------------------
@@ -112,11 +137,11 @@ class StorageInterfaceWithMetricsTest
   // -------------------------------------------------------------------------
 
   test("uploadFile success: timer count increments, no error counted") {
-    val stub       = new StubStorageInterface(uploadResult = Right("etag"))
-    val decorator  = new StorageInterfaceWithMetrics(stub, metrics)
-    val _          = decorator.uploadFile(makeUploadFile(), "bucket", "key")
+    val stub      = new StubStorageInterface(uploadResult = Right("etag"))
+    val decorator = new StorageInterfaceWithMetrics(stub, metrics)
+    val _         = decorator.uploadFile(makeUploadFile(), "bucket", "key")
 
-    metrics.getStorageUploadTimerCount  shouldBe 1L
+    metrics.getStorageUploadTimerCount shouldBe 1L
     metrics.getStorageUploadErrorsTotal shouldBe 0L
   }
 
@@ -126,7 +151,7 @@ class StorageInterfaceWithMetricsTest
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.uploadFile(makeUploadFile(), "bucket", "key")
 
-    metrics.getStorageUploadTimerCount  shouldBe 1L
+    metrics.getStorageUploadTimerCount shouldBe 1L
     metrics.getStorageUploadErrorsTotal shouldBe 1L
   }
 
@@ -148,7 +173,7 @@ class StorageInterfaceWithMetricsTest
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.mvFile("b", "src", "b", "dst", None)
 
-    metrics.getStorageCopyTimerCount  shouldBe 1L
+    metrics.getStorageCopyTimerCount shouldBe 1L
     metrics.getStorageCopyErrorsTotal shouldBe 0L
   }
 
@@ -157,7 +182,7 @@ class StorageInterfaceWithMetricsTest
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.mvFile("b", "src", "b", "dst", None)
 
-    metrics.getStorageCopyTimerCount  shouldBe 1L
+    metrics.getStorageCopyTimerCount shouldBe 1L
     metrics.getStorageCopyErrorsTotal shouldBe 1L
   }
 
@@ -170,7 +195,7 @@ class StorageInterfaceWithMetricsTest
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.deleteFile("b", "f", "etag")
 
-    metrics.getStorageDeleteTimerCount  shouldBe 1L
+    metrics.getStorageDeleteTimerCount shouldBe 1L
     metrics.getStorageDeleteErrorsTotal shouldBe 0L
   }
 
@@ -179,16 +204,17 @@ class StorageInterfaceWithMetricsTest
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.deleteFile("b", "f", "etag")
 
-    metrics.getStorageDeleteTimerCount  shouldBe 1L
+    metrics.getStorageDeleteTimerCount shouldBe 1L
     metrics.getStorageDeleteErrorsTotal shouldBe 1L
   }
 
   test("deleteFiles uses the same delete timer and error counters") {
-    val stub      = new StubStorageInterface(deleteFilesRes = Left(FileDeleteError(new RuntimeException("batch-fail"), "f1,f2")))
+    val stub =
+      new StubStorageInterface(deleteFilesRes = Left(FileDeleteError(new RuntimeException("batch-fail"), "f1,f2")))
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.deleteFiles("b", Seq("f1", "f2"))
 
-    metrics.getStorageDeleteTimerCount  shouldBe 1L
+    metrics.getStorageDeleteTimerCount shouldBe 1L
     metrics.getStorageDeleteErrorsTotal shouldBe 1L
   }
 
@@ -201,7 +227,7 @@ class StorageInterfaceWithMetricsTest
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.getBlobAsStringAndEtag("b", "p")
 
-    metrics.getStorageGetTimerCount  shouldBe 1L
+    metrics.getStorageGetTimerCount shouldBe 1L
     metrics.getStorageGetErrorsTotal shouldBe 0L
   }
 
@@ -210,7 +236,7 @@ class StorageInterfaceWithMetricsTest
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.getBlobAsStringAndEtag("b", "p")
 
-    metrics.getStorageGetTimerCount  shouldBe 1L
+    metrics.getStorageGetTimerCount shouldBe 1L
     metrics.getStorageGetErrorsTotal shouldBe 1L
   }
 
@@ -223,16 +249,17 @@ class StorageInterfaceWithMetricsTest
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.listKeysRecursive("b", None)
 
-    metrics.getStorageListTimerCount  shouldBe 1L
+    metrics.getStorageListTimerCount shouldBe 1L
     metrics.getStorageListErrorsTotal shouldBe 0L
   }
 
   test("listFileMetaRecursive failure: list error counter increments") {
-    val stub      = new StubStorageInterface(listMetaResult = Left(FileListError(new RuntimeException("list-fail"), "b", None)))
+    val stub =
+      new StubStorageInterface(listMetaResult = Left(FileListError(new RuntimeException("list-fail"), "b", None)))
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.listFileMetaRecursive("b", None)
 
-    metrics.getStorageListTimerCount  shouldBe 1L
+    metrics.getStorageListTimerCount shouldBe 1L
     metrics.getStorageListErrorsTotal shouldBe 1L
   }
 
@@ -261,10 +288,10 @@ class StorageInterfaceWithMetricsTest
     val _         = decorator.pathExists("b", "p")
 
     // None of the instrumented counters should move
-    metrics.getStorageUploadTimerCount  shouldBe 0L
-    metrics.getStorageCopyTimerCount    shouldBe 0L
-    metrics.getStorageDeleteTimerCount  shouldBe 0L
-    metrics.getStorageGetTimerCount     shouldBe 0L
-    metrics.getStorageListTimerCount    shouldBe 0L
+    metrics.getStorageUploadTimerCount shouldBe 0L
+    metrics.getStorageCopyTimerCount shouldBe 0L
+    metrics.getStorageDeleteTimerCount shouldBe 0L
+    metrics.getStorageGetTimerCount shouldBe 0L
+    metrics.getStorageListTimerCount shouldBe 0L
   }
 }

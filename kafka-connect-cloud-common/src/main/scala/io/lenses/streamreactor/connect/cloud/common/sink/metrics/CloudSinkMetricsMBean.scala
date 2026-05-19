@@ -459,13 +459,13 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
 
   // --- A. Ingest throughput ---
 
-  private val putBatchesTotal        = new LongAdder()
-  private val recordsReceivedTotal   = new LongAdder()
-  private val recordsWrittenTotal    = new LongAdder()
+  private val putBatchesTotal         = new LongAdder()
+  private val recordsReceivedTotal    = new LongAdder()
+  private val recordsWrittenTotal     = new LongAdder()
   private val nullRecordsSkippedTotal = new LongAdder()
-  private val putEmptyBatchesTotal   = new LongAdder()
-  private val lastPutEpochMillis     = new AtomicLong(0L)
-  private val putTimer               = new OpTimer()
+  private val putEmptyBatchesTotal    = new LongAdder()
+  private val lastPutEpochMillis      = new AtomicLong(0L)
+  private val putTimer                = new OpTimer()
 
   // --- B. File / commit lifecycle ---
 
@@ -502,15 +502,15 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
 
   // --- E. Schema / skip / seek diagnostics ---
 
-  private val schemaRolloversTotal        = new LongAdder()
+  private val schemaRolloversTotal         = new LongAdder()
   private val duplicateRecordsSkippedTotal = new LongAdder()
-  private val seekOnOpenAppliedTotal      = new LongAdder()
-  private val rebalanceClosesTotal        = new LongAdder()
+  private val seekOnOpenAppliedTotal       = new LongAdder()
+  private val rebalanceClosesTotal         = new LongAdder()
 
   // --- F. Current state gauges ---
 
-  private val inFlightUploads                   = new AtomicInteger(0)
-  private val oldestOpenFileCreatedEpochMillis  = new AtomicLong(0L)
+  private val inFlightUploads                  = new AtomicInteger(0)
+  private val oldestOpenFileCreatedEpochMillis = new AtomicLong(0L)
 
   // =========================================================================
   // Getters — exposed via JMX
@@ -550,31 +550,31 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   override def getSafeOffsetBarrierWriters: Int = safeOffsetBarrierWriters.get()
 
   // A. Ingest throughput
-  override def getPutBatchesTotal:        Long = putBatchesTotal.sum()
-  override def getRecordsReceivedTotal:   Long = recordsReceivedTotal.sum()
-  override def getRecordsWrittenTotal:    Long = recordsWrittenTotal.sum()
+  override def getPutBatchesTotal:         Long = putBatchesTotal.sum()
+  override def getRecordsReceivedTotal:    Long = recordsReceivedTotal.sum()
+  override def getRecordsWrittenTotal:     Long = recordsWrittenTotal.sum()
   override def getNullRecordsSkippedTotal: Long = nullRecordsSkippedTotal.sum()
-  override def getPutEmptyBatchesTotal:   Long = putEmptyBatchesTotal.sum()
-  override def getLastPutEpochMillis:     Long = lastPutEpochMillis.get()
-  override def getPutTimerCount:          Long = putTimer.count
-  override def getPutTimerSumMillis:      Long = putTimer.sumMillis
-  override def getPutTimerMaxMillis:      Long = putTimer.maxMillis
-  override def getPutTimerMinMillis:      Long = putTimer.minMillis
-  override def getPutTimerLastMillis:     Long = putTimer.lastMillis
+  override def getPutEmptyBatchesTotal:    Long = putEmptyBatchesTotal.sum()
+  override def getLastPutEpochMillis:      Long = lastPutEpochMillis.get()
+  override def getPutTimerCount:           Long = putTimer.count
+  override def getPutTimerSumMillis:       Long = putTimer.sumMillis
+  override def getPutTimerMaxMillis:       Long = putTimer.maxMillis
+  override def getPutTimerMinMillis:       Long = putTimer.minMillis
+  override def getPutTimerLastMillis:      Long = putTimer.lastMillis
 
   // B. File / commit lifecycle
-  override def getFilesOpenedTotal:       Long = filesOpenedTotal.sum()
-  override def getFilesCommittedTotal:    Long = filesCommittedTotal.sum()
-  override def getFilesFailedTotal:       Long = filesFailedTotal.sum()
-  override def getBytesWrittenTotal:      Long = bytesWrittenTotal.sum()
-  override def getRecordsCommittedTotal:  Long = recordsCommittedTotal.sum()
-  override def getFlushDecisionTrueTotal: Long = flushDecisionTrue.sum()
+  override def getFilesOpenedTotal:        Long = filesOpenedTotal.sum()
+  override def getFilesCommittedTotal:     Long = filesCommittedTotal.sum()
+  override def getFilesFailedTotal:        Long = filesFailedTotal.sum()
+  override def getBytesWrittenTotal:       Long = bytesWrittenTotal.sum()
+  override def getRecordsCommittedTotal:   Long = recordsCommittedTotal.sum()
+  override def getFlushDecisionTrueTotal:  Long = flushDecisionTrue.sum()
   override def getFlushDecisionFalseTotal: Long = flushDecisionFalse.sum()
-  override def getCommitTimerCount:       Long = commitTimer.count
-  override def getCommitTimerSumMillis:   Long = commitTimer.sumMillis
-  override def getCommitTimerMaxMillis:   Long = commitTimer.maxMillis
-  override def getCommitTimerMinMillis:   Long = commitTimer.minMillis
-  override def getCommitTimerLastMillis:  Long = commitTimer.lastMillis
+  override def getCommitTimerCount:        Long = commitTimer.count
+  override def getCommitTimerSumMillis:    Long = commitTimer.sumMillis
+  override def getCommitTimerMaxMillis:    Long = commitTimer.maxMillis
+  override def getCommitTimerMinMillis:    Long = commitTimer.minMillis
+  override def getCommitTimerLastMillis:   Long = commitTimer.lastMillis
 
   // C. Storage SDK
   override def getStorageUploadTimerCount:      Long = storageUploadTimer.count
@@ -620,10 +620,10 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   override def getSinkErrorsNonFatalTotal:         Long = sinkErrorsNonFatalTotal.sum()
 
   // E. Schema / skip / seek diagnostics
-  override def getSchemaRolloversTotal:        Long = schemaRolloversTotal.sum()
+  override def getSchemaRolloversTotal:         Long = schemaRolloversTotal.sum()
   override def getDuplicateRecordsSkippedTotal: Long = duplicateRecordsSkippedTotal.sum()
-  override def getSeekOnOpenAppliedTotal:      Long = seekOnOpenAppliedTotal.sum()
-  override def getRebalanceClosesTotal:        Long = rebalanceClosesTotal.sum()
+  override def getSeekOnOpenAppliedTotal:       Long = seekOnOpenAppliedTotal.sum()
+  override def getRebalanceClosesTotal:         Long = rebalanceClosesTotal.sum()
 
   // F. Current state gauges
   override def getInFlightUploads: Int = inFlightUploads.get()
@@ -687,24 +687,24 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   def setSafeOffsetBarrierWriters(count: Int): Unit = safeOffsetBarrierWriters.set(count)
 
   // A. Ingest throughput mutators
-  def incrementPutBatchesTotal():        Unit = putBatchesTotal.increment()
-  def addRecordsReceivedTotal(n: Long):  Unit = recordsReceivedTotal.add(n)
-  def incrementRecordsWrittenTotal():    Unit = recordsWrittenTotal.increment()
+  def incrementPutBatchesTotal(): Unit = putBatchesTotal.increment()
+  def addRecordsReceivedTotal(n: Long): Unit = recordsReceivedTotal.add(n)
+  def incrementRecordsWrittenTotal():     Unit = recordsWrittenTotal.increment()
   def incrementNullRecordsSkippedTotal(): Unit = nullRecordsSkippedTotal.increment()
-  def incrementPutEmptyBatchesTotal():   Unit = putEmptyBatchesTotal.increment()
-  def setLastPutEpochMillis(ts: Long):   Unit = lastPutEpochMillis.set(ts)
+  def incrementPutEmptyBatchesTotal():    Unit = putEmptyBatchesTotal.increment()
+  def setLastPutEpochMillis(ts:     Long): Unit = lastPutEpochMillis.set(ts)
   def recordPutTimer(elapsedMillis: Long): Unit = putTimer.record(elapsedMillis)
 
   // B. File / commit lifecycle mutators
-  def incrementFilesOpenedTotal():               Unit = filesOpenedTotal.increment()
-  def incrementFilesCommittedTotal():            Unit = filesCommittedTotal.increment()
-  def incrementFilesFailedTotal():               Unit = filesFailedTotal.increment()
-  def addBytesWrittenTotal(n: Long):             Unit = bytesWrittenTotal.add(n)
-  def addRecordsCommittedTotal(n: Long):         Unit = recordsCommittedTotal.add(n)
-  def incrementFlushDecisionTrue():              Unit = flushDecisionTrue.increment()
-  def incrementFlushDecisionFalse():             Unit = flushDecisionFalse.increment()
-  def recordCommitTimer(elapsedMillis: Long):    Unit = commitTimer.record(elapsedMillis)
-  def setLastCommitEpochMillis(ts: Long):        Unit = lastCommitEpochMillis.set(ts)
+  def incrementFilesOpenedTotal():    Unit = filesOpenedTotal.increment()
+  def incrementFilesCommittedTotal(): Unit = filesCommittedTotal.increment()
+  def incrementFilesFailedTotal():    Unit = filesFailedTotal.increment()
+  def addBytesWrittenTotal(n:     Long): Unit = bytesWrittenTotal.add(n)
+  def addRecordsCommittedTotal(n: Long): Unit = recordsCommittedTotal.add(n)
+  def incrementFlushDecisionTrue():  Unit = flushDecisionTrue.increment()
+  def incrementFlushDecisionFalse(): Unit = flushDecisionFalse.increment()
+  def recordCommitTimer(elapsedMillis: Long): Unit = commitTimer.record(elapsedMillis)
+  def setLastCommitEpochMillis(ts:     Long): Unit = lastCommitEpochMillis.set(ts)
 
   // C. Storage SDK mutators
   def recordStorageUpload(elapsedMillis: Long, isError: Boolean): Unit = {

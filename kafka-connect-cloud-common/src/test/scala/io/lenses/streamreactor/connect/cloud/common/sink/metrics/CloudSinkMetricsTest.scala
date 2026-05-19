@@ -242,7 +242,7 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
     metrics.recordPutTimer(10L)
     metrics.recordPutTimer(30L)
     metrics.recordPutTimer(20L)
-    metrics.getPutTimerCount     shouldBe 3L
+    metrics.getPutTimerCount shouldBe 3L
     metrics.getPutTimerSumMillis shouldBe 60L
     metrics.getPutTimerMaxMillis shouldBe 30L
     metrics.getPutTimerMinMillis shouldBe 10L
@@ -261,31 +261,31 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
 
   test("FilesCommittedTotal and FilesFailedTotal track outcomes") {
     metrics.getFilesCommittedTotal shouldBe 0L
-    metrics.getFilesFailedTotal    shouldBe 0L
+    metrics.getFilesFailedTotal shouldBe 0L
     metrics.incrementFilesCommittedTotal()
     metrics.incrementFilesCommittedTotal()
     metrics.incrementFilesFailedTotal()
     metrics.getFilesCommittedTotal shouldBe 2L
-    metrics.getFilesFailedTotal    shouldBe 1L
+    metrics.getFilesFailedTotal shouldBe 1L
   }
 
   test("BytesWrittenTotal and RecordsCommittedTotal accumulate") {
-    metrics.getBytesWrittenTotal     shouldBe 0L
+    metrics.getBytesWrittenTotal shouldBe 0L
     metrics.getRecordsCommittedTotal shouldBe 0L
     metrics.addBytesWrittenTotal(1024L)
     metrics.addBytesWrittenTotal(512L)
     metrics.addRecordsCommittedTotal(100L)
-    metrics.getBytesWrittenTotal     shouldBe 1536L
+    metrics.getBytesWrittenTotal shouldBe 1536L
     metrics.getRecordsCommittedTotal shouldBe 100L
   }
 
   test("FlushDecision counters track true/false decisions") {
-    metrics.getFlushDecisionTrueTotal  shouldBe 0L
+    metrics.getFlushDecisionTrueTotal shouldBe 0L
     metrics.getFlushDecisionFalseTotal shouldBe 0L
     metrics.incrementFlushDecisionTrue()
     metrics.incrementFlushDecisionFalse()
     metrics.incrementFlushDecisionFalse()
-    metrics.getFlushDecisionTrueTotal  shouldBe 1L
+    metrics.getFlushDecisionTrueTotal shouldBe 1L
     metrics.getFlushDecisionFalseTotal shouldBe 2L
   }
 
@@ -293,7 +293,7 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
     metrics.getCommitTimerCount shouldBe 0L
     metrics.recordCommitTimer(5L)
     metrics.recordCommitTimer(15L)
-    metrics.getCommitTimerCount     shouldBe 2L
+    metrics.getCommitTimerCount shouldBe 2L
     metrics.getCommitTimerSumMillis shouldBe 20L
     metrics.getCommitTimerMaxMillis shouldBe 15L
     metrics.getCommitTimerMinMillis shouldBe 5L
@@ -310,11 +310,11 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
   // =========================================================================
 
   test("StorageUpload timer and error counter work independently") {
-    metrics.getStorageUploadTimerCount  shouldBe 0L
+    metrics.getStorageUploadTimerCount shouldBe 0L
     metrics.getStorageUploadErrorsTotal shouldBe 0L
     metrics.recordStorageUpload(10L, isError = false)
     metrics.recordStorageUpload(20L, isError = true)
-    metrics.getStorageUploadTimerCount  shouldBe 2L
+    metrics.getStorageUploadTimerCount shouldBe 2L
     metrics.getStorageUploadErrorsTotal shouldBe 1L
     metrics.getStorageUploadTimerMaxMillis shouldBe 20L
   }
@@ -322,29 +322,29 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
   test("StorageCopy timer and error counter track independently") {
     metrics.recordStorageCopy(5L, isError = false)
     metrics.recordStorageCopy(5L, isError = true)
-    metrics.getStorageCopyTimerCount  shouldBe 2L
+    metrics.getStorageCopyTimerCount shouldBe 2L
     metrics.getStorageCopyErrorsTotal shouldBe 1L
   }
 
   test("StorageDelete timer records both deleteFile and deleteFiles calls") {
     metrics.recordStorageDelete(3L, isError = false)
     metrics.recordStorageDelete(7L, isError = true)
-    metrics.getStorageDeleteTimerCount    shouldBe 2L
-    metrics.getStorageDeleteErrorsTotal   shouldBe 1L
+    metrics.getStorageDeleteTimerCount shouldBe 2L
+    metrics.getStorageDeleteErrorsTotal shouldBe 1L
     metrics.getStorageDeleteTimerSumMillis shouldBe 10L
   }
 
   test("StorageGet timer tracks getBlobAsStringAndEtag latency") {
     metrics.recordStorageGet(8L, isError = false)
-    metrics.getStorageGetTimerCount  shouldBe 1L
+    metrics.getStorageGetTimerCount shouldBe 1L
     metrics.getStorageGetErrorsTotal shouldBe 0L
     metrics.getStorageGetTimerLastMillis shouldBe 8L
   }
 
   test("StorageList timer tracks list operation latency") {
     metrics.recordStorageList(12L, isError = false)
-    metrics.recordStorageList(6L, isError = true)
-    metrics.getStorageListTimerCount  shouldBe 2L
+    metrics.recordStorageList(6L, isError  = true)
+    metrics.getStorageListTimerCount shouldBe 2L
     metrics.getStorageListErrorsTotal shouldBe 1L
     metrics.getStorageListTimerMinMillis shouldBe 6L
   }
@@ -366,16 +366,16 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
   }
 
   test("Sink error classification counters increment independently") {
-    metrics.getSinkErrorsFatalTotal     shouldBe 0L
+    metrics.getSinkErrorsFatalTotal shouldBe 0L
     metrics.getSinkErrorsRetriableTotal shouldBe 0L
-    metrics.getSinkErrorsNonFatalTotal  shouldBe 0L
+    metrics.getSinkErrorsNonFatalTotal shouldBe 0L
     metrics.incrementSinkErrorsFatalTotal()
     metrics.incrementSinkErrorsRetriableTotal()
     metrics.incrementSinkErrorsRetriableTotal()
     metrics.incrementSinkErrorsNonFatalTotal()
-    metrics.getSinkErrorsFatalTotal     shouldBe 1L
+    metrics.getSinkErrorsFatalTotal shouldBe 1L
     metrics.getSinkErrorsRetriableTotal shouldBe 2L
-    metrics.getSinkErrorsNonFatalTotal  shouldBe 1L
+    metrics.getSinkErrorsNonFatalTotal shouldBe 1L
   }
 
   // =========================================================================
@@ -457,9 +457,9 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
       mbs.getAttribute(name, "SinkErrorsFatalTotal") shouldBe 1L
 
       metrics.recordStorageUpload(50L, isError = false)
-      mbs.getAttribute(name, "StorageUploadTimerCount")    shouldBe 1L
+      mbs.getAttribute(name, "StorageUploadTimerCount") shouldBe 1L
       mbs.getAttribute(name, "StorageUploadTimerMaxMillis") shouldBe 50L
-      mbs.getAttribute(name, "StorageUploadErrorsTotal")   shouldBe 0L
+      mbs.getAttribute(name, "StorageUploadErrorsTotal") shouldBe 0L
 
       metrics.incrementRebalanceClosesTotal()
       mbs.getAttribute(name, "RebalanceClosesTotal") shouldBe 1L

@@ -58,9 +58,9 @@ class Writer[SM <: FileMetadata](
   formatWriterFn:              File => Either[SinkError, FormatWriter],
   schemaChangeDetector:        SchemaChangeDetector,
   pendingOperationsProcessors: PendingOperationsProcessors,
-  partitionKey:                Option[String]     = None,
-  lastSeekedOffset:            Option[Offset]     = None,
-  metrics:                     CloudSinkMetrics   = new CloudSinkMetrics(),
+  partitionKey:                Option[String]   = None,
+  lastSeekedOffset:            Option[Offset]   = None,
+  metrics:                     CloudSinkMetrics = new CloudSinkMetrics(),
 )(
   implicit
   connectorTaskId: ConnectorTaskId,
@@ -269,7 +269,7 @@ class Writer[SM <: FileMetadata](
             file.getName,
           ),
         )
-      case NoWriter(_)  => false
+      case NoWriter(_) => false
       case _: Uploading => false
     }
     if (result) metrics.incrementFlushDecisionTrue()
