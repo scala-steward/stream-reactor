@@ -28,8 +28,6 @@ class OpTimerTest extends AnyFunSuiteLike with Matchers {
     t.count shouldBe 0L
     t.sumMillis shouldBe 0L
     t.maxMillis shouldBe 0L
-    t.minMillis shouldBe 0L
-    t.lastMillis shouldBe 0L
   }
 
   test("single observation is reflected in all fields") {
@@ -38,8 +36,6 @@ class OpTimerTest extends AnyFunSuiteLike with Matchers {
     t.count shouldBe 1L
     t.sumMillis shouldBe 42L
     t.maxMillis shouldBe 42L
-    t.minMillis shouldBe 42L
-    t.lastMillis shouldBe 42L
   }
 
   test("count accumulates across multiple records") {
@@ -59,30 +55,12 @@ class OpTimerTest extends AnyFunSuiteLike with Matchers {
     t.maxMillis shouldBe 100L
   }
 
-  test("min tracks the smallest value seen") {
-    val t = new OpTimer()
-    t.record(50L)
-    t.record(1L)
-    t.record(200L)
-    t.minMillis shouldBe 1L
-  }
-
-  test("last reflects the most recent observation") {
-    val t = new OpTimer()
-    t.record(10L)
-    t.record(20L)
-    t.record(5L)
-    t.lastMillis shouldBe 5L
-  }
-
   test("zero observation is valid and does not corrupt accumulators") {
     val t = new OpTimer()
     t.record(0L)
     t.count shouldBe 1L
     t.sumMillis shouldBe 0L
     t.maxMillis shouldBe 0L
-    t.minMillis shouldBe 0L
-    t.lastMillis shouldBe 0L
   }
 
   test("concurrent records are all counted (thread-safety)") {
@@ -105,7 +83,6 @@ class OpTimerTest extends AnyFunSuiteLike with Matchers {
 
     t.count shouldBe (numThreads * recsPerThread).toLong
     t.sumMillis shouldBe (numThreads * recsPerThread).toLong
-    t.minMillis shouldBe 1L
     t.maxMillis shouldBe 1L
   }
 }

@@ -178,9 +178,7 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
               .toList.sortBy(_._1).map { case (k, v) => s"$k=$v" }.mkString(";")}",
           )
 
-          metrics.incrementPutBatchesTotal()
           metrics.addRecordsReceivedTotal(records.size().toLong)
-          if (records.isEmpty) metrics.incrementPutEmptyBatchesTotal()
 
           // a failure in recommitPending will prevent the processing of further records
           handleErrors(writerManager.recommitPending())

@@ -914,17 +914,13 @@ The MBean is registered at task start and unregistered at task stop. Attributes 
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `PutBatchesTotal` | counter | Cumulative `put()` invocations from Kafka Connect. |
 | `RecordsReceivedTotal` | counter | Cumulative records in all `put()` calls. |
 | `RecordsWrittenTotal` | counter | Records forwarded to `writerManager.write` (null-filtered, skip-filtered). |
 | `NullRecordsSkippedTotal` | counter | Records dropped because value was null and `skipNullValues` is enabled. |
-| `PutEmptyBatchesTotal` | counter | `put()` calls with 0 records (trigger time-based flush). |
 | `LastPutEpochMillis` | gauge | Wall-clock epoch of the last completed `put`. 0 before first call — primary liveness signal. |
 | `PutTimerCount` | timer | Number of `put` invocations timed. |
 | `PutTimerSumMillis` | timer | Sum of all `put` latencies. |
 | `PutTimerMaxMillis` | timer | Maximum single `put` latency observed. |
-| `PutTimerMinMillis` | timer | Minimum single `put` latency observed. |
-| `PutTimerLastMillis` | timer | Latency of the most recent `put`. |
 
 ### B. File / commit lifecycle
 
@@ -935,17 +931,13 @@ The MBean is registered at task start and unregistered at task stop. Attributes 
 | `FilesFailedTotal` | counter | Failed commit attempts (includes transient failures that are later retried). |
 | `BytesWrittenTotal` | counter | Cumulative bytes written to cloud storage across committed files. |
 | `RecordsCommittedTotal` | counter | Cumulative records included in committed files. |
-| `FlushDecisionTrueTotal` | counter | Times `shouldFlush` returned `true` (a file was eligible to close). |
-| `FlushDecisionFalseTotal` | counter | Times `shouldFlush` returned `false`. Ratio `true/(true+false)` shows flush efficiency. |
 | `CommitTimerCount` | timer | Number of commits timed. |
 | `CommitTimerSumMillis` | timer | Sum of commit latencies (seal + upload + index update). |
 | `CommitTimerMaxMillis` | timer | Maximum single commit latency. |
-| `CommitTimerMinMillis` | timer | Minimum single commit latency. |
-| `CommitTimerLastMillis` | timer | Latency of the most recent commit. |
 
 ### C. Per-cloud storage SDK timings
 
-The following attributes are instrumented uniformly for S3, GCS, and Azure Data Lake via the `StorageInterfaceWithMetrics` decorator. Timer components follow the same `Count/SumMillis/MaxMillis/MinMillis/LastMillis` pattern.
+The following attributes are instrumented uniformly for S3, GCS, and Azure Data Lake via the `StorageInterfaceWithMetrics` decorator. Timer components follow the same `Count/SumMillis/MaxMillis` pattern.
 
 | Attribute prefix | Wraps | Notes |
 |-----------------|-------|-------|
@@ -962,15 +954,12 @@ Full attribute list for uploads (same pattern for Copy/Delete/Get/List):
 | `StorageUploadTimerCount` | timer | Number of `uploadFile` calls. |
 | `StorageUploadTimerSumMillis` | timer | Sum of `uploadFile` latencies. |
 | `StorageUploadTimerMaxMillis` | timer | Maximum `uploadFile` latency. |
-| `StorageUploadTimerMinMillis` | timer | Minimum `uploadFile` latency. |
-| `StorageUploadTimerLastMillis` | timer | Most recent `uploadFile` latency. |
 | `StorageUploadErrorsTotal` | counter | Failed `uploadFile` calls. |
 
 ### D. Pending-operation retries & error classification
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `RecommitPendingInvocationsTotal` | counter | `recommitPending()` calls at the start of every `put`. |
 | `PendingOperationRetriesTotal` | counter | Transient upload failures deferred to the next `recommitPending`. Each increment means the file is still on disk and will be retried. |
 | `SinkErrorsFatalTotal` | counter | Errors classified as Fatal — task fails immediately. |
 | `SinkErrorsRetriableTotal` | counter | Errors classified as Retriable — Kafka Connect re-delivers the batch. |

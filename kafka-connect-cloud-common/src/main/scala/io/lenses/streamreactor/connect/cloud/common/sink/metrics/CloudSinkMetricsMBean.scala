@@ -235,9 +235,6 @@ trait CloudSinkMetricsMBean {
   // A. Ingest throughput
   // =========================================================================
 
-  /** Cumulative `put` invocations (one per poll cycle from Kafka Connect). */
-  def getPutBatchesTotal: Long
-
   /** Cumulative records received across all `put` invocations. */
   def getRecordsReceivedTotal: Long
 
@@ -247,18 +244,13 @@ trait CloudSinkMetricsMBean {
   /** Cumulative records skipped because the value was null and `skipNullValues` is enabled. */
   def getNullRecordsSkippedTotal: Long
 
-  /** Cumulative empty `put` calls (0 records in the batch). These trigger time-based flush. */
-  def getPutEmptyBatchesTotal: Long
-
   /** Wall-clock epoch (ms) of the last completed `put` invocation. 0 if `put` has never run. */
   def getLastPutEpochMillis: Long
 
   // put() latency timer components
-  def getPutTimerCount:      Long
-  def getPutTimerSumMillis:  Long
-  def getPutTimerMaxMillis:  Long
-  def getPutTimerMinMillis:  Long
-  def getPutTimerLastMillis: Long
+  def getPutTimerCount:     Long
+  def getPutTimerSumMillis: Long
+  def getPutTimerMaxMillis: Long
 
   // =========================================================================
   // B. File / commit lifecycle
@@ -282,69 +274,48 @@ trait CloudSinkMetricsMBean {
   /** Cumulative records included in all committed files. */
   def getRecordsCommittedTotal: Long
 
-  /** Cumulative times `shouldFlush` evaluated to `true` (a file was eligible to close). */
-  def getFlushDecisionTrueTotal: Long
-
-  /** Cumulative times `shouldFlush` evaluated to `false`. */
-  def getFlushDecisionFalseTotal: Long
-
   // commit() latency timer components (seal → upload → index update)
-  def getCommitTimerCount:      Long
-  def getCommitTimerSumMillis:  Long
-  def getCommitTimerMaxMillis:  Long
-  def getCommitTimerMinMillis:  Long
-  def getCommitTimerLastMillis: Long
+  def getCommitTimerCount:     Long
+  def getCommitTimerSumMillis: Long
+  def getCommitTimerMaxMillis: Long
 
   // =========================================================================
   // C. Per-cloud storage SDK call timings & errors
   // =========================================================================
 
   // uploadFile — the hot path write to S3/GCS/Azure
-  def getStorageUploadTimerCount:      Long
-  def getStorageUploadTimerSumMillis:  Long
-  def getStorageUploadTimerMaxMillis:  Long
-  def getStorageUploadTimerMinMillis:  Long
-  def getStorageUploadTimerLastMillis: Long
-  def getStorageUploadErrorsTotal:     Long
+  def getStorageUploadTimerCount:     Long
+  def getStorageUploadTimerSumMillis: Long
+  def getStorageUploadTimerMaxMillis: Long
+  def getStorageUploadErrorsTotal:    Long
 
   // mvFile — copy-then-delete in indexed-mode commit and master-lock path
-  def getStorageCopyTimerCount:      Long
-  def getStorageCopyTimerSumMillis:  Long
-  def getStorageCopyTimerMaxMillis:  Long
-  def getStorageCopyTimerMinMillis:  Long
-  def getStorageCopyTimerLastMillis: Long
-  def getStorageCopyErrorsTotal:     Long
+  def getStorageCopyTimerCount:     Long
+  def getStorageCopyTimerSumMillis: Long
+  def getStorageCopyTimerMaxMillis: Long
+  def getStorageCopyErrorsTotal:    Long
 
   // deleteFile / deleteFiles — GC drain and indexed-mode temp-file deletion
-  def getStorageDeleteTimerCount:      Long
-  def getStorageDeleteTimerSumMillis:  Long
-  def getStorageDeleteTimerMaxMillis:  Long
-  def getStorageDeleteTimerMinMillis:  Long
-  def getStorageDeleteTimerLastMillis: Long
-  def getStorageDeleteErrorsTotal:     Long
+  def getStorageDeleteTimerCount:     Long
+  def getStorageDeleteTimerSumMillis: Long
+  def getStorageDeleteTimerMaxMillis: Long
+  def getStorageDeleteErrorsTotal:    Long
 
   // getBlobAsStringAndEtag / getBlobAsObject — granular/master lock reads and sweep loads
-  def getStorageGetTimerCount:      Long
-  def getStorageGetTimerSumMillis:  Long
-  def getStorageGetTimerMaxMillis:  Long
-  def getStorageGetTimerMinMillis:  Long
-  def getStorageGetTimerLastMillis: Long
-  def getStorageGetErrorsTotal:     Long
+  def getStorageGetTimerCount:     Long
+  def getStorageGetTimerSumMillis: Long
+  def getStorageGetTimerMaxMillis: Long
+  def getStorageGetErrorsTotal:    Long
 
   // listKeysRecursive / listFileMetaRecursive — orphan sweep and index manager listings
-  def getStorageListTimerCount:      Long
-  def getStorageListTimerSumMillis:  Long
-  def getStorageListTimerMaxMillis:  Long
-  def getStorageListTimerMinMillis:  Long
-  def getStorageListTimerLastMillis: Long
-  def getStorageListErrorsTotal:     Long
+  def getStorageListTimerCount:     Long
+  def getStorageListTimerSumMillis: Long
+  def getStorageListTimerMaxMillis: Long
+  def getStorageListErrorsTotal:    Long
 
   // =========================================================================
   // D. Pending-operation retries & error classification
   // =========================================================================
-
-  /** Cumulative `recommitPending` invocations (called at the start of every `put`). */
-  def getRecommitPendingInvocationsTotal: Long
 
   /**
    * Cumulative transient upload failures that will be retried by the next `recommitPending`
@@ -451,11 +422,9 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
 
   // --- A. Ingest throughput ---
 
-  private val putBatchesTotal         = new LongAdder()
   private val recordsReceivedTotal    = new LongAdder()
   private val recordsWrittenTotal     = new LongAdder()
   private val nullRecordsSkippedTotal = new LongAdder()
-  private val putEmptyBatchesTotal    = new LongAdder()
   private val lastPutEpochMillis      = new AtomicLong(0L)
   private val putTimer                = new OpTimer()
 
@@ -466,8 +435,6 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   private val filesFailedTotal      = new LongAdder()
   private val bytesWrittenTotal     = new LongAdder()
   private val recordsCommittedTotal = new LongAdder()
-  private val flushDecisionTrue     = new LongAdder()
-  private val flushDecisionFalse    = new LongAdder()
   private val commitTimer           = new OpTimer()
   private val lastCommitEpochMillis = new AtomicLong(0L)
 
@@ -486,8 +453,7 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
 
   // --- D. Retries & error classification ---
 
-  private val recommitPendingInvocationsTotal = new LongAdder()
-  private val pendingOperationRetriesTotal    = new LongAdder()
+  private val pendingOperationRetriesTotal = new LongAdder()
   private val sinkErrorsFatalTotal            = new LongAdder()
   private val sinkErrorsRetriableTotal        = new LongAdder()
   private val sinkErrorsNonFatalTotal         = new LongAdder()
@@ -541,71 +507,52 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   override def getSafeOffsetBarrierWriters: Int = safeOffsetBarrierWriters.get()
 
   // A. Ingest throughput
-  override def getPutBatchesTotal:         Long = putBatchesTotal.sum()
   override def getRecordsReceivedTotal:    Long = recordsReceivedTotal.sum()
   override def getRecordsWrittenTotal:     Long = recordsWrittenTotal.sum()
   override def getNullRecordsSkippedTotal: Long = nullRecordsSkippedTotal.sum()
-  override def getPutEmptyBatchesTotal:    Long = putEmptyBatchesTotal.sum()
   override def getLastPutEpochMillis:      Long = lastPutEpochMillis.get()
   override def getPutTimerCount:           Long = putTimer.count
   override def getPutTimerSumMillis:       Long = putTimer.sumMillis
   override def getPutTimerMaxMillis:       Long = putTimer.maxMillis
-  override def getPutTimerMinMillis:       Long = putTimer.minMillis
-  override def getPutTimerLastMillis:      Long = putTimer.lastMillis
 
   // B. File / commit lifecycle
-  override def getFilesOpenedTotal:        Long = filesOpenedTotal.sum()
-  override def getFilesCommittedTotal:     Long = filesCommittedTotal.sum()
-  override def getFilesFailedTotal:        Long = filesFailedTotal.sum()
-  override def getBytesWrittenTotal:       Long = bytesWrittenTotal.sum()
-  override def getRecordsCommittedTotal:   Long = recordsCommittedTotal.sum()
-  override def getFlushDecisionTrueTotal:  Long = flushDecisionTrue.sum()
-  override def getFlushDecisionFalseTotal: Long = flushDecisionFalse.sum()
-  override def getCommitTimerCount:        Long = commitTimer.count
-  override def getCommitTimerSumMillis:    Long = commitTimer.sumMillis
-  override def getCommitTimerMaxMillis:    Long = commitTimer.maxMillis
-  override def getCommitTimerMinMillis:    Long = commitTimer.minMillis
-  override def getCommitTimerLastMillis:   Long = commitTimer.lastMillis
+  override def getFilesOpenedTotal:      Long = filesOpenedTotal.sum()
+  override def getFilesCommittedTotal:   Long = filesCommittedTotal.sum()
+  override def getFilesFailedTotal:      Long = filesFailedTotal.sum()
+  override def getBytesWrittenTotal:     Long = bytesWrittenTotal.sum()
+  override def getRecordsCommittedTotal: Long = recordsCommittedTotal.sum()
+  override def getCommitTimerCount:      Long = commitTimer.count
+  override def getCommitTimerSumMillis:  Long = commitTimer.sumMillis
+  override def getCommitTimerMaxMillis:  Long = commitTimer.maxMillis
 
   // C. Storage SDK
-  override def getStorageUploadTimerCount:      Long = storageUploadTimer.count
-  override def getStorageUploadTimerSumMillis:  Long = storageUploadTimer.sumMillis
-  override def getStorageUploadTimerMaxMillis:  Long = storageUploadTimer.maxMillis
-  override def getStorageUploadTimerMinMillis:  Long = storageUploadTimer.minMillis
-  override def getStorageUploadTimerLastMillis: Long = storageUploadTimer.lastMillis
-  override def getStorageUploadErrorsTotal:     Long = storageUploadErrors.sum()
+  override def getStorageUploadTimerCount:     Long = storageUploadTimer.count
+  override def getStorageUploadTimerSumMillis: Long = storageUploadTimer.sumMillis
+  override def getStorageUploadTimerMaxMillis: Long = storageUploadTimer.maxMillis
+  override def getStorageUploadErrorsTotal:    Long = storageUploadErrors.sum()
 
-  override def getStorageCopyTimerCount:      Long = storageCopyTimer.count
-  override def getStorageCopyTimerSumMillis:  Long = storageCopyTimer.sumMillis
-  override def getStorageCopyTimerMaxMillis:  Long = storageCopyTimer.maxMillis
-  override def getStorageCopyTimerMinMillis:  Long = storageCopyTimer.minMillis
-  override def getStorageCopyTimerLastMillis: Long = storageCopyTimer.lastMillis
-  override def getStorageCopyErrorsTotal:     Long = storageCopyErrors.sum()
+  override def getStorageCopyTimerCount:     Long = storageCopyTimer.count
+  override def getStorageCopyTimerSumMillis: Long = storageCopyTimer.sumMillis
+  override def getStorageCopyTimerMaxMillis: Long = storageCopyTimer.maxMillis
+  override def getStorageCopyErrorsTotal:    Long = storageCopyErrors.sum()
 
-  override def getStorageDeleteTimerCount:      Long = storageDeleteTimer.count
-  override def getStorageDeleteTimerSumMillis:  Long = storageDeleteTimer.sumMillis
-  override def getStorageDeleteTimerMaxMillis:  Long = storageDeleteTimer.maxMillis
-  override def getStorageDeleteTimerMinMillis:  Long = storageDeleteTimer.minMillis
-  override def getStorageDeleteTimerLastMillis: Long = storageDeleteTimer.lastMillis
-  override def getStorageDeleteErrorsTotal:     Long = storageDeleteErrors.sum()
+  override def getStorageDeleteTimerCount:     Long = storageDeleteTimer.count
+  override def getStorageDeleteTimerSumMillis: Long = storageDeleteTimer.sumMillis
+  override def getStorageDeleteTimerMaxMillis: Long = storageDeleteTimer.maxMillis
+  override def getStorageDeleteErrorsTotal:    Long = storageDeleteErrors.sum()
 
-  override def getStorageGetTimerCount:      Long = storageGetTimer.count
-  override def getStorageGetTimerSumMillis:  Long = storageGetTimer.sumMillis
-  override def getStorageGetTimerMaxMillis:  Long = storageGetTimer.maxMillis
-  override def getStorageGetTimerMinMillis:  Long = storageGetTimer.minMillis
-  override def getStorageGetTimerLastMillis: Long = storageGetTimer.lastMillis
-  override def getStorageGetErrorsTotal:     Long = storageGetErrors.sum()
+  override def getStorageGetTimerCount:     Long = storageGetTimer.count
+  override def getStorageGetTimerSumMillis: Long = storageGetTimer.sumMillis
+  override def getStorageGetTimerMaxMillis: Long = storageGetTimer.maxMillis
+  override def getStorageGetErrorsTotal:    Long = storageGetErrors.sum()
 
-  override def getStorageListTimerCount:      Long = storageListTimer.count
-  override def getStorageListTimerSumMillis:  Long = storageListTimer.sumMillis
-  override def getStorageListTimerMaxMillis:  Long = storageListTimer.maxMillis
-  override def getStorageListTimerMinMillis:  Long = storageListTimer.minMillis
-  override def getStorageListTimerLastMillis: Long = storageListTimer.lastMillis
-  override def getStorageListErrorsTotal:     Long = storageListErrors.sum()
+  override def getStorageListTimerCount:     Long = storageListTimer.count
+  override def getStorageListTimerSumMillis: Long = storageListTimer.sumMillis
+  override def getStorageListTimerMaxMillis: Long = storageListTimer.maxMillis
+  override def getStorageListErrorsTotal:    Long = storageListErrors.sum()
 
   // D. Retries & error classification
-  override def getRecommitPendingInvocationsTotal: Long = recommitPendingInvocationsTotal.sum()
-  override def getPendingOperationRetriesTotal:    Long = pendingOperationRetriesTotal.sum()
+  override def getPendingOperationRetriesTotal: Long = pendingOperationRetriesTotal.sum()
   override def getSinkErrorsFatalTotal:            Long = sinkErrorsFatalTotal.sum()
   override def getSinkErrorsRetriableTotal:        Long = sinkErrorsRetriableTotal.sum()
   override def getSinkErrorsNonFatalTotal:         Long = sinkErrorsNonFatalTotal.sum()
@@ -673,11 +620,9 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   def setSafeOffsetBarrierWriters(count: Int): Unit = safeOffsetBarrierWriters.set(count)
 
   // A. Ingest throughput mutators
-  def incrementPutBatchesTotal(): Unit = putBatchesTotal.increment()
-  def addRecordsReceivedTotal(n: Long): Unit = recordsReceivedTotal.add(n)
+  def addRecordsReceivedTotal(n:          Long): Unit = recordsReceivedTotal.add(n)
   def incrementRecordsWrittenTotal():     Unit = recordsWrittenTotal.increment()
   def incrementNullRecordsSkippedTotal(): Unit = nullRecordsSkippedTotal.increment()
-  def incrementPutEmptyBatchesTotal():    Unit = putEmptyBatchesTotal.increment()
   def setLastPutEpochMillis(ts:     Long): Unit = lastPutEpochMillis.set(ts)
   def recordPutTimer(elapsedMillis: Long): Unit = putTimer.record(elapsedMillis)
 
@@ -687,8 +632,6 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   def incrementFilesFailedTotal():    Unit = filesFailedTotal.increment()
   def addBytesWrittenTotal(n:     Long): Unit = bytesWrittenTotal.add(n)
   def addRecordsCommittedTotal(n: Long): Unit = recordsCommittedTotal.add(n)
-  def incrementFlushDecisionTrue():  Unit = flushDecisionTrue.increment()
-  def incrementFlushDecisionFalse(): Unit = flushDecisionFalse.increment()
   def recordCommitTimer(elapsedMillis: Long): Unit = commitTimer.record(elapsedMillis)
   def setLastCommitEpochMillis(ts:     Long): Unit = lastCommitEpochMillis.set(ts)
 
@@ -715,8 +658,7 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   }
 
   // D. Retries & error classification mutators
-  def incrementRecommitPendingInvocationsTotal(): Unit = recommitPendingInvocationsTotal.increment()
-  def incrementPendingOperationRetriesTotal():    Unit = pendingOperationRetriesTotal.increment()
+  def incrementPendingOperationRetriesTotal(): Unit = pendingOperationRetriesTotal.increment()
   def incrementSinkErrorsFatalTotal():            Unit = sinkErrorsFatalTotal.increment()
   def incrementSinkErrorsRetriableTotal():        Unit = sinkErrorsRetriableTotal.increment()
   def incrementSinkErrorsNonFatalTotal():         Unit = sinkErrorsNonFatalTotal.increment()

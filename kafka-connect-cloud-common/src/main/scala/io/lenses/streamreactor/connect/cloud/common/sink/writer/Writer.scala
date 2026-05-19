@@ -272,8 +272,6 @@ class Writer[SM <: FileMetadata](
       case NoWriter(_) => false
       case _: Uploading => false
     }
-    if (result) metrics.incrementFlushDecisionTrue()
-    else metrics.incrementFlushDecisionFalse()
     result
   }
 

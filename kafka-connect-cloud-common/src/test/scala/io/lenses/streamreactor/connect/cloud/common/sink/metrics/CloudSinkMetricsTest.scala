@@ -198,13 +198,6 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
   // A. Ingest throughput
   // =========================================================================
 
-  test("PutBatchesTotal defaults to 0 and increments") {
-    metrics.getPutBatchesTotal shouldBe 0L
-    metrics.incrementPutBatchesTotal()
-    metrics.incrementPutBatchesTotal()
-    metrics.getPutBatchesTotal shouldBe 2L
-  }
-
   test("RecordsReceivedTotal accumulates batches") {
     metrics.getRecordsReceivedTotal shouldBe 0L
     metrics.addRecordsReceivedTotal(100L)
@@ -224,12 +217,6 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
     metrics.getNullRecordsSkippedTotal shouldBe 1L
   }
 
-  test("PutEmptyBatchesTotal increments") {
-    metrics.getPutEmptyBatchesTotal shouldBe 0L
-    metrics.incrementPutEmptyBatchesTotal()
-    metrics.getPutEmptyBatchesTotal shouldBe 1L
-  }
-
   test("LastPutEpochMillis defaults to 0 and can be set") {
     metrics.getLastPutEpochMillis shouldBe 0L
     val now = System.currentTimeMillis()
@@ -237,7 +224,7 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
     metrics.getLastPutEpochMillis shouldBe now
   }
 
-  test("PutTimer records count, sum, max, min, last") {
+  test("PutTimer records count, sum, max") {
     metrics.getPutTimerCount shouldBe 0L
     metrics.recordPutTimer(10L)
     metrics.recordPutTimer(30L)
@@ -245,8 +232,6 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
     metrics.getPutTimerCount shouldBe 3L
     metrics.getPutTimerSumMillis shouldBe 60L
     metrics.getPutTimerMaxMillis shouldBe 30L
-    metrics.getPutTimerMinMillis shouldBe 10L
-    metrics.getPutTimerLastMillis shouldBe 20L
   }
 
   // =========================================================================
@@ -279,24 +264,13 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
     metrics.getRecordsCommittedTotal shouldBe 100L
   }
 
-  test("FlushDecision counters track true/false decisions") {
-    metrics.getFlushDecisionTrueTotal shouldBe 0L
-    metrics.getFlushDecisionFalseTotal shouldBe 0L
-    metrics.incrementFlushDecisionTrue()
-    metrics.incrementFlushDecisionFalse()
-    metrics.incrementFlushDecisionFalse()
-    metrics.getFlushDecisionTrueTotal shouldBe 1L
-    metrics.getFlushDecisionFalseTotal shouldBe 2L
-  }
-
-  test("CommitTimer records five stats") {
+  test("CommitTimer records count, sum, max") {
     metrics.getCommitTimerCount shouldBe 0L
     metrics.recordCommitTimer(5L)
     metrics.recordCommitTimer(15L)
     metrics.getCommitTimerCount shouldBe 2L
     metrics.getCommitTimerSumMillis shouldBe 20L
     metrics.getCommitTimerMaxMillis shouldBe 15L
-    metrics.getCommitTimerMinMillis shouldBe 5L
   }
 
   test("MillisSinceLastCommit returns 0 before first commit then a positive value") {
@@ -338,7 +312,7 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
     metrics.recordStorageGet(8L, isError = false)
     metrics.getStorageGetTimerCount shouldBe 1L
     metrics.getStorageGetErrorsTotal shouldBe 0L
-    metrics.getStorageGetTimerLastMillis shouldBe 8L
+    metrics.getStorageGetTimerMaxMillis shouldBe 8L
   }
 
   test("StorageList timer tracks list operation latency") {
@@ -346,18 +320,12 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
     metrics.recordStorageList(6L, isError  = true)
     metrics.getStorageListTimerCount shouldBe 2L
     metrics.getStorageListErrorsTotal shouldBe 1L
-    metrics.getStorageListTimerMinMillis shouldBe 6L
+    metrics.getStorageListTimerMaxMillis shouldBe 12L
   }
 
   // =========================================================================
   // D. Retries & error classification
   // =========================================================================
-
-  test("RecommitPendingInvocationsTotal increments") {
-    metrics.getRecommitPendingInvocationsTotal shouldBe 0L
-    metrics.incrementRecommitPendingInvocationsTotal()
-    metrics.getRecommitPendingInvocationsTotal shouldBe 1L
-  }
 
   test("PendingOperationRetriesTotal increments") {
     metrics.getPendingOperationRetriesTotal shouldBe 0L

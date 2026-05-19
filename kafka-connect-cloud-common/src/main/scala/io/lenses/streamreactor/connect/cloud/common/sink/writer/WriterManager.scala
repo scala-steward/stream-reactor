@@ -146,7 +146,6 @@ class WriterManager[SM <: FileMetadata](
 
   def recommitPending(): Either[SinkError, Unit] = {
     logger.debug(s"[{}] Retry Pending", connectorTaskId.show)
-    metrics.incrementRecommitPendingInvocationsTotal()
     val result = writerCommitManager.commitPending()
     logger.debug(s"[{}] Retry Pending Complete", connectorTaskId.show)
     result
