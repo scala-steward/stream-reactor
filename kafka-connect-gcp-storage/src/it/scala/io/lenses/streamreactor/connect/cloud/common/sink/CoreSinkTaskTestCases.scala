@@ -179,7 +179,14 @@ abstract class CoreSinkTaskTestCases[
     task.close(Seq(new TopicPartition(TopicName, 1)).asJava)
     task.stop()
 
-    listBucketPath(BucketName, "streamReactorBackups/myTopic/1/").size should be(1)
+    val finalFiles = listBucketPath(BucketName, "streamReactorBackups/myTopic/1/")
+    withClue(
+      s"Expected exactly 1 committed file but found ${finalFiles.size}: ${finalFiles.mkString(", ")}. " +
+        s"A count > 1 means the second put(records) was not fully deduped (check Writer.shouldSkip / committedOffset). " +
+        s"A count of 0 means the first flush did not complete (check the 1200ms sleep covers the 1s flush interval).",
+    ) {
+      finalFiles.size should be(1)
+    }
     remoteFileAsString(BucketName, "streamReactorBackups/myTopic/1/000000000002_0_2.json") should be(
       """{"name":"sam","title":"mr","salary":100.43}{"name":"laura","title":"ms","salary":429.06}{"name":"tom","title":null,"salary":395.44}""",
     )
