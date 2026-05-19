@@ -178,7 +178,7 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
               .toList.sortBy(_._1).map { case (k, v) => s"$k=$v" }.mkString(";")}",
           )
 
-          metrics.addRecordsReceivedTotal(records.size().toLong)
+          Option(metrics).foreach(_.addRecordsReceivedTotal(records.size().toLong))
 
           // a failure in recommitPending will prevent the processing of further records
           handleErrors(writerManager.recommitPending())
@@ -203,7 +203,7 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
               val messageValue = ValueToSinkDataConverter(record.value(), Option(record.valueSchema()))
               messageValue match {
                 case NullSinkData(_) if writerManager.shouldSkipNullValues() =>
-                  metrics.incrementNullRecordsSkippedTotal()
+                  Option(metrics).foreach(_.incrementNullRecordsSkippedTotal())
                   logger.debug(
                     "[{}] Skipping null value for tpo {}/{}/{}",
                     connectorTaskId.show,
@@ -239,8 +239,10 @@ abstract class CloudSinkTask[MD <: FileMetadata, C <: CloudSinkConfig[CC], CC <:
       }
       ()
     } { e =>
-      metrics.recordPutTimer(e)
-      metrics.setLastPutEpochMillis(System.currentTimeMillis())
+      Option(metrics).foreach { m =>
+        m.recordPutTimer(e)
+        m.setLastPutEpochMillis(System.currentTimeMillis())
+      }
       if (logMetrics) {
         logger.info(s"[${connectorTaskId.show}] put records=${records.size()} took $e ms")
       }
