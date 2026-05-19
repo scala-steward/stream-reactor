@@ -148,13 +148,16 @@ class WriterManager[SM <: FileMetadata](
     logger.debug(s"[{}] Retry Pending", connectorTaskId.show)
     metrics.incrementRecommitPendingInvocationsTotal()
     val result = writerCommitManager.commitPending()
+    updateOldestOpenFileMetrics()
     logger.debug(s"[{}] Retry Pending Complete", connectorTaskId.show)
     result
   }
 
   def commitFlushableWriters(): Either[BatchCloudSinkError, Unit] = {
     logger.debug(s"[{}] Received call to WriterManager.commitFlushableWriters", connectorTaskId.show)
-    writerCommitManager.commitFlushableWriters()
+    val result = writerCommitManager.commitFlushableWriters()
+    updateOldestOpenFileMetrics()
+    result
   }
 
   /**
@@ -354,22 +357,25 @@ class WriterManager[SM <: FileMetadata](
     topicPartitionOffset: TopicPartitionOffset,
     messageDetail:        MessageDetail,
     writer:               Writer[SM],
-  ): Either[SinkError, Unit] =
-    for {
+  ): Either[SinkError, Unit] = {
+    val result = for {
       // commitException can not be recovered from
       _ <- rollOverTopicPartitionWriters(writer, topicPartitionOffset.toTopicPartition, messageDetail)
       // a processErr can potentially be recovered from in the next iteration.  Can be due to network problems
       _         <- writer.write(messageDetail)
       commitRes <- writerCommitManager.commitFlushableWritersForTopicPartition(topicPartitionOffset.toTopicPartition)
     } yield commitRes
+    updateOldestOpenFileMetrics()
+    result
+  }
 
   private def rollOverTopicPartitionWriters(
     writer:         Writer[SM],
     topicPartition: TopicPartition,
     message:        MessageDetail,
-  ): Either[BatchCloudSinkError, Unit] =
+  ): Either[BatchCloudSinkError, Unit] = {
     //TODO: fix this; it cannot always be VALUE and it depends on writer requiring a roll over to new file
-    message.value.schema() match {
+    val result = message.value.schema() match {
       case Some(value: Schema) if writer.shouldRollover(value) =>
         // Schema rollover: flush all writers for the TP together to keep the format boundary
         // consistent. This is the one full-fan-out path; do NOT weaken to selective commit.
@@ -377,6 +383,9 @@ class WriterManager[SM <: FileMetadata](
         writerCommitManager.commitForTopicPartition(topicPartition)
       case _ => ().asRight
     }
+    updateOldestOpenFileMetrics()
+    result
+  }
 
   private def processPartitionValues(
     messageDetail:  MessageDetail,

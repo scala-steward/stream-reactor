@@ -36,11 +36,11 @@ class OpTimer {
 
   /** Records one elapsed-millisecond observation. */
   def record(elapsedMillis: Long): Unit = {
-    _count.increment()
     _sum.add(elapsedMillis)
     _max.accumulate(elapsedMillis)
     _min.accumulate(elapsedMillis)
     _last.set(elapsedMillis)
+    _count.increment()
   }
 
   def count:      Long = _count.sum()
