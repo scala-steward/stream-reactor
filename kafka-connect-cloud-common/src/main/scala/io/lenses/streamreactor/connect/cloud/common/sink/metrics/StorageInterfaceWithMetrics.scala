@@ -56,7 +56,7 @@ class StorageInterfaceWithMetrics[SM <: FileMetadata](
    * exceptions — matching the contract of `Metrics.withTimer`.
    */
   private def timedWithErr[A, B](record: (Long, Boolean) => Unit)(f: => Either[A, B]): Either[A, B] = {
-    val start  = System.currentTimeMillis()
+    val start  = System.nanoTime()
     var failed = false
     try {
       val result = f
@@ -67,7 +67,7 @@ class StorageInterfaceWithMetrics[SM <: FileMetadata](
         failed = true
         throw t
     } finally {
-      record(System.currentTimeMillis() - start, failed)
+      record((System.nanoTime() - start) / 1_000_000L, failed)
     }
   }
 

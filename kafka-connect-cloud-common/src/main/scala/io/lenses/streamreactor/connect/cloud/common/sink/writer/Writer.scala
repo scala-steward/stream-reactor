@@ -137,7 +137,7 @@ class Writer[SM <: FileMetadata](
         return ().asRight
     }
 
-    val commitStartMillis = System.currentTimeMillis()
+    val commitStartNanos = System.nanoTime()
     metrics.incrementInFlightUploads()
     try {
       writeState match {
@@ -214,7 +214,7 @@ class Writer[SM <: FileMetadata](
               logger.debug(s"[{}] Writer.resetState: New state $writeState", connectorTaskId.show)
             }
           } yield ()
-          val elapsed = System.currentTimeMillis() - commitStartMillis
+          val elapsed = (System.nanoTime() - commitStartNanos) / 1_000_000L
           result match {
             case Right(_) =>
               metrics.recordCommitTimer(elapsed)
