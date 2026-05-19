@@ -190,12 +190,11 @@ class StorageInterfaceWithMetricsTest
   // deleteFile + deleteFiles
   // -------------------------------------------------------------------------
 
-  test("deleteFile success: delete timer count increments, no error") {
+  test("deleteFile success: no error recorded") {
     val stub      = new StubStorageInterface()
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.deleteFile("b", "f", "etag")
 
-    metrics.getStorageDeleteTimerCount shouldBe 1L
     metrics.getStorageDeleteErrorsTotal shouldBe 0L
   }
 
@@ -204,17 +203,15 @@ class StorageInterfaceWithMetricsTest
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.deleteFile("b", "f", "etag")
 
-    metrics.getStorageDeleteTimerCount shouldBe 1L
     metrics.getStorageDeleteErrorsTotal shouldBe 1L
   }
 
-  test("deleteFiles uses the same delete timer and error counters") {
+  test("deleteFiles failure: delete error counter increments") {
     val stub =
       new StubStorageInterface(deleteFilesRes = Left(FileDeleteError(new RuntimeException("batch-fail"), "f1,f2")))
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.deleteFiles("b", Seq("f1", "f2"))
 
-    metrics.getStorageDeleteTimerCount shouldBe 1L
     metrics.getStorageDeleteErrorsTotal shouldBe 1L
   }
 
@@ -244,12 +241,11 @@ class StorageInterfaceWithMetricsTest
   // listKeysRecursive + listFileMetaRecursive (list)
   // -------------------------------------------------------------------------
 
-  test("listKeysRecursive success: list timer count increments, no error") {
+  test("listKeysRecursive success: no error recorded") {
     val stub      = new StubStorageInterface()
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.listKeysRecursive("b", None)
 
-    metrics.getStorageListTimerCount shouldBe 1L
     metrics.getStorageListErrorsTotal shouldBe 0L
   }
 
@@ -259,17 +255,7 @@ class StorageInterfaceWithMetricsTest
     val decorator = new StorageInterfaceWithMetrics(stub, metrics)
     val _         = decorator.listFileMetaRecursive("b", None)
 
-    metrics.getStorageListTimerCount shouldBe 1L
     metrics.getStorageListErrorsTotal shouldBe 1L
-  }
-
-  test("listKeysRecursive and listFileMetaRecursive share the same list timer counters") {
-    val stub      = new StubStorageInterface()
-    val decorator = new StorageInterfaceWithMetrics(stub, metrics)
-    val _         = decorator.listKeysRecursive("b", None)
-    val _         = decorator.listFileMetaRecursive("b", None)
-
-    metrics.getStorageListTimerCount shouldBe 2L
   }
 
   // -------------------------------------------------------------------------
@@ -290,8 +276,8 @@ class StorageInterfaceWithMetricsTest
     // None of the instrumented counters should move
     metrics.getStorageUploadTimerCount shouldBe 0L
     metrics.getStorageCopyTimerCount shouldBe 0L
-    metrics.getStorageDeleteTimerCount shouldBe 0L
+    metrics.getStorageDeleteErrorsTotal shouldBe 0L
     metrics.getStorageGetTimerCount shouldBe 0L
-    metrics.getStorageListTimerCount shouldBe 0L
+    metrics.getStorageListErrorsTotal shouldBe 0L
   }
 }

@@ -300,12 +300,9 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
     metrics.getStorageCopyErrorsTotal shouldBe 1L
   }
 
-  test("StorageDelete timer records both deleteFile and deleteFiles calls") {
-    metrics.recordStorageDelete(3L, isError = false)
-    metrics.recordStorageDelete(7L, isError = true)
-    metrics.getStorageDeleteTimerCount shouldBe 2L
+  test("StorageDelete error counter increments") {
+    metrics.recordStorageDeleteError()
     metrics.getStorageDeleteErrorsTotal shouldBe 1L
-    metrics.getStorageDeleteTimerSumMillis shouldBe 10L
   }
 
   test("StorageGet timer tracks getBlobAsStringAndEtag latency") {
@@ -315,12 +312,9 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
     metrics.getStorageGetTimerMaxMillis shouldBe 8L
   }
 
-  test("StorageList timer tracks list operation latency") {
-    metrics.recordStorageList(12L, isError = false)
-    metrics.recordStorageList(6L, isError  = true)
-    metrics.getStorageListTimerCount shouldBe 2L
+  test("StorageList error counter increments") {
+    metrics.recordStorageListError()
     metrics.getStorageListErrorsTotal shouldBe 1L
-    metrics.getStorageListTimerMaxMillis shouldBe 12L
   }
 
   // =========================================================================

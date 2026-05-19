@@ -295,11 +295,8 @@ trait CloudSinkMetricsMBean {
   def getStorageCopyTimerMaxMillis: Long
   def getStorageCopyErrorsTotal:    Long
 
-  // deleteFile / deleteFiles — GC drain and indexed-mode temp-file deletion
-  def getStorageDeleteTimerCount:     Long
-  def getStorageDeleteTimerSumMillis: Long
-  def getStorageDeleteTimerMaxMillis: Long
-  def getStorageDeleteErrorsTotal:    Long
+  // deleteFile / deleteFiles — GC drain and indexed-mode temp-file deletion (error-only; latency not exposed)
+  def getStorageDeleteErrorsTotal: Long
 
   // getBlobAsStringAndEtag / getBlobAsObject — granular/master lock reads and sweep loads
   def getStorageGetTimerCount:     Long
@@ -307,11 +304,8 @@ trait CloudSinkMetricsMBean {
   def getStorageGetTimerMaxMillis: Long
   def getStorageGetErrorsTotal:    Long
 
-  // listKeysRecursive / listFileMetaRecursive — orphan sweep and index manager listings
-  def getStorageListTimerCount:     Long
-  def getStorageListTimerSumMillis: Long
-  def getStorageListTimerMaxMillis: Long
-  def getStorageListErrorsTotal:    Long
+  // listKeysRecursive / listFileMetaRecursive — orphan sweep and index manager listings (error-only; latency not exposed)
+  def getStorageListErrorsTotal: Long
 
   // =========================================================================
   // D. Pending-operation retries & error classification
@@ -444,12 +438,10 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   private val storageUploadErrors = new LongAdder()
   private val storageCopyTimer    = new OpTimer()
   private val storageCopyErrors   = new LongAdder()
-  private val storageDeleteTimer  = new OpTimer()
   private val storageDeleteErrors = new LongAdder()
   private val storageGetTimer     = new OpTimer()
   private val storageGetErrors    = new LongAdder()
-  private val storageListTimer    = new OpTimer()
-  private val storageListErrors   = new LongAdder()
+  private val storageListErrors = new LongAdder()
 
   // --- D. Retries & error classification ---
 
@@ -536,20 +528,14 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   override def getStorageCopyTimerMaxMillis: Long = storageCopyTimer.maxMillis
   override def getStorageCopyErrorsTotal:    Long = storageCopyErrors.sum()
 
-  override def getStorageDeleteTimerCount:     Long = storageDeleteTimer.count
-  override def getStorageDeleteTimerSumMillis: Long = storageDeleteTimer.sumMillis
-  override def getStorageDeleteTimerMaxMillis: Long = storageDeleteTimer.maxMillis
-  override def getStorageDeleteErrorsTotal:    Long = storageDeleteErrors.sum()
+  override def getStorageDeleteErrorsTotal: Long = storageDeleteErrors.sum()
 
   override def getStorageGetTimerCount:     Long = storageGetTimer.count
   override def getStorageGetTimerSumMillis: Long = storageGetTimer.sumMillis
   override def getStorageGetTimerMaxMillis: Long = storageGetTimer.maxMillis
   override def getStorageGetErrorsTotal:    Long = storageGetErrors.sum()
 
-  override def getStorageListTimerCount:     Long = storageListTimer.count
-  override def getStorageListTimerSumMillis: Long = storageListTimer.sumMillis
-  override def getStorageListTimerMaxMillis: Long = storageListTimer.maxMillis
-  override def getStorageListErrorsTotal:    Long = storageListErrors.sum()
+  override def getStorageListErrorsTotal: Long = storageListErrors.sum()
 
   // D. Retries & error classification
   override def getPendingOperationRetriesTotal: Long = pendingOperationRetriesTotal.sum()
@@ -644,18 +630,12 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
     storageCopyTimer.record(elapsedMillis)
     if (isError) storageCopyErrors.increment()
   }
-  def recordStorageDelete(elapsedMillis: Long, isError: Boolean): Unit = {
-    storageDeleteTimer.record(elapsedMillis)
-    if (isError) storageDeleteErrors.increment()
-  }
+  def recordStorageDeleteError(): Unit = storageDeleteErrors.increment()
   def recordStorageGet(elapsedMillis: Long, isError: Boolean): Unit = {
     storageGetTimer.record(elapsedMillis)
     if (isError) storageGetErrors.increment()
   }
-  def recordStorageList(elapsedMillis: Long, isError: Boolean): Unit = {
-    storageListTimer.record(elapsedMillis)
-    if (isError) storageListErrors.increment()
-  }
+  def recordStorageListError(): Unit = storageListErrors.increment()
 
   // D. Retries & error classification mutators
   def incrementPendingOperationRetriesTotal(): Unit = pendingOperationRetriesTotal.increment()

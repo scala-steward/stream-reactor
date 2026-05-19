@@ -937,17 +937,17 @@ The MBean is registered at task start and unregistered at task stop. Attributes 
 
 ### C. Per-cloud storage SDK timings
 
-The following attributes are instrumented uniformly for S3, GCS, and Azure Data Lake via the `StorageInterfaceWithMetrics` decorator. Timer components follow the same `Count/SumMillis/MaxMillis` pattern.
+The following attributes are instrumented via the `StorageInterfaceWithMetrics` decorator. Upload, Copy, and Get expose a full `Count/SumMillis/MaxMillis` latency triplet plus an `ErrorsTotal` counter because their latency is operationally relevant (hot path or lock-read diagnosis). Delete and List are background-only paths (GC drain and orphan sweep); only their `ErrorsTotal` counter is exposed.
 
-| Attribute prefix | Wraps | Notes |
-|-----------------|-------|-------|
-| `StorageUploadTimer*` + `StorageUploadErrorsTotal` | `uploadFile` | Hot-path write to cloud storage. |
-| `StorageCopyTimer*` + `StorageCopyErrorsTotal` | `mvFile` | Copy-then-delete in indexed-mode commit and master-lock path. |
-| `StorageDeleteTimer*` + `StorageDeleteErrorsTotal` | `deleteFile` / `deleteFiles` | GC drain and indexed-mode temp-file deletion. |
-| `StorageGetTimer*` + `StorageGetErrorsTotal` | `getBlobAsStringAndEtag` | Granular/master lock reads and sweep loads. |
-| `StorageListTimer*` + `StorageListErrorsTotal` | `listKeysRecursive` / `listFileMetaRecursive` | Orphan sweep and index manager listings. |
+| Attribute prefix | Wraps | Instrumentation |
+|-----------------|-------|-----------------|
+| `StorageUploadTimer*` + `StorageUploadErrorsTotal` | `uploadFile` | Latency triplet + errors. Hot-path data write. |
+| `StorageCopyTimer*` + `StorageCopyErrorsTotal` | `mvFile` | Latency triplet + errors. Indexed-mode commit and master-lock path. |
+| `StorageGetTimer*` + `StorageGetErrorsTotal` | `getBlobAsStringAndEtag` | Latency triplet + errors. Granular/master lock reads and sweep loads. |
+| `StorageDeleteErrorsTotal` | `deleteFile` / `deleteFiles` | Errors only. GC drain and indexed-mode temp-file deletion — background path. |
+| `StorageListErrorsTotal` | `listKeysRecursive` / `listFileMetaRecursive` | Errors only. Orphan sweep and index manager listings — background path. |
 
-Full attribute list for uploads (same pattern for Copy/Delete/Get/List):
+Full attribute list for uploads (same `Count/SumMillis/MaxMillis/ErrorsTotal` shape applies to Copy and Get):
 
 | Attribute | Type | Description |
 |-----------|------|-------------|

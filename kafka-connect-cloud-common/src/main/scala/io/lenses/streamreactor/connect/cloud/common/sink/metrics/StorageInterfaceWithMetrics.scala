@@ -35,13 +35,13 @@ import java.time.Instant
  * prevent mis-ordering.
  *
  * Instrumented methods:
- *   - [[uploadFile]]         → storageUpload timer + error counter
- *   - [[mvFile]]             → storageCopy  timer + error counter
- *   - [[deleteFile]]         → storageDelete timer + error counter
- *   - [[deleteFiles]]        → storageDelete timer + error counter (same counters)
- *   - [[getBlobAsStringAndEtag]] → storageGet timer + error counter
- *   - [[listKeysRecursive]]  → storageList timer + error counter
- *   - [[listFileMetaRecursive]] → storageList timer + error counter (same counters)
+ *   - [[uploadFile]]             → storageUpload timer + error counter
+ *   - [[mvFile]]                 → storageCopy  timer + error counter
+ *   - [[getBlobAsStringAndEtag]] → storageGet   timer + error counter
+ *   - [[deleteFile]]             → storageDelete error counter only (GC path; latency not exposed)
+ *   - [[deleteFiles]]            → storageDelete error counter only (GC path; latency not exposed)
+ *   - [[listKeysRecursive]]      → storageList  error counter only (sweep path; latency not exposed)
+ *   - [[listFileMetaRecursive]]  → storageList  error counter only (sweep path; latency not exposed)
  *
  * All other methods are pure delegation with no instrumentation overhead.
  */
@@ -81,8 +81,8 @@ class StorageInterfaceWithMetrics[SM <: FileMetadata](
     bucket: String,
     prefix: Option[String],
   ): Either[FileListError, Option[ListOfMetadataResponse[SM]]] = {
-    val (result, elapsed) = timed(delegate.listFileMetaRecursive(bucket, prefix))
-    metrics.recordStorageList(elapsed, result.isLeft)
+    val result = delegate.listFileMetaRecursive(bucket, prefix)
+    if (result.isLeft) metrics.recordStorageListError()
     result
   }
 
@@ -90,8 +90,8 @@ class StorageInterfaceWithMetrics[SM <: FileMetadata](
     bucket: String,
     prefix: Option[String],
   ): Either[FileListError, Option[ListOfKeysResponse[SM]]] = {
-    val (result, elapsed) = timed(delegate.listKeysRecursive(bucket, prefix))
-    metrics.recordStorageList(elapsed, result.isLeft)
+    val result = delegate.listKeysRecursive(bucket, prefix)
+    if (result.isLeft) metrics.recordStorageListError()
     result
   }
 
@@ -130,14 +130,14 @@ class StorageInterfaceWithMetrics[SM <: FileMetadata](
     delegate.writeBlobToFile(bucket, path, objectProtection)
 
   override def deleteFiles(bucket: String, files: Seq[String]): Either[FileDeleteError, Unit] = {
-    val (result, elapsed) = timed(delegate.deleteFiles(bucket, files))
-    metrics.recordStorageDelete(elapsed, result.isLeft)
+    val result = delegate.deleteFiles(bucket, files)
+    if (result.isLeft) metrics.recordStorageDeleteError()
     result
   }
 
   override def deleteFile(bucket: String, file: String, eTag: String): Either[FileDeleteError, Unit] = {
-    val (result, elapsed) = timed(delegate.deleteFile(bucket, file, eTag))
-    metrics.recordStorageDelete(elapsed, result.isLeft)
+    val result = delegate.deleteFile(bucket, file, eTag)
+    if (result.isLeft) metrics.recordStorageDeleteError()
     result
   }
 
