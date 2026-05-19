@@ -150,7 +150,11 @@ class Writer[SM <: FileMetadata](
                                      recordCount,
             ) =>
           val fileSize = file.length()
-          val fnIndexUpdate: (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]] =
+          val fnIndexUpdate: (
+            TopicPartition,
+            Option[Offset],
+            Option[PendingState],
+          ) => Either[SinkError, Option[Offset]] =
             partitionKey match {
               case Some(pk) => (tp, co, ps) => indexManager.updateForPartitionKey(tp, pk, co, ps)
               case None     => (tp, co, ps) => indexManager.update(tp, co, ps)
@@ -268,7 +272,7 @@ class Writer[SM <: FileMetadata](
           file.getName,
         ),
       )
-    case NoWriter(_)  => false
+    case NoWriter(_) => false
     case _: Uploading => false
   }
 

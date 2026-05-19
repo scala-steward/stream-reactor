@@ -441,14 +441,14 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   private val storageDeleteErrors = new LongAdder()
   private val storageGetTimer     = new OpTimer()
   private val storageGetErrors    = new LongAdder()
-  private val storageListErrors = new LongAdder()
+  private val storageListErrors   = new LongAdder()
 
   // --- D. Retries & error classification ---
 
   private val pendingOperationRetriesTotal = new LongAdder()
-  private val sinkErrorsFatalTotal            = new LongAdder()
-  private val sinkErrorsRetriableTotal        = new LongAdder()
-  private val sinkErrorsNonFatalTotal         = new LongAdder()
+  private val sinkErrorsFatalTotal         = new LongAdder()
+  private val sinkErrorsRetriableTotal     = new LongAdder()
+  private val sinkErrorsNonFatalTotal      = new LongAdder()
 
   // --- E. Schema / skip / seek diagnostics ---
 
@@ -539,9 +539,9 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
 
   // D. Retries & error classification
   override def getPendingOperationRetriesTotal: Long = pendingOperationRetriesTotal.sum()
-  override def getSinkErrorsFatalTotal:            Long = sinkErrorsFatalTotal.sum()
-  override def getSinkErrorsRetriableTotal:        Long = sinkErrorsRetriableTotal.sum()
-  override def getSinkErrorsNonFatalTotal:         Long = sinkErrorsNonFatalTotal.sum()
+  override def getSinkErrorsFatalTotal:         Long = sinkErrorsFatalTotal.sum()
+  override def getSinkErrorsRetriableTotal:     Long = sinkErrorsRetriableTotal.sum()
+  override def getSinkErrorsNonFatalTotal:      Long = sinkErrorsNonFatalTotal.sum()
 
   // E. Schema / skip / seek diagnostics
   override def getSchemaRolloversTotal:         Long = schemaRolloversTotal.sum()
@@ -606,7 +606,7 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   def setSafeOffsetBarrierWriters(count: Int): Unit = safeOffsetBarrierWriters.set(count)
 
   // A. Ingest throughput mutators
-  def addRecordsReceivedTotal(n:          Long): Unit = recordsReceivedTotal.add(n)
+  def addRecordsReceivedTotal(n: Long): Unit = recordsReceivedTotal.add(n)
   def incrementRecordsWrittenTotal():     Unit = recordsWrittenTotal.increment()
   def incrementNullRecordsSkippedTotal(): Unit = nullRecordsSkippedTotal.increment()
   def setLastPutEpochMillis(ts:     Long): Unit = lastPutEpochMillis.set(ts)
@@ -616,8 +616,8 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   def incrementFilesOpenedTotal():    Unit = filesOpenedTotal.increment()
   def incrementFilesCommittedTotal(): Unit = filesCommittedTotal.increment()
   def incrementFilesFailedTotal():    Unit = filesFailedTotal.increment()
-  def addBytesWrittenTotal(n:     Long): Unit = bytesWrittenTotal.add(n)
-  def addRecordsCommittedTotal(n: Long): Unit = recordsCommittedTotal.add(n)
+  def addBytesWrittenTotal(n:          Long): Unit = bytesWrittenTotal.add(n)
+  def addRecordsCommittedTotal(n:      Long): Unit = recordsCommittedTotal.add(n)
   def recordCommitTimer(elapsedMillis: Long): Unit = commitTimer.record(elapsedMillis)
   def setLastCommitEpochMillis(ts:     Long): Unit = lastCommitEpochMillis.set(ts)
 
@@ -639,9 +639,9 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
 
   // D. Retries & error classification mutators
   def incrementPendingOperationRetriesTotal(): Unit = pendingOperationRetriesTotal.increment()
-  def incrementSinkErrorsFatalTotal():            Unit = sinkErrorsFatalTotal.increment()
-  def incrementSinkErrorsRetriableTotal():        Unit = sinkErrorsRetriableTotal.increment()
-  def incrementSinkErrorsNonFatalTotal():         Unit = sinkErrorsNonFatalTotal.increment()
+  def incrementSinkErrorsFatalTotal():         Unit = sinkErrorsFatalTotal.increment()
+  def incrementSinkErrorsRetriableTotal():     Unit = sinkErrorsRetriableTotal.increment()
+  def incrementSinkErrorsNonFatalTotal():      Unit = sinkErrorsNonFatalTotal.increment()
 
   // E. Schema / skip / seek diagnostics mutators
   def incrementSchemaRolloversTotal():         Unit = schemaRolloversTotal.increment()
