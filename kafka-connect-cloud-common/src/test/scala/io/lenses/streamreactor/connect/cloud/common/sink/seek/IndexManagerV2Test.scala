@@ -4073,12 +4073,19 @@ class IndexManagerV2Test
 
     when(oldIndexManager.seekOffsetsForTopicPartition(any[TopicPartition])).thenReturn(Right(None))
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
-    when(si.writeBlobToFile[IndexFile](anyString(), anyString(), any[NoOverwriteExistingObject[IndexFile]])(
-      ArgumentMatchers.eq(indexFileEncoder),
-    )).thenReturn(Right(ObjectWithETag(IndexFile("lockOwner", None, None), "etag")))
+    when(
+      si.writeBlobToFile[IndexFile](anyString(), anyString(), any[NoOverwriteExistingObject[IndexFile]])(
+        ArgumentMatchers.eq(indexFileEncoder),
+      ),
+    ).thenReturn(Right(ObjectWithETag(IndexFile("lockOwner", None, None), "etag")))
     when(si.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
 
-    val im = new IndexManagerV2(bucketAndPrefixFn, oldIndexManager, pendingOperationsProcessors, indexesDirectoryName, gcIntervalSeconds = Int.MaxValue)(si, connectorTaskId)
+    val im = new IndexManagerV2(bucketAndPrefixFn,
+                                oldIndexManager,
+                                pendingOperationsProcessors,
+                                indexesDirectoryName,
+                                gcIntervalSeconds = Int.MaxValue,
+    )(si, connectorTaskId)
     try {
       val result = im.open(Set(topicPartition))
       result.isRight should be(true)
@@ -4105,7 +4112,12 @@ class IndexManagerV2Test
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
 
-    val im = new IndexManagerV2(bucketAndPrefixFn, oldIndexManager, pendingOperationsProcessors, indexesDirectoryName, gcIntervalSeconds = Int.MaxValue)(si, connectorTaskId)
+    val im = new IndexManagerV2(bucketAndPrefixFn,
+                                oldIndexManager,
+                                pendingOperationsProcessors,
+                                indexesDirectoryName,
+                                gcIntervalSeconds = Int.MaxValue,
+    )(si, connectorTaskId)
     try {
       val result = im.open(Set(topicPartition))
       result.isRight should be(true)
@@ -4135,7 +4147,12 @@ class IndexManagerV2Test
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
 
-    val im = new IndexManagerV2(bucketAndPrefixFn, oldIndexManager, pendingOperationsProcessors, indexesDirectoryName, gcIntervalSeconds = Int.MaxValue)(si, connectorTaskId)
+    val im = new IndexManagerV2(bucketAndPrefixFn,
+                                oldIndexManager,
+                                pendingOperationsProcessors,
+                                indexesDirectoryName,
+                                gcIntervalSeconds = Int.MaxValue,
+    )(si, connectorTaskId)
     try {
       val result = im.open(Set(topicPartition))
       result.isRight should be(true)
@@ -4157,7 +4174,12 @@ class IndexManagerV2Test
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
 
-    val im = new IndexManagerV2(bucketAndPrefixFn, oldIndexManager, pendingOperationsProcessors, indexesDirectoryName, gcIntervalSeconds = Int.MaxValue)(si, connectorTaskId)
+    val im = new IndexManagerV2(bucketAndPrefixFn,
+                                oldIndexManager,
+                                pendingOperationsProcessors,
+                                indexesDirectoryName,
+                                gcIntervalSeconds = Int.MaxValue,
+    )(si, connectorTaskId)
     try {
       val result = im.open(Set(topicPartition))
       result.isLeft should be(true)
@@ -4181,18 +4203,27 @@ class IndexManagerV2Test
       ArgumentMatchers.eq(indexFileDecoder),
     )).thenReturn(Right(ObjectWithETag(IndexFile("lockOwner", Some(Offset(50)), None), "master-etag")))
 
-    val im = new IndexManagerV2(bucketAndPrefixFn, oldIndexManager, pendingOperationsProcessors, indexesDirectoryName, gcIntervalSeconds = Int.MaxValue)(si, connectorTaskId)
+    val im = new IndexManagerV2(bucketAndPrefixFn,
+                                oldIndexManager,
+                                pendingOperationsProcessors,
+                                indexesDirectoryName,
+                                gcIntervalSeconds = Int.MaxValue,
+    )(si, connectorTaskId)
     im.open(Set(tp))
 
     // Granular lock read returns EmptyFileError
-    when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.contains("/0/poison-key.lock"))(
-      ArgumentMatchers.eq(indexFileDecoder),
-    )).thenReturn(Left(EmptyFileError("bucket/poison-key.lock", poisonETag)))
+    when(
+      si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.contains("/0/poison-key.lock"))(
+        ArgumentMatchers.eq(indexFileDecoder),
+      ),
+    ).thenReturn(Left(EmptyFileError("bucket/poison-key.lock", poisonETag)))
 
     // ObjectWithETag write should succeed
-    when(si.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
-      ArgumentMatchers.eq(indexFileEncoder),
-    )).thenReturn(Right(ObjectWithETag(IndexFile("lockOwner", None, None), postWriteETag)))
+    when(
+      si.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
+        ArgumentMatchers.eq(indexFileEncoder),
+      ),
+    ).thenReturn(Right(ObjectWithETag(IndexFile("lockOwner", None, None), postWriteETag)))
 
     try {
       val result = im.ensureGranularLock(tp, "poison-key")
@@ -4200,13 +4231,17 @@ class IndexManagerV2Test
 
       // Verify ObjectWithETag write was called (not NoOverwriteExistingObject)
       val captor = ArgumentCaptor.forClass(classOf[ObjectProtection[IndexFile]])
-      verify(si).writeBlobToFile[IndexFile](anyString(), anyString(), captor.capture())(ArgumentMatchers.eq(indexFileEncoder))
+      verify(si).writeBlobToFile[IndexFile](anyString(), anyString(), captor.capture())(
+        ArgumentMatchers.eq(indexFileEncoder),
+      )
       captor.getValue should be(a[ObjectWithETag[_]])
       captor.getValue.asInstanceOf[ObjectWithETag[IndexFile]].eTag should be(poisonETag)
     } finally im.close()
   }
 
-  test("ensureGranularLock: NoOverwrite fallback re-read transient failure returns NonFatalCloudSinkError(swallowable=false)") {
+  test(
+    "ensureGranularLock: NoOverwrite fallback re-read transient failure returns NonFatalCloudSinkError(swallowable=false)",
+  ) {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 

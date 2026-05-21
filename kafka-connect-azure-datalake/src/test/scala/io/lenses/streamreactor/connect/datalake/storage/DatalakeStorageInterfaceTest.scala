@@ -1086,16 +1086,16 @@ class DatalakeStorageInterfaceTest
   // never in the source slot (slot 3).
 
   private def setupAtomicWriteHappyPath(
-    bucket:          String,
-    path:            String,
-    postRenameETag:  String,
+    bucket:         String,
+    path:           String,
+    postRenameETag: String,
   ): (DataLakeFileSystemClient, DataLakeFileClient, Response[DataLakeFileClient]) = {
-    val tmpPath      = s"$path.tmp.${connectorTaskId.lockUuid}"
-    val fsClient     = mock[DataLakeFileSystemClient]
-    val tmpClient    = mock[DataLakeFileClient]
-    val flushResp    = mock[Response[PathInfo]]
-    val pathInfo     = mock[PathInfo]
-    val renameResp   = mock[Response[DataLakeFileClient]]
+    val tmpPath       = s"$path.tmp.${connectorTaskId.lockUuid}"
+    val fsClient      = mock[DataLakeFileSystemClient]
+    val tmpClient     = mock[DataLakeFileClient]
+    val flushResp     = mock[Response[PathInfo]]
+    val pathInfo      = mock[PathInfo]
+    val renameResp    = mock[Response[DataLakeFileClient]]
     val renameHeaders = new HttpHeaders()
     renameHeaders.set("ETag", postRenameETag)
 
@@ -1106,7 +1106,15 @@ class DatalakeStorageInterfaceTest
     when(pathInfo.getETag).thenReturn("tmp-etag") // .tmp eTag (not returned to caller)
     when(flushResp.getValue).thenReturn(pathInfo)
     when(
-      tmpClient.flushWithResponse(anyLong, anyBoolean, anyBoolean, any[PathHttpHeaders], isNull[DataLakeRequestConditions], isNull[java.time.Duration], any[Context]),
+      tmpClient.flushWithResponse(
+        anyLong,
+        anyBoolean,
+        anyBoolean,
+        any[PathHttpHeaders],
+        isNull[DataLakeRequestConditions],
+        isNull[java.time.Duration],
+        any[Context],
+      ),
     ).thenReturn(flushResp)
     when(renameResp.getHeaders).thenReturn(renameHeaders)
 
@@ -1186,7 +1194,15 @@ class DatalakeStorageInterfaceTest
     when(pathInfo.getETag).thenReturn("tmp-etag")
     when(flushResp.getValue).thenReturn(pathInfo)
     when(
-      tmpClient.flushWithResponse(anyLong, anyBoolean, anyBoolean, any[PathHttpHeaders], isNull[DataLakeRequestConditions], isNull[java.time.Duration], any[Context]),
+      tmpClient.flushWithResponse(
+        anyLong,
+        anyBoolean,
+        anyBoolean,
+        any[PathHttpHeaders],
+        isNull[DataLakeRequestConditions],
+        isNull[java.time.Duration],
+        any[Context],
+      ),
     ).thenReturn(flushResp)
 
     // Rename fails with 412 (destination already exists — NoOverwrite condition not met)
@@ -1268,7 +1284,15 @@ class DatalakeStorageInterfaceTest
     when(pathInfo.getETag).thenReturn("tmp-etag")
     when(flushResp.getValue).thenReturn(pathInfo)
     when(
-      tmpClient.flushWithResponse(anyLong, anyBoolean, anyBoolean, any[PathHttpHeaders], isNull[DataLakeRequestConditions], isNull[java.time.Duration], any[Context]),
+      tmpClient.flushWithResponse(
+        anyLong,
+        anyBoolean,
+        anyBoolean,
+        any[PathHttpHeaders],
+        isNull[DataLakeRequestConditions],
+        isNull[java.time.Duration],
+        any[Context],
+      ),
     ).thenReturn(flushResp)
 
     when(tmpClient.renameWithResponse(eqTo(bucket), eqTo(path), any, any, any, any)).thenThrow(
@@ -1282,9 +1306,9 @@ class DatalakeStorageInterfaceTest
   }
 
   "writeBlobToFile" should "clean up .tmp on append failure" in {
-    val bucket  = "test-bucket"
-    val path    = "test-path/index.lock"
-    val tmpPath = s"$path.tmp.${connectorTaskId.lockUuid}"
+    val bucket   = "test-bucket"
+    val path     = "test-path/index.lock"
+    val tmpPath  = s"$path.tmp.${connectorTaskId.lockUuid}"
     val testData = TestIndexFile("owner-123", Some(100L))
 
     val fsClient  = mock[DataLakeFileSystemClient]
@@ -1304,9 +1328,9 @@ class DatalakeStorageInterfaceTest
   }
 
   "writeBlobToFile" should "clean up .tmp on flush failure" in {
-    val bucket  = "test-bucket"
-    val path    = "test-path/index.lock"
-    val tmpPath = s"$path.tmp.${connectorTaskId.lockUuid}"
+    val bucket   = "test-bucket"
+    val path     = "test-path/index.lock"
+    val tmpPath  = s"$path.tmp.${connectorTaskId.lockUuid}"
     val testData = TestIndexFile("owner-123", Some(100L))
 
     val fsClient  = mock[DataLakeFileSystemClient]
@@ -1316,7 +1340,15 @@ class DatalakeStorageInterfaceTest
     when(fsClient.createFile(tmpPath, true)).thenReturn(tmpClient)
     doAnswer((_: InvocationOnMock) => ()).when(tmpClient).append(any[ByteArrayInputStream], anyLong, anyLong)
     when(
-      tmpClient.flushWithResponse(anyLong, anyBoolean, anyBoolean, any[PathHttpHeaders], isNull[DataLakeRequestConditions], isNull[java.time.Duration], any[Context]),
+      tmpClient.flushWithResponse(
+        anyLong,
+        anyBoolean,
+        anyBoolean,
+        any[PathHttpHeaders],
+        isNull[DataLakeRequestConditions],
+        isNull[java.time.Duration],
+        any[Context],
+      ),
     ).thenThrow(new RuntimeException("flush failed"))
 
     val result = storageInterface.writeBlobToFile(bucket, path, NoOverwriteExistingObject(testData))
@@ -1327,9 +1359,9 @@ class DatalakeStorageInterfaceTest
   }
 
   "writeBlobToFile" should "clean up .tmp on rename failure (non-412)" in {
-    val bucket  = "test-bucket"
-    val path    = "test-path/index.lock"
-    val tmpPath = s"$path.tmp.${connectorTaskId.lockUuid}"
+    val bucket   = "test-bucket"
+    val path     = "test-path/index.lock"
+    val tmpPath  = s"$path.tmp.${connectorTaskId.lockUuid}"
     val testData = TestIndexFile("owner-123", Some(100L))
 
     val fsClient  = mock[DataLakeFileSystemClient]
@@ -1343,7 +1375,15 @@ class DatalakeStorageInterfaceTest
     when(pathInfo.getETag).thenReturn("tmp-etag")
     when(flushResp.getValue).thenReturn(pathInfo)
     when(
-      tmpClient.flushWithResponse(anyLong, anyBoolean, anyBoolean, any[PathHttpHeaders], isNull[DataLakeRequestConditions], isNull[java.time.Duration], any[Context]),
+      tmpClient.flushWithResponse(
+        anyLong,
+        anyBoolean,
+        anyBoolean,
+        any[PathHttpHeaders],
+        isNull[DataLakeRequestConditions],
+        isNull[java.time.Duration],
+        any[Context],
+      ),
     ).thenReturn(flushResp)
     when(tmpClient.renameWithResponse(eqTo(bucket), eqTo(path), any, any, any, any)).thenThrow(
       new DataLakeStorageException("ServerError", mockHttpResponse(500), null),
@@ -1362,11 +1402,11 @@ class DatalakeStorageInterfaceTest
     val tmpPath  = s"$path.tmp.${connectorTaskId.lockUuid}"
     val testData = TestIndexFile("owner-123", Some(100L))
 
-    val fsClient     = mock[DataLakeFileSystemClient]
-    val tmpClient    = mock[DataLakeFileClient]
-    val flushResp    = mock[Response[PathInfo]]
-    val pathInfo     = mock[PathInfo]
-    val renameResp   = mock[Response[DataLakeFileClient]]
+    val fsClient   = mock[DataLakeFileSystemClient]
+    val tmpClient  = mock[DataLakeFileClient]
+    val flushResp  = mock[Response[PathInfo]]
+    val pathInfo   = mock[PathInfo]
+    val renameResp = mock[Response[DataLakeFileClient]]
     // No ETag header set — simulates an ADLS response that omits the ETag field
     val emptyHeaders = new HttpHeaders()
 
@@ -1376,7 +1416,15 @@ class DatalakeStorageInterfaceTest
     when(pathInfo.getETag).thenReturn("tmp-etag")
     when(flushResp.getValue).thenReturn(pathInfo)
     when(
-      tmpClient.flushWithResponse(anyLong, anyBoolean, anyBoolean, any[PathHttpHeaders], isNull[DataLakeRequestConditions], isNull[java.time.Duration], any[Context]),
+      tmpClient.flushWithResponse(
+        anyLong,
+        anyBoolean,
+        anyBoolean,
+        any[PathHttpHeaders],
+        isNull[DataLakeRequestConditions],
+        isNull[java.time.Duration],
+        any[Context],
+      ),
     ).thenReturn(flushResp)
     when(renameResp.getHeaders).thenReturn(emptyHeaders)
     when(tmpClient.renameWithResponse(eqTo(bucket), eqTo(path), any, any, any, any)).thenReturn(renameResp)
@@ -1395,11 +1443,11 @@ class DatalakeStorageInterfaceTest
     val tmpPath  = s"$path.tmp.${connectorTaskId.lockUuid}"
     val testData = TestIndexFile("owner-123", Some(100L))
 
-    val fsClient     = mock[DataLakeFileSystemClient]
-    val tmpClient    = mock[DataLakeFileClient]
-    val flushResp    = mock[Response[PathInfo]]
-    val pathInfo     = mock[PathInfo]
-    val renameResp   = mock[Response[DataLakeFileClient]]
+    val fsClient   = mock[DataLakeFileSystemClient]
+    val tmpClient  = mock[DataLakeFileClient]
+    val flushResp  = mock[Response[PathInfo]]
+    val pathInfo   = mock[PathInfo]
+    val renameResp = mock[Response[DataLakeFileClient]]
     // ETag header present but empty
     val emptyETagHeaders = new HttpHeaders()
     emptyETagHeaders.set("ETag", "")
@@ -1410,7 +1458,15 @@ class DatalakeStorageInterfaceTest
     when(pathInfo.getETag).thenReturn("tmp-etag")
     when(flushResp.getValue).thenReturn(pathInfo)
     when(
-      tmpClient.flushWithResponse(anyLong, anyBoolean, anyBoolean, any[PathHttpHeaders], isNull[DataLakeRequestConditions], isNull[java.time.Duration], any[Context]),
+      tmpClient.flushWithResponse(
+        anyLong,
+        anyBoolean,
+        anyBoolean,
+        any[PathHttpHeaders],
+        isNull[DataLakeRequestConditions],
+        isNull[java.time.Duration],
+        any[Context],
+      ),
     ).thenReturn(flushResp)
     when(renameResp.getHeaders).thenReturn(emptyETagHeaders)
     when(tmpClient.renameWithResponse(eqTo(bucket), eqTo(path), any, any, any, any)).thenReturn(renameResp)
@@ -1424,9 +1480,9 @@ class DatalakeStorageInterfaceTest
   }
 
   "writeBlobToFile" should "create parent directory and retry .tmp create on PathNotFound" in {
-    val bucket  = "test-bucket"
-    val path    = "a/b/index.lock"
-    val tmpPath = s"$path.tmp.${connectorTaskId.lockUuid}"
+    val bucket   = "test-bucket"
+    val path     = "a/b/index.lock"
+    val tmpPath  = s"$path.tmp.${connectorTaskId.lockUuid}"
     val testData = TestIndexFile("owner-123", Some(100L))
 
     val fsClient        = mock[DataLakeFileSystemClient]
@@ -1449,7 +1505,15 @@ class DatalakeStorageInterfaceTest
     val flushResp = mock[Response[PathInfo]]
     when(flushResp.getValue).thenReturn(pathInfo)
     when(
-      tmpClient.flushWithResponse(anyLong, anyBoolean, anyBoolean, any[PathHttpHeaders], isNull[DataLakeRequestConditions], isNull[java.time.Duration], any[Context]),
+      tmpClient.flushWithResponse(
+        anyLong,
+        anyBoolean,
+        anyBoolean,
+        any[PathHttpHeaders],
+        isNull[DataLakeRequestConditions],
+        isNull[java.time.Duration],
+        any[Context],
+      ),
     ).thenReturn(flushResp)
 
     val renameResp    = mock[Response[DataLakeFileClient]]
@@ -1538,9 +1602,9 @@ class DatalakeStorageInterfaceTest
     val path   = "test-path/index.lock"
     val eTag   = "the-etag"
 
-    val fsClient   = mock[DataLakeFileSystemClient]
-    val fileClient = mock[DataLakeFileClient]
-    val readResp   = mock[FileReadResponse]
+    val fsClient    = mock[DataLakeFileSystemClient]
+    val fileClient  = mock[DataLakeFileClient]
+    val readResp    = mock[FileReadResponse]
     val readHeaders = mock[FileReadHeaders]
 
     when(client.getFileSystemClient(bucket)).thenReturn(fsClient)
@@ -1573,9 +1637,9 @@ class DatalakeStorageInterfaceTest
     val path   = "test-path/index.lock"
     val eTag   = "the-etag"
 
-    val fsClient   = mock[DataLakeFileSystemClient]
-    val fileClient = mock[DataLakeFileClient]
-    val readResp   = mock[FileReadResponse]
+    val fsClient    = mock[DataLakeFileSystemClient]
+    val fileClient  = mock[DataLakeFileClient]
+    val readResp    = mock[FileReadResponse]
     val readHeaders = mock[FileReadHeaders]
 
     when(client.getFileSystemClient(bucket)).thenReturn(fsClient)
