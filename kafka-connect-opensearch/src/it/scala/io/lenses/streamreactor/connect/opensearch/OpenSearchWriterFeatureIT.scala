@@ -53,16 +53,17 @@ class OpenSearchWriterFeatureIT extends ITBase {
     r2.isSuccess shouldBe true
     r2.get.errors shouldBe false
 
-    // Exactly one document; it must have the second version's field value
+    // Exactly one document; it must have the second version's field value.
+    // awaitDocumentCount asserts the count via search (NRT); the body assertion uses a
+    // realtime GET by id, which bypasses the search index and is not subject to refresh timing.
     awaitDocumentCount(index, 1L)
 
-    val searchResp = client.search(
-      (s: org.opensearch.client.opensearch.core.SearchRequest.Builder) => s.index(index),
+    val getResp = client.get(
+      (g: org.opensearch.client.opensearch.core.GetRequest.Builder) => g.index(index).id("u1"),
       classOf[com.fasterxml.jackson.databind.JsonNode],
     )
-    val hits = searchResp.hits().hits()
-    hits should have size 1
-    hits.get(0).source().get("val").asText() shouldBe "second"
+    getResp.found() shouldBe true
+    getResp.source().get("val").asText() shouldBe "second"
   }
 
   // ---- Tombstone DELETE readback ----
