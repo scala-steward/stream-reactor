@@ -18,6 +18,7 @@ package io.lenses.streamreactor.connect.cloud.common.sink.metrics
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
 
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.LongAdder
 
 /**
@@ -229,9 +230,155 @@ trait CloudSinkMetricsMBean {
    * needs tuning (see the Operational Constraints section of `datalake-exactly-once-partitionby`).
    */
   def getSafeOffsetBarrierWriters: Int
+
+  // =========================================================================
+  // A. Ingest throughput
+  // =========================================================================
+
+  /** Cumulative records received across all `put` invocations. */
+  def getRecordsReceivedTotal: Long
+
+  /** Cumulative records that passed null-value filter and were forwarded to `writerManager.write`. */
+  def getRecordsWrittenTotal: Long
+
+  /** Cumulative records skipped because the value was null and `skipNullValues` is enabled. */
+  def getNullRecordsSkippedTotal: Long
+
+  /** Wall-clock epoch (ms) of the last completed `put` invocation. 0 if `put` has never run. */
+  def getLastPutEpochMillis: Long
+
+  // put() latency timer components
+  def getPutTimerCount:     Long
+  def getPutTimerSumMillis: Long
+  def getPutTimerMaxMillis: Long
+
+  // =========================================================================
+  // B. File / commit lifecycle
+  // =========================================================================
+
+  /** Cumulative number of new files opened (NoWriter → Writing transitions). */
+  def getFilesOpenedTotal: Long
+
+  /** Cumulative successful file commits (upload + index update completed). */
+  def getFilesCommittedTotal: Long
+
+  /**
+   * Cumulative failed file commit attempts.  A single file may increment this counter
+   * multiple times if the transient-upload path retries before succeeding.
+   */
+  def getFilesFailedTotal: Long
+
+  /** Cumulative bytes written to cloud storage across all committed files. */
+  def getBytesWrittenTotal: Long
+
+  /** Cumulative records included in all committed files. */
+  def getRecordsCommittedTotal: Long
+
+  // commit() latency timer components (seal → upload → index update)
+  def getCommitTimerCount:     Long
+  def getCommitTimerSumMillis: Long
+  def getCommitTimerMaxMillis: Long
+
+  // =========================================================================
+  // C. Per-cloud storage SDK call timings & errors
+  // =========================================================================
+
+  // uploadFile — the hot path write to S3/GCS/Azure
+  def getStorageUploadTimerCount:     Long
+  def getStorageUploadTimerSumMillis: Long
+  def getStorageUploadTimerMaxMillis: Long
+  def getStorageUploadErrorsTotal:    Long
+
+  // mvFile — copy-then-delete in indexed-mode commit and master-lock path
+  def getStorageCopyTimerCount:     Long
+  def getStorageCopyTimerSumMillis: Long
+  def getStorageCopyTimerMaxMillis: Long
+  def getStorageCopyErrorsTotal:    Long
+
+  // deleteFile / deleteFiles — GC drain and indexed-mode temp-file deletion (error-only; latency not exposed)
+  def getStorageDeleteErrorsTotal: Long
+
+  // getBlobAsStringAndEtag / getBlobAsObject — granular/master lock reads and sweep loads
+  def getStorageGetTimerCount:     Long
+  def getStorageGetTimerSumMillis: Long
+  def getStorageGetTimerMaxMillis: Long
+  def getStorageGetErrorsTotal:    Long
+
+  // listKeysRecursive / listFileMetaRecursive — orphan sweep and index manager listings (error-only; latency not exposed)
+  def getStorageListErrorsTotal: Long
+
+  // =========================================================================
+  // D. Pending-operation retries & error classification
+  // =========================================================================
+
+  /**
+   * Cumulative transient upload failures that will be retried by the next `recommitPending`
+   * call.  Each increment corresponds to one NonFatalCloudSinkError raised from the
+   * transient-upload path in `PendingOperationsProcessors`.
+   */
+  def getPendingOperationRetriesTotal: Long
+
+  /** Cumulative sink errors classified as Fatal (task fails immediately). */
+  def getSinkErrorsFatalTotal: Long
+
+  /** Cumulative sink errors classified as Retriable (Connect re-delivers the batch). */
+  def getSinkErrorsRetriableTotal: Long
+
+  /** Cumulative sink errors classified as NonFatal (Connect may swallow depending on policy). */
+  def getSinkErrorsNonFatalTotal: Long
+
+  // =========================================================================
+  // E. Schema / skip / seek diagnostics
+  // =========================================================================
+
+  /**
+   * Cumulative schema-rollover events — a new schema was detected that is incompatible
+   * with the current file format, triggering a full flush of all writers for that
+   * topic-partition before the new schema can be written.
+   */
+  def getSchemaRolloversTotal: Long
+
+  /**
+   * Cumulative duplicate records skipped because the offset had already been committed
+   * (dedup by the index manager seek path).
+   */
+  def getDuplicateRecordsSkippedTotal: Long
+
+  /**
+   * Cumulative topic-partition assignments for which `context.offset(...)` was called
+   * during `open`, seeking the consumer back to recover from a restart.
+   */
+  def getSeekOnOpenAppliedTotal: Long
+
+  /**
+   * Cumulative `close(partitions)` calls from Kafka Connect (one per rebalance event).
+   * A persistently high rate indicates an unstable consumer group.
+   */
+  def getRebalanceClosesTotal: Long
+
+  // =========================================================================
+  // F. Current state gauges
+  // =========================================================================
+
+  /**
+   * Current number of writers in the `Uploading` state — i.e. files whose data has been
+   * sealed locally and whose cloud upload is in progress or pending retry.
+   * A persistently elevated value signals slow cloud storage or a stalled retry loop.
+   */
+  def getInFlightUploads: Int
+
+  /**
+   * Milliseconds elapsed since the last successful file commit.
+   * Returns 0 before the first commit.  The primary liveness signal for an alert on
+   * "task stuck" — pair with `getFilesCommittedTotal` rate to distinguish "busy but slow"
+   * from "completely stalled".
+   */
+  def getMillisSinceLastCommit: Long
 }
 
 class CloudSinkMetrics() extends CloudSinkMetricsMBean {
+
+  // --- existing fields ---
 
   private val writerCount         = new AtomicInteger(0)
   private val idleWriterEvictions = new LongAdder()
@@ -267,7 +414,56 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
 
   private val safeOffsetBarrierWriters = new AtomicInteger(0)
 
-  // --- getters (exposed via JMX) ---
+  // --- A. Ingest throughput ---
+
+  private val recordsReceivedTotal    = new LongAdder()
+  private val recordsWrittenTotal     = new LongAdder()
+  private val nullRecordsSkippedTotal = new LongAdder()
+  private val lastPutEpochMillis      = new AtomicLong(0L)
+  private val putTimer                = new OpTimer()
+
+  // --- B. File / commit lifecycle ---
+
+  private val filesOpenedTotal      = new LongAdder()
+  private val filesCommittedTotal   = new LongAdder()
+  private val filesFailedTotal      = new LongAdder()
+  private val bytesWrittenTotal     = new LongAdder()
+  private val recordsCommittedTotal = new LongAdder()
+  private val commitTimer           = new OpTimer()
+  private val lastCommitEpochMillis = new AtomicLong(0L)
+
+  // --- C. Storage SDK timers ---
+
+  private val storageUploadTimer  = new OpTimer()
+  private val storageUploadErrors = new LongAdder()
+  private val storageCopyTimer    = new OpTimer()
+  private val storageCopyErrors   = new LongAdder()
+  private val storageDeleteErrors = new LongAdder()
+  private val storageGetTimer     = new OpTimer()
+  private val storageGetErrors    = new LongAdder()
+  private val storageListErrors   = new LongAdder()
+
+  // --- D. Retries & error classification ---
+
+  private val pendingOperationRetriesTotal = new LongAdder()
+  private val sinkErrorsFatalTotal         = new LongAdder()
+  private val sinkErrorsRetriableTotal     = new LongAdder()
+  private val sinkErrorsNonFatalTotal      = new LongAdder()
+
+  // --- E. Schema / skip / seek diagnostics ---
+
+  private val schemaRolloversTotal         = new LongAdder()
+  private val duplicateRecordsSkippedTotal = new LongAdder()
+  private val seekOnOpenAppliedTotal       = new LongAdder()
+  private val rebalanceClosesTotal         = new LongAdder()
+
+  // --- F. Current state gauges ---
+
+  private val inFlightUploads = new AtomicInteger(0)
+
+  // =========================================================================
+  // Getters — exposed via JMX
+  // =========================================================================
 
   override def getWriterCount:         Int  = writerCount.get()
   override def getIdleWriterEvictions: Long = idleWriterEvictions.sum()
@@ -302,7 +498,68 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
 
   override def getSafeOffsetBarrierWriters: Int = safeOffsetBarrierWriters.get()
 
-  // --- mutators (not exposed via JMX trait) ---
+  // A. Ingest throughput
+  override def getRecordsReceivedTotal:    Long = recordsReceivedTotal.sum()
+  override def getRecordsWrittenTotal:     Long = recordsWrittenTotal.sum()
+  override def getNullRecordsSkippedTotal: Long = nullRecordsSkippedTotal.sum()
+  override def getLastPutEpochMillis:      Long = lastPutEpochMillis.get()
+  override def getPutTimerCount:           Long = putTimer.count
+  override def getPutTimerSumMillis:       Long = putTimer.sumMillis
+  override def getPutTimerMaxMillis:       Long = putTimer.maxMillis
+
+  // B. File / commit lifecycle
+  override def getFilesOpenedTotal:      Long = filesOpenedTotal.sum()
+  override def getFilesCommittedTotal:   Long = filesCommittedTotal.sum()
+  override def getFilesFailedTotal:      Long = filesFailedTotal.sum()
+  override def getBytesWrittenTotal:     Long = bytesWrittenTotal.sum()
+  override def getRecordsCommittedTotal: Long = recordsCommittedTotal.sum()
+  override def getCommitTimerCount:      Long = commitTimer.count
+  override def getCommitTimerSumMillis:  Long = commitTimer.sumMillis
+  override def getCommitTimerMaxMillis:  Long = commitTimer.maxMillis
+
+  // C. Storage SDK
+  override def getStorageUploadTimerCount:     Long = storageUploadTimer.count
+  override def getStorageUploadTimerSumMillis: Long = storageUploadTimer.sumMillis
+  override def getStorageUploadTimerMaxMillis: Long = storageUploadTimer.maxMillis
+  override def getStorageUploadErrorsTotal:    Long = storageUploadErrors.sum()
+
+  override def getStorageCopyTimerCount:     Long = storageCopyTimer.count
+  override def getStorageCopyTimerSumMillis: Long = storageCopyTimer.sumMillis
+  override def getStorageCopyTimerMaxMillis: Long = storageCopyTimer.maxMillis
+  override def getStorageCopyErrorsTotal:    Long = storageCopyErrors.sum()
+
+  override def getStorageDeleteErrorsTotal: Long = storageDeleteErrors.sum()
+
+  override def getStorageGetTimerCount:     Long = storageGetTimer.count
+  override def getStorageGetTimerSumMillis: Long = storageGetTimer.sumMillis
+  override def getStorageGetTimerMaxMillis: Long = storageGetTimer.maxMillis
+  override def getStorageGetErrorsTotal:    Long = storageGetErrors.sum()
+
+  override def getStorageListErrorsTotal: Long = storageListErrors.sum()
+
+  // D. Retries & error classification
+  override def getPendingOperationRetriesTotal: Long = pendingOperationRetriesTotal.sum()
+  override def getSinkErrorsFatalTotal:         Long = sinkErrorsFatalTotal.sum()
+  override def getSinkErrorsRetriableTotal:     Long = sinkErrorsRetriableTotal.sum()
+  override def getSinkErrorsNonFatalTotal:      Long = sinkErrorsNonFatalTotal.sum()
+
+  // E. Schema / skip / seek diagnostics
+  override def getSchemaRolloversTotal:         Long = schemaRolloversTotal.sum()
+  override def getDuplicateRecordsSkippedTotal: Long = duplicateRecordsSkippedTotal.sum()
+  override def getSeekOnOpenAppliedTotal:       Long = seekOnOpenAppliedTotal.sum()
+  override def getRebalanceClosesTotal:         Long = rebalanceClosesTotal.sum()
+
+  // F. Current state gauges
+  override def getInFlightUploads: Int = inFlightUploads.get()
+
+  override def getMillisSinceLastCommit: Long = {
+    val last = lastCommitEpochMillis.get()
+    if (last == 0L) 0L else System.currentTimeMillis() - last
+  }
+
+  // =========================================================================
+  // Mutators — not exposed via JMX trait
+  // =========================================================================
 
   def setWriterCount(count: Int): Unit = writerCount.set(count)
   def incrementIdleWriterEvictions(): Unit = idleWriterEvictions.increment()
@@ -347,4 +604,52 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   def setSweepGetBudgetUsed(used:          Int):  Unit = sweepGetBudgetUsed.set(used)
 
   def setSafeOffsetBarrierWriters(count: Int): Unit = safeOffsetBarrierWriters.set(count)
+
+  // A. Ingest throughput mutators
+  def addRecordsReceivedTotal(n: Long): Unit = recordsReceivedTotal.add(n)
+  def incrementRecordsWrittenTotal():     Unit = recordsWrittenTotal.increment()
+  def incrementNullRecordsSkippedTotal(): Unit = nullRecordsSkippedTotal.increment()
+  def setLastPutEpochMillis(ts:     Long): Unit = lastPutEpochMillis.set(ts)
+  def recordPutTimer(elapsedMillis: Long): Unit = putTimer.record(elapsedMillis)
+
+  // B. File / commit lifecycle mutators
+  def incrementFilesOpenedTotal():    Unit = filesOpenedTotal.increment()
+  def incrementFilesCommittedTotal(): Unit = filesCommittedTotal.increment()
+  def incrementFilesFailedTotal():    Unit = filesFailedTotal.increment()
+  def addBytesWrittenTotal(n:          Long): Unit = bytesWrittenTotal.add(n)
+  def addRecordsCommittedTotal(n:      Long): Unit = recordsCommittedTotal.add(n)
+  def recordCommitTimer(elapsedMillis: Long): Unit = commitTimer.record(elapsedMillis)
+  def setLastCommitEpochMillis(ts:     Long): Unit = lastCommitEpochMillis.set(ts)
+
+  // C. Storage SDK mutators
+  def recordStorageUpload(elapsedMillis: Long, isError: Boolean): Unit = {
+    storageUploadTimer.record(elapsedMillis)
+    if (isError) storageUploadErrors.increment()
+  }
+  def recordStorageCopy(elapsedMillis: Long, isError: Boolean): Unit = {
+    storageCopyTimer.record(elapsedMillis)
+    if (isError) storageCopyErrors.increment()
+  }
+  def recordStorageDeleteError(): Unit = storageDeleteErrors.increment()
+  def recordStorageGet(elapsedMillis: Long, isError: Boolean): Unit = {
+    storageGetTimer.record(elapsedMillis)
+    if (isError) storageGetErrors.increment()
+  }
+  def recordStorageListError(): Unit = storageListErrors.increment()
+
+  // D. Retries & error classification mutators
+  def incrementPendingOperationRetriesTotal(): Unit = pendingOperationRetriesTotal.increment()
+  def incrementSinkErrorsFatalTotal():         Unit = sinkErrorsFatalTotal.increment()
+  def incrementSinkErrorsRetriableTotal():     Unit = sinkErrorsRetriableTotal.increment()
+  def incrementSinkErrorsNonFatalTotal():      Unit = sinkErrorsNonFatalTotal.increment()
+
+  // E. Schema / skip / seek diagnostics mutators
+  def incrementSchemaRolloversTotal():         Unit = schemaRolloversTotal.increment()
+  def incrementDuplicateRecordsSkippedTotal(): Unit = duplicateRecordsSkippedTotal.increment()
+  def incrementSeekOnOpenAppliedTotal():       Unit = seekOnOpenAppliedTotal.increment()
+  def incrementRebalanceClosesTotal():         Unit = rebalanceClosesTotal.increment()
+
+  // F. State gauge mutators
+  def incrementInFlightUploads(): Unit = { val _ = inFlightUploads.incrementAndGet() }
+  def decrementInFlightUploads(): Unit = { val _ = inFlightUploads.decrementAndGet() }
 }

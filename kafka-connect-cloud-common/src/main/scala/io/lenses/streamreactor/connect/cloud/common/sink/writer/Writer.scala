@@ -34,6 +34,7 @@ import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.CopyOperation
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.DeleteOperation
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.FileOperation
+import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingOperationsProcessors
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState
@@ -57,8 +58,9 @@ class Writer[SM <: FileMetadata](
   formatWriterFn:              File => Either[SinkError, FormatWriter],
   schemaChangeDetector:        SchemaChangeDetector,
   pendingOperationsProcessors: PendingOperationsProcessors,
-  partitionKey:                Option[String] = None,
-  lastSeekedOffset:            Option[Offset] = None,
+  partitionKey:                Option[String]   = None,
+  lastSeekedOffset:            Option[Offset]   = None,
+  metrics:                     CloudSinkMetrics = new CloudSinkMetrics(),
 )(
   implicit
   connectorTaskId: ConnectorTaskId,
@@ -92,6 +94,7 @@ class Writer[SM <: FileMetadata](
         case Right(_) =>
           writeState =
             writingState.update(messageDetail.offset, messageDetail.epochTimestamp, messageDetail.value.schema())
+          metrics.incrementRecordsWrittenTotal()
           ().asRight
       }
 
@@ -108,6 +111,7 @@ class Writer[SM <: FileMetadata](
         } yield writingState
         writingStateEither.flatMap { writingState =>
           writeState = writingState
+          metrics.incrementFilesOpenedTotal()
           innerMessageWrite(writingState)
         }
 
@@ -133,78 +137,100 @@ class Writer[SM <: FileMetadata](
         return ().asRight
     }
 
-    writeState match {
-      case uploadState @ Uploading(commitState,
-                                   file,
-                                   firstBufferedOffset,
-                                   uncommittedOffset,
-                                   earliestRecordTimestamp,
-                                   latestRecordTimestamp,
-                                   recordCount,
-          ) =>
-        val fnIndexUpdate: (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]] =
-          partitionKey match {
-            case Some(pk) => (tp, co, ps) => indexManager.updateForPartitionKey(tp, pk, co, ps)
-            case None     => (tp, co, ps) => indexManager.update(tp, co, ps)
-          }
-        for {
-          key <- objectKeyBuilder.build(firstBufferedOffset,
-                                        uncommittedOffset,
-                                        earliestRecordTimestamp,
-                                        latestRecordTimestamp,
-                                        recordCount,
-          )
-          path <- key.path.toRight(NonFatalCloudSinkError("No path exists within cloud location"))
-          pendingOperations =
-            if (indexManager.indexingEnabled) {
-              val tempFileUuid = UUID.randomUUID().toString
-              val tempFileName = path.prependedAll(
-                s".temp-upload/${topicPartition.topic}/${topicPartition.partition}/$tempFileUuid",
-              )
-
-              NonEmptyList.of[FileOperation](
-                UploadOperation(key.bucket, file, tempFileName),
-                CopyOperation(key.bucket, tempFileName, path, "placeholder"),
-                DeleteOperation(key.bucket, tempFileName, "placeholder"),
-              )
-            } else
-              NonEmptyList.of[FileOperation](
-                UploadOperation(key.bucket, file, path),
-              )
-
-          newOffset <- pendingOperationsProcessors.processPendingOperations(
-            topicPartition,
-            getCommittedOffset,
-            PendingState(uncommittedOffset, pendingOperations),
-            fnIndexUpdate,
-            escalateOnCancel = true,
-            partitionKey     = partitionKey,
-            stagingFile      = Some(file),
-          )
-          _ = {
-            logger.debug(s"[{}] Writer.resetState: Resetting state $writeState", connectorTaskId.show)
-            writeState = uploadState.toNoWriter(newOffset)
-            // The cloud commit has already succeeded at this point. A failure to
-            // delete the local temp file is a hygiene issue (disk leak) -- not a
-            // correctness issue -- so we must not propagate it as a FatalCloudSinkError.
-            // Doing so would fail the task AFTER data was durably written, which risks
-            // re-running the upload on restart and violating at-most-once for the
-            // same record offsets.
-            Try(file.delete()) match {
-              case Success(_) =>
-              case Failure(e) =>
-                logger.warn(
-                  s"[${connectorTaskId.show}] Failed to delete temp file ${file.getAbsolutePath} after successful commit; " +
-                    s"continuing (the cloud commit already succeeded)",
-                  e,
-                )
+    val commitStartNanos = System.nanoTime()
+    metrics.incrementInFlightUploads()
+    try {
+      writeState match {
+        case uploadState @ Uploading(commitState,
+                                     file,
+                                     firstBufferedOffset,
+                                     uncommittedOffset,
+                                     earliestRecordTimestamp,
+                                     latestRecordTimestamp,
+                                     recordCount,
+            ) =>
+          val fileSize = file.length()
+          val fnIndexUpdate: (
+            TopicPartition,
+            Option[Offset],
+            Option[PendingState],
+          ) => Either[SinkError, Option[Offset]] =
+            partitionKey match {
+              case Some(pk) => (tp, co, ps) => indexManager.updateForPartitionKey(tp, pk, co, ps)
+              case None     => (tp, co, ps) => indexManager.update(tp, co, ps)
             }
-            logger.debug(s"[{}] Writer.resetState: New state $writeState", connectorTaskId.show)
-          }
-        } yield ()
-      case other =>
-        FatalCloudSinkError(s"Other $other error detected, abort", topicPartition).asLeft
+          val result = for {
+            key <- objectKeyBuilder.build(firstBufferedOffset,
+                                          uncommittedOffset,
+                                          earliestRecordTimestamp,
+                                          latestRecordTimestamp,
+                                          recordCount,
+            )
+            path <- key.path.toRight(NonFatalCloudSinkError("No path exists within cloud location"))
+            pendingOperations =
+              if (indexManager.indexingEnabled) {
+                val tempFileUuid = UUID.randomUUID().toString
+                val tempFileName = path.prependedAll(
+                  s".temp-upload/${topicPartition.topic}/${topicPartition.partition}/$tempFileUuid",
+                )
 
+                NonEmptyList.of[FileOperation](
+                  UploadOperation(key.bucket, file, tempFileName),
+                  CopyOperation(key.bucket, tempFileName, path, "placeholder"),
+                  DeleteOperation(key.bucket, tempFileName, "placeholder"),
+                )
+              } else
+                NonEmptyList.of[FileOperation](
+                  UploadOperation(key.bucket, file, path),
+                )
+
+            newOffset <- pendingOperationsProcessors.processPendingOperations(
+              topicPartition,
+              getCommittedOffset,
+              PendingState(uncommittedOffset, pendingOperations),
+              fnIndexUpdate,
+              escalateOnCancel = true,
+              partitionKey     = partitionKey,
+              stagingFile      = Some(file),
+            )
+            _ = {
+              logger.debug(s"[{}] Writer.resetState: Resetting state $writeState", connectorTaskId.show)
+              writeState = uploadState.toNoWriter(newOffset)
+              // The cloud commit has already succeeded at this point. A failure to
+              // delete the local temp file is a hygiene issue (disk leak) -- not a
+              // correctness issue -- so we must not propagate it as a FatalCloudSinkError.
+              // Doing so would fail the task AFTER data was durably written, which risks
+              // re-running the upload on restart and violating at-most-once for the
+              // same record offsets.
+              Try(file.delete()) match {
+                case Success(_) =>
+                case Failure(e) =>
+                  logger.warn(
+                    s"[${connectorTaskId.show}] Failed to delete temp file ${file.getAbsolutePath} after successful commit; " +
+                      s"continuing (the cloud commit already succeeded)",
+                    e,
+                  )
+              }
+              logger.debug(s"[{}] Writer.resetState: New state $writeState", connectorTaskId.show)
+            }
+          } yield ()
+          val elapsed = (System.nanoTime() - commitStartNanos) / 1_000_000L
+          result match {
+            case Right(_) =>
+              metrics.recordCommitTimer(elapsed)
+              metrics.incrementFilesCommittedTotal()
+              metrics.addBytesWrittenTotal(fileSize)
+              metrics.addRecordsCommittedTotal(recordCount)
+              metrics.setLastCommitEpochMillis(System.currentTimeMillis())
+            case Left(_) =>
+              metrics.incrementFilesFailedTotal()
+          }
+          result
+        case other =>
+          FatalCloudSinkError(s"Other $other error detected, abort", topicPartition).asLeft
+      }
+    } finally {
+      metrics.decrementInFlightUploads()
     }
   }
 
@@ -235,21 +261,20 @@ class Writer[SM <: FileMetadata](
       case u: Uploading => Some(u.firstBufferedOffset)
     }
 
-  def shouldFlush: Boolean =
-    writeState match {
-      case Writing(commitState, _, file, _, uncommittedOffset, _, _) => commitPolicy.shouldFlush(
-          CloudCommitContext(
-            topicPartition.withOffset(uncommittedOffset),
-            commitState.recordCount,
-            commitState.lastKnownFileSize,
-            commitState.createdTimestamp,
-            commitState.lastFlushedTime,
-            file.getName,
-          ),
-        )
-      case NoWriter(_) => false
-      case _: Uploading => false
-    }
+  def shouldFlush: Boolean = writeState match {
+    case Writing(commitState, _, file, _, uncommittedOffset, _, _) => commitPolicy.shouldFlush(
+        CloudCommitContext(
+          topicPartition.withOffset(uncommittedOffset),
+          commitState.recordCount,
+          commitState.lastKnownFileSize,
+          commitState.createdTimestamp,
+          commitState.lastFlushedTime,
+          file.getName,
+        ),
+      )
+    case NoWriter(_) => false
+    case _: Uploading => false
+  }
 
   /**
    * If the offsets provided by Kafka Connect have already been processed, then they must be skipped to avoid duplicate records and protect the integrity of the data files.

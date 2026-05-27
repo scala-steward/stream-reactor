@@ -193,4 +193,227 @@ class CloudSinkMetricsTest extends AnyFunSuiteLike with Matchers with BeforeAndA
     verify(mbs, times(2)).registerMBean(any[Object], any[ObjectName])
     verify(mbs, times(1)).unregisterMBean(name)
   }
+
+  // =========================================================================
+  // A. Ingest throughput
+  // =========================================================================
+
+  test("RecordsReceivedTotal accumulates batches") {
+    metrics.getRecordsReceivedTotal shouldBe 0L
+    metrics.addRecordsReceivedTotal(100L)
+    metrics.addRecordsReceivedTotal(50L)
+    metrics.getRecordsReceivedTotal shouldBe 150L
+  }
+
+  test("RecordsWrittenTotal increments") {
+    metrics.getRecordsWrittenTotal shouldBe 0L
+    metrics.incrementRecordsWrittenTotal()
+    metrics.getRecordsWrittenTotal shouldBe 1L
+  }
+
+  test("NullRecordsSkippedTotal increments") {
+    metrics.getNullRecordsSkippedTotal shouldBe 0L
+    metrics.incrementNullRecordsSkippedTotal()
+    metrics.getNullRecordsSkippedTotal shouldBe 1L
+  }
+
+  test("LastPutEpochMillis defaults to 0 and can be set") {
+    metrics.getLastPutEpochMillis shouldBe 0L
+    val now = System.currentTimeMillis()
+    metrics.setLastPutEpochMillis(now)
+    metrics.getLastPutEpochMillis shouldBe now
+  }
+
+  test("PutTimer records count, sum, max") {
+    metrics.getPutTimerCount shouldBe 0L
+    metrics.recordPutTimer(10L)
+    metrics.recordPutTimer(30L)
+    metrics.recordPutTimer(20L)
+    metrics.getPutTimerCount shouldBe 3L
+    metrics.getPutTimerSumMillis shouldBe 60L
+    metrics.getPutTimerMaxMillis shouldBe 30L
+  }
+
+  // =========================================================================
+  // B. File / commit lifecycle
+  // =========================================================================
+
+  test("FilesOpenedTotal increments") {
+    metrics.getFilesOpenedTotal shouldBe 0L
+    metrics.incrementFilesOpenedTotal()
+    metrics.getFilesOpenedTotal shouldBe 1L
+  }
+
+  test("FilesCommittedTotal and FilesFailedTotal track outcomes") {
+    metrics.getFilesCommittedTotal shouldBe 0L
+    metrics.getFilesFailedTotal shouldBe 0L
+    metrics.incrementFilesCommittedTotal()
+    metrics.incrementFilesCommittedTotal()
+    metrics.incrementFilesFailedTotal()
+    metrics.getFilesCommittedTotal shouldBe 2L
+    metrics.getFilesFailedTotal shouldBe 1L
+  }
+
+  test("BytesWrittenTotal and RecordsCommittedTotal accumulate") {
+    metrics.getBytesWrittenTotal shouldBe 0L
+    metrics.getRecordsCommittedTotal shouldBe 0L
+    metrics.addBytesWrittenTotal(1024L)
+    metrics.addBytesWrittenTotal(512L)
+    metrics.addRecordsCommittedTotal(100L)
+    metrics.getBytesWrittenTotal shouldBe 1536L
+    metrics.getRecordsCommittedTotal shouldBe 100L
+  }
+
+  test("CommitTimer records count, sum, max") {
+    metrics.getCommitTimerCount shouldBe 0L
+    metrics.recordCommitTimer(5L)
+    metrics.recordCommitTimer(15L)
+    metrics.getCommitTimerCount shouldBe 2L
+    metrics.getCommitTimerSumMillis shouldBe 20L
+    metrics.getCommitTimerMaxMillis shouldBe 15L
+  }
+
+  test("MillisSinceLastCommit returns 0 before first commit then a positive value") {
+    metrics.getMillisSinceLastCommit shouldBe 0L
+    metrics.setLastCommitEpochMillis(System.currentTimeMillis() - 1000L)
+    metrics.getMillisSinceLastCommit should be > 0L
+  }
+
+  // =========================================================================
+  // C. Storage SDK timers
+  // =========================================================================
+
+  test("StorageUpload timer and error counter work independently") {
+    metrics.getStorageUploadTimerCount shouldBe 0L
+    metrics.getStorageUploadErrorsTotal shouldBe 0L
+    metrics.recordStorageUpload(10L, isError = false)
+    metrics.recordStorageUpload(20L, isError = true)
+    metrics.getStorageUploadTimerCount shouldBe 2L
+    metrics.getStorageUploadErrorsTotal shouldBe 1L
+    metrics.getStorageUploadTimerMaxMillis shouldBe 20L
+  }
+
+  test("StorageCopy timer and error counter track independently") {
+    metrics.recordStorageCopy(5L, isError = false)
+    metrics.recordStorageCopy(5L, isError = true)
+    metrics.getStorageCopyTimerCount shouldBe 2L
+    metrics.getStorageCopyErrorsTotal shouldBe 1L
+  }
+
+  test("StorageDelete error counter increments") {
+    metrics.recordStorageDeleteError()
+    metrics.getStorageDeleteErrorsTotal shouldBe 1L
+  }
+
+  test("StorageGet timer tracks getBlobAsStringAndEtag latency") {
+    metrics.recordStorageGet(8L, isError = false)
+    metrics.getStorageGetTimerCount shouldBe 1L
+    metrics.getStorageGetErrorsTotal shouldBe 0L
+    metrics.getStorageGetTimerMaxMillis shouldBe 8L
+  }
+
+  test("StorageList error counter increments") {
+    metrics.recordStorageListError()
+    metrics.getStorageListErrorsTotal shouldBe 1L
+  }
+
+  // =========================================================================
+  // D. Retries & error classification
+  // =========================================================================
+
+  test("PendingOperationRetriesTotal increments") {
+    metrics.getPendingOperationRetriesTotal shouldBe 0L
+    metrics.incrementPendingOperationRetriesTotal()
+    metrics.getPendingOperationRetriesTotal shouldBe 1L
+  }
+
+  test("Sink error classification counters increment independently") {
+    metrics.getSinkErrorsFatalTotal shouldBe 0L
+    metrics.getSinkErrorsRetriableTotal shouldBe 0L
+    metrics.getSinkErrorsNonFatalTotal shouldBe 0L
+    metrics.incrementSinkErrorsFatalTotal()
+    metrics.incrementSinkErrorsRetriableTotal()
+    metrics.incrementSinkErrorsRetriableTotal()
+    metrics.incrementSinkErrorsNonFatalTotal()
+    metrics.getSinkErrorsFatalTotal shouldBe 1L
+    metrics.getSinkErrorsRetriableTotal shouldBe 2L
+    metrics.getSinkErrorsNonFatalTotal shouldBe 1L
+  }
+
+  // =========================================================================
+  // E. Schema / skip / seek diagnostics
+  // =========================================================================
+
+  test("SchemaRolloversTotal increments") {
+    metrics.getSchemaRolloversTotal shouldBe 0L
+    metrics.incrementSchemaRolloversTotal()
+    metrics.getSchemaRolloversTotal shouldBe 1L
+  }
+
+  test("DuplicateRecordsSkippedTotal increments") {
+    metrics.getDuplicateRecordsSkippedTotal shouldBe 0L
+    metrics.incrementDuplicateRecordsSkippedTotal()
+    metrics.getDuplicateRecordsSkippedTotal shouldBe 1L
+  }
+
+  test("SeekOnOpenAppliedTotal increments") {
+    metrics.getSeekOnOpenAppliedTotal shouldBe 0L
+    metrics.incrementSeekOnOpenAppliedTotal()
+    metrics.getSeekOnOpenAppliedTotal shouldBe 1L
+  }
+
+  test("RebalanceClosesTotal increments") {
+    metrics.getRebalanceClosesTotal shouldBe 0L
+    metrics.incrementRebalanceClosesTotal()
+    metrics.incrementRebalanceClosesTotal()
+    metrics.getRebalanceClosesTotal shouldBe 2L
+  }
+
+  // =========================================================================
+  // F. State gauges
+  // =========================================================================
+
+  test("InFlightUploads increments and decrements") {
+    metrics.getInFlightUploads shouldBe 0
+    metrics.incrementInFlightUploads()
+    metrics.incrementInFlightUploads()
+    metrics.getInFlightUploads shouldBe 2
+    metrics.decrementInFlightUploads()
+    metrics.getInFlightUploads shouldBe 1
+  }
+
+  // =========================================================================
+  // JMX attribute exposure for new attributes
+  // =========================================================================
+
+  test("new attributes are accessible via JMX after registration") {
+    val taskId = ConnectorTaskId("new-attrs-connector", 3, 0)
+    val name   = new ObjectName("io.lenses.streamreactor.connect.cloud.sink:type=metrics,name=new-attrs-connector,task=0")
+    val mbs    = ManagementFactory.getPlatformMBeanServer
+
+    try {
+      CloudSinkMetricsRegistrar.register(metrics, taskId)
+
+      metrics.incrementFilesCommittedTotal()
+      mbs.getAttribute(name, "FilesCommittedTotal") shouldBe 1L
+
+      metrics.incrementFilesOpenedTotal()
+      mbs.getAttribute(name, "FilesOpenedTotal") shouldBe 1L
+
+      metrics.incrementSinkErrorsFatalTotal()
+      mbs.getAttribute(name, "SinkErrorsFatalTotal") shouldBe 1L
+
+      metrics.recordStorageUpload(50L, isError = false)
+      mbs.getAttribute(name, "StorageUploadTimerCount") shouldBe 1L
+      mbs.getAttribute(name, "StorageUploadTimerMaxMillis") shouldBe 50L
+      mbs.getAttribute(name, "StorageUploadErrorsTotal") shouldBe 0L
+
+      metrics.incrementRebalanceClosesTotal()
+      mbs.getAttribute(name, "RebalanceClosesTotal") shouldBe 1L
+
+      mbs.getAttribute(name, "InFlightUploads") shouldBe 0
+    } finally {
+      CloudSinkMetricsRegistrar.unregister(taskId)
+    }
+  }
 }

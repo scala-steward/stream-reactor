@@ -318,8 +318,8 @@ class WriterManager[SM <: FileMetadata](
     lastReturnedSafeOffset.clear()
     forceWriteAfterCleanUp.clear()
     metrics.clearAllMasterLockDirty()
-    // After every per-TP closePartition has run, refresh the writer-count gauge for the
-    // final value (in the steady-state path writers are now empty).
+    // After every per-TP closePartition has run, refresh the writer-count and oldest-file
+    // gauges for the final values (in the steady-state path writers are now empty).
     metrics.setWriterCount(writers.size)
   }
 
@@ -342,6 +342,7 @@ class WriterManager[SM <: FileMetadata](
             writeAndCommit(topicPartitionOffset, transformed, writer)
           }
         } else {
+          metrics.incrementDuplicateRecordsSkippedTotal()
           ().asRight
         }
     } yield resultIfNotSkipped
@@ -370,6 +371,7 @@ class WriterManager[SM <: FileMetadata](
       case Some(value: Schema) if writer.shouldRollover(value) =>
         // Schema rollover: flush all writers for the TP together to keep the format boundary
         // consistent. This is the one full-fan-out path; do NOT weaken to selective commit.
+        metrics.incrementSchemaRolloversTotal()
         writerCommitManager.commitForTopicPartition(topicPartition)
       case _ => ().asRight
     }
@@ -441,6 +443,7 @@ class WriterManager[SM <: FileMetadata](
         pendingOperationsProcessors,
         partitionKey,
         lastSeekedOffset,
+        metrics,
       )
     }
   }

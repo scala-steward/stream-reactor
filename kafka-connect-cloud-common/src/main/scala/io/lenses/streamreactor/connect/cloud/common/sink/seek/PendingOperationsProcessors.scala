@@ -28,6 +28,7 @@ import io.lenses.streamreactor.connect.cloud.common.model.UploadableFile
 import io.lenses.streamreactor.connect.cloud.common.sink.FatalCloudSinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.NonFatalCloudSinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
+import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
 import io.lenses.streamreactor.connect.cloud.common.storage.NonExistingFileError
 import io.lenses.streamreactor.connect.cloud.common.storage.StorageInterface
 import io.lenses.streamreactor.connect.cloud.common.storage.UploadError
@@ -56,6 +57,7 @@ import java.io.File
  */
 class PendingOperationsProcessors(
   storageInterface: StorageInterface[_],
+  metrics:          CloudSinkMetrics = new CloudSinkMetrics(),
 )(
   implicit
   connectorTaskId: ConnectorTaskId,
@@ -161,6 +163,7 @@ class PendingOperationsProcessors(
             // Writer.close, which deletes the local temp file before the upload is retried, permanently
             // losing all buffered records that had not yet been uploaded.
             case (_: UploadOperation, Left(uploadErr)) =>
+              metrics.incrementPendingOperationRetriesTotal()
               logger.warn(
                 s"[${connectorTaskId.show}] Transient upload failure for $topicPartition; deferring to recommitPending: ${uploadErr.message()}",
                 uploadErr.toExceptionOption.orNull,
