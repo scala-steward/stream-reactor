@@ -35,8 +35,6 @@ import io.lenses.streamreactor.connect.cloud.common.sink.naming.KeyNamer
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManagerV2
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingOperationsProcessors
-import io.lenses.streamreactor.connect.cloud.common.sink.seek.deprecated.IndexFilenames
-import io.lenses.streamreactor.connect.cloud.common.sink.seek.deprecated.IndexManagerV1
 import io.lenses.streamreactor.connect.cloud.common.storage.StorageInterface
 import io.lenses.streamreactor.connect.cloud.common.testing.FakeFileMetadata
 import io.lenses.streamreactor.connect.cloud.common.testing.InMemoryStorageInterface
@@ -133,11 +131,9 @@ class WriterManagerZombieIntegrationTest
    */
   private def buildIndexManager(storage: StorageInterface[FakeFileMetadata]): IndexManagerV2 = {
     implicit val si: StorageInterface[FakeFileMetadata] = storage
-    val v1  = new IndexManagerV1(new IndexFilenames(directoryName + "-v1"), bucketAndPrefix)
     val pop = new PendingOperationsProcessors(storage)
     new IndexManagerV2(
       bucketAndPrefixFn           = bucketAndPrefix,
-      oldIndexManager             = v1,
       pendingOperationsProcessors = pop,
       directoryFileName           = directoryName,
       gcIntervalSeconds           = Int.MaxValue,

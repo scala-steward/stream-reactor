@@ -39,8 +39,6 @@ import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManagerV2
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.NoIndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingOperationsProcessors
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState
-import io.lenses.streamreactor.connect.cloud.common.sink.seek.deprecated.IndexFilenames
-import io.lenses.streamreactor.connect.cloud.common.sink.seek.deprecated.IndexManagerV1
 import io.lenses.streamreactor.connect.cloud.common.storage.NonExistingFileError
 import io.lenses.streamreactor.connect.cloud.common.storage.StorageInterface
 import io.lenses.streamreactor.connect.cloud.common.storage.UploadError
@@ -375,14 +373,11 @@ class WriterUploadRetryRecoveryTest
     val bucketAndPrefix: TopicPartition => Either[SinkError, CloudLocation] =
       _ => CloudLocation(bucket, Some("data/")).asRight
 
-    val v1Filenames = new IndexFilenames(directoryFileName + "-v1")
-    // Both index managers need the shared storage as an implicit -- declare it locally so
-    // the IndexManagerV1 + IndexManagerV2 constructors below pick it up the same way the
-    // production WriterManagerCreator wiring does.
+    // The IndexManagerV2 constructor needs the shared storage as an implicit -- declare it
+    // locally so it is picked up the same way the production WriterManagerCreator wiring does.
     implicit val sharedStorageImplicit: StorageInterface[FakeFileMetadata] = sharedStorage
     val realIm = new IndexManagerV2(
       bucketAndPrefix,
-      new IndexManagerV1(v1Filenames, bucketAndPrefix),
       pop,
       directoryFileName,
       gcIntervalSeconds      = Int.MaxValue,
@@ -492,7 +487,6 @@ class WriterUploadRetryRecoveryTest
 
       val restartIm = new IndexManagerV2(
         bucketAndPrefix,
-        new IndexManagerV1(v1Filenames, bucketAndPrefix),
         new PendingOperationsProcessors(sharedStorage),
         directoryFileName,
         gcIntervalSeconds      = Int.MaxValue,

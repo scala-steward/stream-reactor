@@ -17,7 +17,6 @@ package io.lenses.streamreactor.connect.cloud.common.sink.seek
 
 import cats.data.NonEmptyList
 import cats.data.Validated
-import cats.implicits.catsSyntaxEitherId
 import cats.implicits.catsSyntaxOptionId
 import io.circe.Decoder
 import io.circe.Encoder
@@ -28,7 +27,6 @@ import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocation
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocationValidator
 import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
-import io.lenses.streamreactor.connect.cloud.common.sink.seek.deprecated.IndexManagerV1
 import io.lenses.streamreactor.connect.cloud.common.model.UploadableFile
 import io.lenses.streamreactor.connect.cloud.common.storage.EmptyFileError
 import io.lenses.streamreactor.connect.cloud.common.storage.FileNotFoundError
@@ -38,10 +36,8 @@ import io.lenses.streamreactor.connect.cloud.common.storage.NonExistingFileError
 import io.lenses.streamreactor.connect.cloud.common.storage.StorageInterface
 import io.lenses.streamreactor.connect.cloud.common.sink.FatalCloudSinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.NonFatalCloudSinkError
-import io.lenses.streamreactor.connect.cloud.common.storage.PathError
 import io.lenses.streamreactor.connect.cloud.common.storage.FileCreateError
 import io.lenses.streamreactor.connect.cloud.common.storage.FileDeleteError
-import io.lenses.streamreactor.connect.cloud.common.storage.FileMoveError
 import io.lenses.streamreactor.connect.cloud.common.testing.InMemoryStorageInterface
 import java.time.Instant
 import org.mockito.ArgumentCaptor
@@ -70,7 +66,6 @@ class IndexManagerV2Test
   implicit val storageInterface: StorageInterface[_]    = mock[StorageInterface[_]]
   implicit val connectorTaskId:  ConnectorTaskId        = mock[ConnectorTaskId]
 
-  private val oldIndexManager             = mock[IndexManagerV1]
   private val bucketAndPrefixFn           = mock[TopicPartition => Either[SinkError, CloudLocation]]
   private val pendingOperationsProcessors = mock[PendingOperationsProcessors]
   private val indexesDirectoryName        = ".indexes2"
@@ -78,11 +73,10 @@ class IndexManagerV2Test
   private var indexManagerV2: IndexManagerV2 = _
 
   before {
-    reset(storageInterface, connectorTaskId, oldIndexManager, bucketAndPrefixFn, pendingOperationsProcessors)
+    reset(storageInterface, connectorTaskId, bucketAndPrefixFn, pendingOperationsProcessors)
 
     indexManagerV2 = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -130,7 +124,6 @@ class IndexManagerV2Test
   }
 
   private def runOpen(topicPartition: TopicPartition, bucketAndPrefix: CloudLocation, path: String) = {
-    when(oldIndexManager.seekOffsetsForTopicPartition(topicPartition)).thenReturn(Option.empty.asRight)
     when(bucketAndPrefixFn(topicPartition)).thenReturn(Right(bucketAndPrefix))
     when(storageInterface.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(storageInterface.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
@@ -208,12 +201,11 @@ class IndexManagerV2Test
   }
 
   test("IndexManagerV2 uses directoryFileName parameter in lock file path") {
-    val (storageInterface, oldIndexManager, pendingProcessors, bucketAndPrefixFn, directoryFileName, topicPartition) =
+    val (storageInterface, pendingProcessors, bucketAndPrefixFn, directoryFileName, topicPartition) =
       setupMocksForLockFilePathTest()
 
     val indexManager = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingProcessors,
       directoryFileName,
       gcIntervalSeconds = Int.MaxValue,
@@ -227,7 +219,6 @@ class IndexManagerV2Test
 
   private def setupMocksForLockFilePathTest() = {
     val storageInterface  = mock[StorageInterface[_]]
-    val oldIndexManager   = mock[IndexManagerV1]
     val pendingProcessors = mock[PendingOperationsProcessors]
     val directoryFileName = "custom-index-dir"
     val topicPartition    = Topic("my-topic").withPartition(2)
@@ -237,14 +228,13 @@ class IndexManagerV2Test
     when(storageInterface.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(storageInterface.getBlobAsObject[IndexFile](anyString(), anyString())(any[Decoder[IndexFile]]))
       .thenReturn(Left(FileNotFoundError(new Exception("Not found"), "somepath")))
-    when(oldIndexManager.seekOffsetsForTopicPartition(any[TopicPartition])).thenReturn(None.asRight)
     when(storageInterface.writeBlobToFile(anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
       any[Encoder[IndexFile]],
     ))
       .thenReturn(Right(ObjectWithETag(IndexFile("owner", None, None), "etag")))
     when(storageInterface.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
 
-    (storageInterface, oldIndexManager, pendingProcessors, bucketAndPrefixFn, directoryFileName, topicPartition)
+    (storageInterface, pendingProcessors, bucketAndPrefixFn, directoryFileName, topicPartition)
   }
 
   private def verifyLockFilePathUsed(
@@ -336,7 +326,6 @@ class IndexManagerV2Test
 
     val realIndexManagerV2 = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       realPendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -413,7 +402,6 @@ class IndexManagerV2Test
     val realPendingOperationsProcessors = new PendingOperationsProcessors(si)
     val realIndexManagerV2 = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       realPendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -485,7 +473,6 @@ class IndexManagerV2Test
     val realPendingOperationsProcessors = new PendingOperationsProcessors(si)
     val realIndexManagerV2 = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       realPendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -504,117 +491,6 @@ class IndexManagerV2Test
         }
       }
     } finally realIndexManagerV2.close()
-  }
-
-  test("migrateOldPathIfExists should move old path to new path when old path exists") {
-    val topicPartition  = Topic("test-topic").withPartition(0)
-    val bucketAndPrefix = CloudLocation("test-bucket", "test-prefix".some)
-    val oldPath         = ".indexes2/.locks/Topic(test-topic)/0.lock"
-    val newPath         = ".indexes2/connector-name/.locks/Topic(test-topic)/0.lock"
-
-    // Mock bucketAndPrefixFn to return the CloudLocation
-    when(bucketAndPrefixFn(topicPartition)).thenReturn(Right(bucketAndPrefix))
-
-    // Mock pathExists to return true (old path exists)
-    when(storageInterface.pathExists("test-bucket", oldPath)).thenReturn(Right(true))
-
-    // Mock mvFile to return success - use flexible matchers to handle path variations
-    when(storageInterface.mvFile(anyString(), anyString(), anyString(), anyString(), ArgumentMatchers.eq(None)))
-      .thenReturn(Right(()))
-
-    // Mock the rest of the open flow
-    when(storageInterface.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
-      .thenReturn(Left(FileNotFoundError(new Exception("Not found"), newPath)))
-    when(oldIndexManager.seekOffsetsForTopicPartition(topicPartition)).thenReturn(Option.empty.asRight)
-    when(
-      storageInterface.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
-        ArgumentMatchers.eq(indexFileEncoder),
-      ),
-    )
-      .thenReturn(Right(ObjectWithETag(IndexFile("lockOwner", None, None), "etag")))
-    when(storageInterface.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
-
-    val result = indexManagerV2.open(Set(topicPartition))
-
-    result shouldBe Right(Map(topicPartition -> None))
-
-    // Verify that pathExists was called with the old path
-    verify(storageInterface).pathExists("test-bucket", oldPath)
-
-    // Verify that mvFile was called to move from old path to new path
-    verify(storageInterface).mvFile(anyString(), anyString(), anyString(), anyString(), ArgumentMatchers.eq(None))
-  }
-
-  test("migrateOldPathIfExists should do nothing when old path does not exist") {
-    val topicPartition  = Topic("test-topic").withPartition(0)
-    val bucketAndPrefix = CloudLocation("test-bucket", "test-prefix".some)
-    val oldPath         = ".indexes2/.locks/Topic(test-topic)/0.lock"
-    val newPath         = ".indexes2/connector-name/.locks/Topic(test-topic)/0.lock"
-
-    // Mock bucketAndPrefixFn to return the CloudLocation
-    when(bucketAndPrefixFn(topicPartition)).thenReturn(Right(bucketAndPrefix))
-
-    // Mock pathExists to return false (old path does not exist)
-    when(storageInterface.pathExists("test-bucket", oldPath)).thenReturn(Right(false))
-
-    // Mock the rest of the open flow
-    when(storageInterface.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
-      .thenReturn(Left(FileNotFoundError(new Exception("Not found"), newPath)))
-    when(oldIndexManager.seekOffsetsForTopicPartition(topicPartition)).thenReturn(Option.empty.asRight)
-    when(
-      storageInterface.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
-        ArgumentMatchers.eq(indexFileEncoder),
-      ),
-    )
-      .thenReturn(Right(ObjectWithETag(IndexFile("lockOwner", None, None), "etag")))
-    when(storageInterface.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
-
-    val result = indexManagerV2.open(Set(topicPartition))
-
-    result shouldBe Right(Map(topicPartition -> None))
-
-    // Verify that pathExists was called with the old path
-    verify(storageInterface).pathExists("test-bucket", oldPath)
-
-    // Verify that mvFile was NOT called since old path doesn't exist
-    verify(storageInterface, never).mvFile(anyString(),
-                                           anyString(),
-                                           anyString(),
-                                           anyString(),
-                                           ArgumentMatchers.eq(None),
-    )
-  }
-
-  test("migrateOldPathIfExists should propagate error when mvFile returns an error") {
-    val topicPartition  = Topic("test-topic").withPartition(0)
-    val bucketAndPrefix = CloudLocation("test-bucket", "test-prefix".some)
-    val oldPath         = ".indexes2/.locks/Topic(test-topic)/0.lock"
-    val newPath         = ".indexes2/connector-name/.locks/Topic(test-topic)/0.lock"
-    val moveError       = FileMoveError(new RuntimeException("Move error"), oldPath, newPath)
-
-    // Mock bucketAndPrefixFn to return the CloudLocation
-    when(bucketAndPrefixFn(topicPartition)).thenReturn(Right(bucketAndPrefix))
-
-    // Mock pathExists to return true (old path exists)
-    when(storageInterface.pathExists("test-bucket", oldPath)).thenReturn(Right(true))
-
-    // Mock mvFile to return an error - use anyString() to match any path
-    when(storageInterface.mvFile(anyString(), anyString(), anyString(), anyString(), ArgumentMatchers.eq(None)))
-      .thenReturn(Left(moveError))
-
-    val result = indexManagerV2.open(Set(topicPartition))
-
-    result.isLeft shouldBe true
-    result.left.getOrElse(throw new RuntimeException("Expected Left but got Right")) shouldBe a[FatalCloudSinkError]
-    result.left.getOrElse(throw new RuntimeException("Expected Left but got Right")).asInstanceOf[
-      FatalCloudSinkError,
-    ].message shouldBe "error moving file from (.indexes2/.locks/Topic(test-topic)/0.lock) to (.indexes2/connector-name/.locks/Topic(test-topic)/0.lock) Move error"
-
-    // Verify that pathExists was called with the old path
-    verify(storageInterface).pathExists("test-bucket", oldPath)
-
-    // Verify that mvFile was called and failed
-    verify(storageInterface).mvFile(anyString(), anyString(), anyString(), anyString(), ArgumentMatchers.eq(None))
   }
 
   // Phase 1c: Granular lock CRUD tests
@@ -779,7 +655,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -809,7 +684,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -849,7 +723,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -889,7 +762,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -939,7 +811,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -981,7 +852,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1029,7 +899,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1080,7 +949,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1131,7 +999,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pp,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1222,7 +1089,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pp,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1318,7 +1184,6 @@ class IndexManagerV2Test
     val realPop = new PendingOperationsProcessors(si)
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       realPop,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1424,7 +1289,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pp,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1502,7 +1366,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1558,7 +1421,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1612,7 +1474,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1672,7 +1533,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1715,7 +1575,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1773,7 +1632,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1832,7 +1690,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1873,7 +1730,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1919,7 +1775,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -1977,7 +1832,6 @@ class IndexManagerV2Test
     // gcIntervalSeconds very large so the background timer never fires during this test
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -2027,7 +1881,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -2078,7 +1931,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -2134,7 +1986,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pp,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -2211,7 +2062,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pp,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -2273,7 +2123,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -2330,7 +2179,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -2567,7 +2415,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -2605,7 +2452,6 @@ class IndexManagerV2Test
   ): IndexManagerV2 =
     new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds      = Int.MaxValue,
@@ -3512,7 +3358,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
     )(si, cti)
@@ -3531,7 +3376,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -3564,7 +3408,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -3614,7 +3457,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds      = Int.MaxValue,
@@ -3675,7 +3517,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -3701,7 +3542,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -3742,7 +3582,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds      = Int.MaxValue,
@@ -3807,7 +3646,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -3863,7 +3701,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -3912,7 +3749,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -3962,7 +3798,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pp,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -4000,7 +3835,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -4023,7 +3857,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -4053,7 +3886,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = 0, // triggers IllegalArgumentException in scheduleAtFixedRate
@@ -4076,7 +3908,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds      = Int.MaxValue,
@@ -4138,7 +3969,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -4174,7 +4004,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -4197,142 +4026,6 @@ class IndexManagerV2Test
     } finally im.close()
   }
 
-  // ── Bug A: migration probe re-probe logic ─────────────────────────────────
-
-  test(
-    "Bug A: first-probe Left(PathError) + re-probe Right(false) + new=false (fresh deployment) => open succeeds with warn, no FatalCloudSinkError",
-  ) {
-    val topicPartition  = Topic("topic1").withPartition(0)
-    val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-
-    val si = mock[StorageInterface[_]]
-    // pathExists called twice: first returns Left(PathError), re-probe returns Right(false)
-    org.mockito.Mockito.doReturn(
-      Left(PathError(new RuntimeException("transient 403"), ".locks/topic1/0.lock")),
-      Right(false).asInstanceOf[Any],
-    ).when(si).pathExists(anyString(), anyString())
-
-    // new path does not exist either (fresh deployment: scenario A)
-    when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
-      ArgumentMatchers.eq(indexFileDecoder),
-    )).thenReturn(Left(FileNotFoundError(new Exception("Not found"), "0.lock")))
-
-    when(oldIndexManager.seekOffsetsForTopicPartition(any[TopicPartition])).thenReturn(Right(None))
-    when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
-    when(
-      si.writeBlobToFile[IndexFile](anyString(), anyString(), any[NoOverwriteExistingObject[IndexFile]])(
-        ArgumentMatchers.eq(indexFileEncoder),
-      ),
-    ).thenReturn(Right(ObjectWithETag(IndexFile("lockOwner", None, None), "etag")))
-    when(si.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
-
-    val im = new IndexManagerV2(bucketAndPrefixFn,
-                                oldIndexManager,
-                                pendingOperationsProcessors,
-                                indexesDirectoryName,
-                                gcIntervalSeconds = Int.MaxValue,
-    )(si, connectorTaskId)
-    try {
-      val result = im.open(Set(topicPartition))
-      result.isRight should be(true)
-    } finally im.close()
-  }
-
-  test(
-    "Bug A: first-probe Left(PathError) + re-probe Right(false) + new=true (established 10.x) => open succeeds with warn, no FatalCloudSinkError",
-  ) {
-    val topicPartition  = Topic("topic1").withPartition(0)
-    val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-
-    val si = mock[StorageInterface[_]]
-    org.mockito.Mockito.doReturn(
-      Left(PathError(new RuntimeException("transient 403"), ".locks/topic1/0.lock")),
-      Right(false).asInstanceOf[Any],
-    ).when(si).pathExists(anyString(), anyString())
-
-    // new path EXISTS (established 10.x+: scenario B)
-    when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
-      ArgumentMatchers.eq(indexFileDecoder),
-    )).thenReturn(Right(ObjectWithETag(IndexFile("lockOwner", Some(Offset(50)), None), "etag")))
-
-    when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
-    when(si.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
-
-    val im = new IndexManagerV2(bucketAndPrefixFn,
-                                oldIndexManager,
-                                pendingOperationsProcessors,
-                                indexesDirectoryName,
-                                gcIntervalSeconds = Int.MaxValue,
-    )(si, connectorTaskId)
-    try {
-      val result = im.open(Set(topicPartition))
-      result.isRight should be(true)
-      result.value(topicPartition) should be(Some(Offset(50)))
-    } finally im.close()
-  }
-
-  test(
-    "Bug A: first-probe Left(PathError) + re-probe Right(true) => takes mvFile path (scenario C: genuine 9.x file)",
-  ) {
-    val topicPartition  = Topic("topic1").withPartition(0)
-    val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-
-    val si = mock[StorageInterface[_]]
-    org.mockito.Mockito.doReturn(
-      Left(PathError(new RuntimeException("transient 403"), ".locks/topic1/0.lock")),
-      Right(true).asInstanceOf[Any],
-    ).when(si).pathExists(anyString(), anyString())
-
-    when(si.mvFile(anyString(), anyString(), anyString(), anyString(), any[Option[String]])).thenReturn(Right(()))
-
-    // After migration, new path exists
-    when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
-      ArgumentMatchers.eq(indexFileDecoder),
-    )).thenReturn(Right(ObjectWithETag(IndexFile("lockOwner", Some(Offset(10)), None), "etag")))
-
-    when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
-    when(si.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
-
-    val im = new IndexManagerV2(bucketAndPrefixFn,
-                                oldIndexManager,
-                                pendingOperationsProcessors,
-                                indexesDirectoryName,
-                                gcIntervalSeconds = Int.MaxValue,
-    )(si, connectorTaskId)
-    try {
-      val result = im.open(Set(topicPartition))
-      result.isRight should be(true)
-      verify(si).mvFile(anyString(), anyString(), anyString(), anyString(), any[Option[String]])
-    } finally im.close()
-  }
-
-  test(
-    "Bug A: first-probe Left(PathError) + re-probe Left(_) => FatalCloudSinkError (cloud genuinely unavailable)",
-  ) {
-    val topicPartition  = Topic("topic1").withPartition(0)
-    val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-
-    val si = mock[StorageInterface[_]]
-    when(si.pathExists(anyString(), anyString())).thenReturn(
-      Left(PathError(new RuntimeException("cloud down"), "path")),
-    )
-
-    when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
-    when(si.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
-
-    val im = new IndexManagerV2(bucketAndPrefixFn,
-                                oldIndexManager,
-                                pendingOperationsProcessors,
-                                indexesDirectoryName,
-                                gcIntervalSeconds = Int.MaxValue,
-    )(si, connectorTaskId)
-    try {
-      val result = im.open(Set(topicPartition))
-      result.isLeft should be(true)
-      result.left.value should be(a[FatalCloudSinkError])
-    } finally im.close()
-  }
-
   // ── Bug B.2: EmptyFileError call-site handling ────────────────────────────
 
   test("ensureGranularLock: 0-byte poison blob => overwrites via ObjectWithETag(eTag), caches post-write eTag") {
@@ -4350,7 +4043,6 @@ class IndexManagerV2Test
     )).thenReturn(Right(ObjectWithETag(IndexFile("lockOwner", Some(Offset(50)), None), "master-etag")))
 
     val im = new IndexManagerV2(bucketAndPrefixFn,
-                                oldIndexManager,
                                 pendingOperationsProcessors,
                                 indexesDirectoryName,
                                 gcIntervalSeconds = Int.MaxValue,
@@ -4400,7 +4092,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -4509,7 +4200,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -4571,7 +4261,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -4630,7 +4319,6 @@ class IndexManagerV2Test
 
     val im = new IndexManagerV2(
       bucketAndPrefixFn,
-      oldIndexManager,
       pendingOperationsProcessors,
       indexesDirectoryName,
       gcIntervalSeconds = Int.MaxValue,
@@ -4707,7 +4395,6 @@ class IndexManagerV2Test
     val ex = the[IllegalArgumentException] thrownBy {
       val _ = new IndexManagerV2(
         bucketAndPrefixFn,
-        oldIndexManager,
         pendingOperationsProcessors,
         indexesDirectoryName,
         gcIntervalSeconds      = Int.MaxValue,
@@ -4741,13 +4428,9 @@ class IndexManagerV2Test
     val taskId1 = ConnectorTaskId("connector-race", 2, 0)
     val taskId2 = ConnectorTaskId("connector-race", 2, 1)
 
-    // Stub old index manager so open() can create a new master lock (migration path returns None)
-    when(oldIndexManager.seekOffsetsForTopicPartition(any[TopicPartition])).thenReturn(Right(None))
-
     def makeManager(taskId: ConnectorTaskId): IndexManagerV2 = {
       val im = new IndexManagerV2(
         bucketPrefixFn,
-        oldIndexManager,
         pendingOperationsProcessors,
         indexesDirectoryName,
         gcIntervalSeconds = Int.MaxValue,
@@ -4927,17 +4610,10 @@ class IndexManagerV2Test
     val taskId1 = ConnectorTaskId("same-connector", 1, 0)
     val taskId2 = ConnectorTaskId("same-connector", 1, 0)
 
-    // Stub migration path so open() can create master locks (no old-format files exist)
-    when(oldIndexManager.seekOffsetsForTopicPartition(any[TopicPartition])).thenReturn(Right(None))
-
     val im1 =
-      new IndexManagerV2(bucketPrefixFn, oldIndexManager, pendingOperationsProcessors, indexesDirectoryName)(shared,
-                                                                                                             taskId1,
-      )
+      new IndexManagerV2(bucketPrefixFn, pendingOperationsProcessors, indexesDirectoryName)(shared, taskId1)
     val im2 =
-      new IndexManagerV2(bucketPrefixFn, oldIndexManager, pendingOperationsProcessors, indexesDirectoryName)(shared,
-                                                                                                             taskId2,
-      )
+      new IndexManagerV2(bucketPrefixFn, pendingOperationsProcessors, indexesDirectoryName)(shared, taskId2)
 
     try {
       im1.open(Set(tp))

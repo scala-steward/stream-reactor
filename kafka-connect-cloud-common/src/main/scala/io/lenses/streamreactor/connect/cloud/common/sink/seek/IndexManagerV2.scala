@@ -29,7 +29,6 @@ import io.lenses.streamreactor.connect.cloud.common.sink.NonFatalCloudSinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManagerV2._
-import io.lenses.streamreactor.connect.cloud.common.sink.seek.deprecated.IndexManagerV1
 import io.lenses.streamreactor.connect.cloud.common.storage.EmptyFileError
 import io.lenses.streamreactor.connect.cloud.common.storage.FileLoadError
 import io.lenses.streamreactor.connect.cloud.common.storage.FileMetadata
@@ -61,19 +60,14 @@ import scala.util.control.NonFatal
  * and the latest committed offset. This mechanism ensures fault tolerance and consistency
  * in the event of task failures or restarts.
  *
- * The original IndexManager, `IndexManagerV1`, is used for migration of stored offset files only and will be removed in
- * a future version.
- *
  * @param bucketAndPrefixFn           A function that maps a `TopicPartition` to an `Either` containing
  *                                    a `SinkError` or a `CloudLocation`.
- * @param oldIndexManager             An instance of `IndexManagerV1` used for seeking offsets.
  * @param pendingOperationsProcessors A processor for handling pending operations.
  * @param storageInterface            An implicit `StorageInterface` for interacting with cloud storage.
  * @param connectorTaskId             An implicit `ConnectorTaskId` representing the task's unique identifier.
  */
 class IndexManagerV2(
   bucketAndPrefixFn:           TopicPartition => Either[SinkError, CloudLocation],
-  oldIndexManager:             IndexManagerV1,
   pendingOperationsProcessors: PendingOperationsProcessors,
   directoryFileName:           String,
   gcIntervalSeconds:           Int              = IndexManagerV2.DefaultGcIntervalSeconds,
@@ -304,11 +298,9 @@ class IndexManagerV2(
    */
   private def open(topicPartition: TopicPartition): Either[SinkError, Option[Offset]] = {
 
-    val maybeOldPath = generateLockFilePathMigration(connectorTaskId, topicPartition, directoryFileName)
-    val path         = generateLockFilePath(connectorTaskId, topicPartition, directoryFileName)
+    val path = generateLockFilePath(connectorTaskId, topicPartition, directoryFileName)
     for {
       bucketAndPrefix <- bucketAndPrefixFn(topicPartition)
-      _               <- migrateOldPathIfExists(bucketAndPrefix, maybeOldPath, path, topicPartition)
       offset <- tryOpen(bucketAndPrefix.bucket, path) match {
 
         case Left(FileNotFoundError(_, _)) =>
@@ -323,14 +315,12 @@ class IndexManagerV2(
           // exists, so a NoOverwrite write would always 412.
           // NOTE: pendingOperationsProcessors is NOT invoked here — the 0-byte file proves
           // no PendingState was ever durably recorded; the recovery write sets pendingState=None.
-          for {
-            tpo <- oldIndexManager.seekOffsetsForTopicPartition(topicPartition)
-            idx  = IndexFile(lockOwner, tpo.map(_.offset), Option.empty)
-            blobWrite <- storageInterface.writeBlobToFile(bucketAndPrefix.bucket, path, ObjectWithETag(idx, eTag))
-              .leftMap { err: UploadError =>
-                new FatalCloudSinkError(err.message(), err.toExceptionOption, topicPartition)
-              }
-          } yield updateDataReturnOffset(topicPartition, blobWrite)
+          val idx = IndexFile(lockOwner, Option.empty, Option.empty)
+          storageInterface.writeBlobToFile(bucketAndPrefix.bucket, path, ObjectWithETag(idx, eTag))
+            .leftMap { err: UploadError =>
+              new FatalCloudSinkError(err.message(), err.toExceptionOption, topicPartition)
+            }
+            .map(updateDataReturnOffset(topicPartition, _))
 
         case Left(fileLoadError: FileLoadError) =>
           new FatalCloudSinkError(fileLoadError.message(), fileLoadError.toExceptionOption, topicPartition).asLeft[
@@ -372,70 +362,6 @@ class IndexManagerV2(
 
   }
 
-  private def migrateOldPathIfExists(
-    bucketAndPrefix: CloudLocation,
-    maybeOldPath:    String,
-    path:            String,
-    topicPartition:  TopicPartition,
-  ): Either[FatalCloudSinkError, Unit] =
-    storageInterface.pathExists(bucketAndPrefix.bucket, maybeOldPath) match {
-      case Left(firstProbeError) =>
-        // Transient cloud error on the first probe (e.g. 403, 5xx).
-        // Re-probe the OLD path to check whether migration is provably unnecessary.
-        // Safety predicate: "old path is positively absent" — that alone proves migration
-        // is not required regardless of the new-path state (new=false is the expected state
-        // for a fresh deployment, scenario A).
-        storageInterface.pathExists(bucketAndPrefix.bucket, maybeOldPath) match {
-          case Right(false) =>
-            // Old path is provably absent: migration is unnecessary. Warn and continue.
-            logger.warn(
-              s"Transient error checking old index path for $topicPartition at $maybeOldPath " +
-                s"(${firstProbeError.message()}), re-probe confirms old path absent — treating as benign",
-            )
-            ().asRight
-          case Right(true) =>
-            // Old path exists (scenario C: genuine 9.x → 10.x upgrade). Proceed to mvFile.
-            logger.info(
-              s"Re-probe confirmed old index path present for $topicPartition at $maybeOldPath — migrating",
-            )
-            mvOldToNewPath(bucketAndPrefix, maybeOldPath, path, topicPartition)
-          case Left(reProbeError) =>
-            // Cloud is genuinely unavailable. Surface original error as fatal.
-            // Do NOT mark probe done — next assignment retries once cloud clears.
-            val fatalError =
-              new FatalCloudSinkError(firstProbeError.message(), firstProbeError.toExceptionOption, topicPartition)
-            logger.error(
-              s"Failed to check existence of old index file for $topicPartition at $maybeOldPath " +
-                s"(re-probe also failed: ${reProbeError.message()}): ${fatalError.message}",
-            )
-            fatalError.asLeft
-        }
-      case Right(false) =>
-        //old path does not exist, nothing to do
-        ().asRight
-      case Right(true) =>
-        //old path exists, move to new path
-        mvOldToNewPath(bucketAndPrefix, maybeOldPath, path, topicPartition)
-    }
-
-  private def mvOldToNewPath(
-    bucketAndPrefix: CloudLocation,
-    maybeOldPath:    String,
-    path:            String,
-    topicPartition:  TopicPartition,
-  ): Either[FatalCloudSinkError, Unit] =
-    storageInterface.mvFile(bucketAndPrefix.bucket, maybeOldPath, bucketAndPrefix.bucket, path, None) match {
-      case Left(err) =>
-        val error = new FatalCloudSinkError(err.message(), err.toExceptionOption, topicPartition)
-        logger.error(
-          s"Failed to move old index file for $topicPartition from $maybeOldPath to $path: ${error.message}",
-        )
-        error.asLeft
-      case Right(_) =>
-        logger.info(s"Migrated old index file for $topicPartition from $maybeOldPath to $path")
-        ().asRight
-    }
-
   /**
    * Updates internal maps with the latest offset and eTag for a topic partition.
    *
@@ -453,7 +379,7 @@ class IndexManagerV2(
   }
 
   /**
-   * Creates a new index file for a topic partition based on a previous format index file, or an empty offset if none currently exists.  Will not overwrite an existing index file.
+   * Creates a new, empty index file for a topic partition.  Will not overwrite an existing index file.
    *
    * @param topicPartition  The `TopicPartition` for which the index file is created.
    * @param path            The path to the index file.
@@ -464,22 +390,13 @@ class IndexManagerV2(
     topicPartition:  TopicPartition,
     path:            String,
     bucketAndPrefix: CloudLocation,
-  ): Either[SinkError, ObjectWithETag[IndexFile]] =
-    for {
-      tpo <- oldIndexManager.seekOffsetsForTopicPartition(topicPartition)
-      idx = IndexFile(
-        lockOwner,
-        tpo.map(_.offset),
-        Option.empty,
-      )
-
-      blobWrite <- storageInterface.writeBlobToFile(bucketAndPrefix.bucket, path, NoOverwriteExistingObject(idx))
-        .leftMap { err: UploadError =>
-          new FatalCloudSinkError(err.message(), err.toExceptionOption, topicPartition)
-        }
-    } yield {
-      blobWrite
-    }
+  ): Either[SinkError, ObjectWithETag[IndexFile]] = {
+    val idx = IndexFile(lockOwner, Option.empty, Option.empty)
+    storageInterface.writeBlobToFile(bucketAndPrefix.bucket, path, NoOverwriteExistingObject(idx))
+      .leftMap { err: UploadError =>
+        new FatalCloudSinkError(err.message(), err.toExceptionOption, topicPartition)
+      }
+  }
 
   /**
    * Attempts to open an index file from cloud storage.
@@ -1482,18 +1399,6 @@ object IndexManagerV2 {
     directoryFileName: String,
   ): String =
     s"$directoryFileName/${connectorTaskId.name}/.locks/${topicPartition.topic}/${topicPartition.partition}.lock"
-
-  /**
-   * It is used to migrate 9.0.0 to 10.0.0 regression where connector name is not used in the path
-   * allowing scenarios where connectors reading from the same topic overlaps and corrupts state.
-   * It is done to avoid manual migration, and used in the open method of IndexManagerV2 only.
-   */
-  private def generateLockFilePathMigration(
-    connectorTaskId:   ConnectorTaskId,
-    topicPartition:    TopicPartition,
-    directoryFileName: String,
-  ): String =
-    s"$directoryFileName/.locks/${topicPartition.topic}/${topicPartition.partition}.lock"
 
   /**
    * Generates the cloud storage path for a granular lock file.
