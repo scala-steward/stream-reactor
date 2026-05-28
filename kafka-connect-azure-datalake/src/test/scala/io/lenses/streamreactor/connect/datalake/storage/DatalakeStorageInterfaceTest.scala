@@ -454,7 +454,7 @@ class DatalakeStorageInterfaceTest
     result.left.getOrElse(throw new AssertionError("Expected Left")) should be(a[PathError])
   }
 
-  "pathExists" should "return Left(PathError) when DataLakeStorageException has 403 status" in {
+  "pathExists" should "return Right(false) when DataLakeStorageException has 403 status (ADLS HNS)" in {
     val bucket = "test-bucket"
     val path   = "forbidden-path"
 
@@ -464,8 +464,7 @@ class DatalakeStorageInterfaceTest
 
     val result = storageInterface.pathExists(bucket, path)
 
-    result.isLeft should be(true)
-    result.left.getOrElse(throw new AssertionError("Expected Left")) should be(a[PathError])
+    result should be(Right(false))
   }
 
   private def createTestFile = {
@@ -1004,8 +1003,6 @@ class DatalakeStorageInterfaceTest
       new DataLakeStorageException("AuthorizationPermissionMismatch", mockHttpResponse(403), null)
     when(srcFileClient.renameWithResponse(eqTo(newBucket), eqTo(newPath), any, any, any, any))
       .thenThrow(forbiddenException)
-    // Source file is still present — rename was rejected, not completed.
-    when(srcFileClient.exists()).thenReturn(true)
 
     val result = storageInterface.mvFile(oldBucket, oldPath, newBucket, newPath, none)
 
@@ -1014,7 +1011,47 @@ class DatalakeStorageInterfaceTest
     val moveErr = result.left.value.asInstanceOf[FileMoveError]
     moveErr.exception should be(a[DataLakeStorageException])
     moveErr.exception.asInstanceOf[DataLakeStorageException].getStatusCode should be(403)
-    // Idempotence MUST NOT have been applied — dest must NOT be queried since source exists.
+    // With the 403 short-circuit, neither source nor dest should be probed.
+    verify(srcFileClient, never).exists()
+    verify(destFileClient, never).exists()
+  }
+
+  "mvFile" should "surface original 403 error when rename fails 403 and source pathExists also returns 403 (HNS quirk)" in {
+    // Regression test: pathExists now treats 403 as absent (Right(false)) for the HNS+SharedKey quirk.
+    // Without the 403 guard in mvFile, a 403 rename failure followed by pathExists returning Right(false)
+    // (source "absent") and destFileClient.exists() returning true would cause a false idempotent success.
+    // The guard short-circuits before any existence probing.
+    val oldBucket = "oldBucket"
+    val oldPath   = "oldPath"
+    val newBucket = "newBucket"
+    val newPath   = "newPath"
+
+    val srcFileClient  = mock[DataLakeFileClient]
+    val destFileClient = mock[DataLakeFileClient]
+
+    when(client.getFileSystemClient(oldBucket).getFileClient(oldPath)).thenReturn(srcFileClient)
+    when(client.getFileSystemClient(newBucket).getFileClient(newPath)).thenReturn(destFileClient)
+
+    val forbiddenException =
+      new DataLakeStorageException("AuthorizationPermissionMismatch", mockHttpResponse(403), null)
+    when(srcFileClient.renameWithResponse(eqTo(newBucket), eqTo(newPath), any, any, any, any))
+      .thenThrow(forbiddenException)
+    // HNS quirk: exists() also throws 403 for a non-existent path under SharedKey auth.
+    when(srcFileClient.exists()).thenThrow(
+      new DataLakeStorageException("AuthorizationPermissionMismatch", mockHttpResponse(403), null),
+    )
+    // Destination is present — without the fix this would cause a false idempotent success.
+    when(destFileClient.exists()).thenReturn(true)
+
+    val result = storageInterface.mvFile(oldBucket, oldPath, newBucket, newPath, none)
+
+    result.isLeft should be(true)
+    result.left.value should be(a[FileMoveError])
+    val moveErr = result.left.value.asInstanceOf[FileMoveError]
+    moveErr.exception should be(a[DataLakeStorageException])
+    moveErr.exception.asInstanceOf[DataLakeStorageException].getStatusCode should be(403)
+    // The 403 guard short-circuits before any existence probing.
+    verify(srcFileClient, never).exists()
     verify(destFileClient, never).exists()
   }
 
