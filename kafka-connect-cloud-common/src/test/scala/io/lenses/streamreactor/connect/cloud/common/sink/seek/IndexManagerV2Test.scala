@@ -75,6 +75,12 @@ class IndexManagerV2Test
   private var indexManagerV2: IndexManagerV2 = _
 
   before {
+    // Defensive: a prior test (e.g. "drainGcQueue catches InterruptedException ...") can leave
+    // the current thread's interrupt flag set — close()'s final drainGcQueue / awaitTermination
+    // re-raises it after the test's own clear. cats-effect's unsafeRunSync() in open() returns
+    // None on an interrupted thread, which surfaces as NoSuchElementException: None.get. Clear any
+    // leaked interrupt state before each test so the flake cannot propagate between tests.
+    val _ = Thread.interrupted()
     reset(storageInterface, connectorTaskId, bucketAndPrefixFn, pendingOperationsProcessors)
 
     indexManagerV2 = new IndexManagerV2(
@@ -4417,8 +4423,12 @@ class IndexManagerV2Test
       // Polled item was re-enqueued, not silently dropped.
       im.gcQueueSize shouldBe 1
     } finally {
-      Thread.interrupted() // clean up interrupt flag for subsequent tests
+      // Order matters: close() runs a final drainGcQueue() (with deleteFiles still stubbed to
+      // throw InterruptedException) and awaitTermination(), both of which RESTORE the interrupt
+      // flag. Clearing it must therefore happen AFTER close(), or the flag leaks into the next
+      // test and breaks its unsafeRunSync(). The defensive clear in `before` is the backstop.
       im.close()
+      val _ = Thread.interrupted() // clean up interrupt flag for subsequent tests
     }
   }
 
