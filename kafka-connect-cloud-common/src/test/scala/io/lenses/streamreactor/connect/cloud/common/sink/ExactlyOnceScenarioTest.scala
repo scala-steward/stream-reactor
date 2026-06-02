@@ -33,8 +33,6 @@ import io.lenses.streamreactor.connect.cloud.common.sink.seek.ObjectWithETag
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingOperationsProcessors
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.UploadOperation
-import io.lenses.streamreactor.connect.cloud.common.sink.seek.deprecated.IndexFilenames
-import io.lenses.streamreactor.connect.cloud.common.sink.seek.deprecated.IndexManagerV1
 import io.lenses.streamreactor.connect.cloud.common.storage.StorageInterface
 import io.lenses.streamreactor.connect.cloud.common.testing.FakeFileMetadata
 import io.lenses.streamreactor.connect.cloud.common.testing.InMemoryStorageInterface
@@ -845,8 +843,7 @@ object ExactlyOnceScenarioTest {
     implicit val taskId:       ConnectorTaskId                    = ConnectorTaskId("eo-test", 1, 0)
     implicit val locValidator: CloudLocationValidator             = (location: CloudLocation) => Validated.valid(location)
 
-    private val pop         = new PendingOperationsProcessors(storage)
-    private val v1Filenames = new IndexFilenames(directoryFileName + "-v1")
+    private val pop = new PendingOperationsProcessors(storage)
 
     private def bucketAndPrefix(tp: TopicPartition): Either[SinkError, CloudLocation] =
       CloudLocation(bucket, Some(s"data/${tp.topic.value}/${tp.partition}/")).asRight
@@ -889,10 +886,8 @@ object ExactlyOnceScenarioTest {
     var lastCommitError: Option[SinkError] = None
 
     def bootTask(): Unit = {
-      val v1 = new IndexManagerV1(v1Filenames, bucketAndPrefix)
       im = new IndexManagerV2(
         bucketAndPrefix,
-        v1,
         pop,
         directoryFileName,
         gcIntervalSeconds      = Int.MaxValue,

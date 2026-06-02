@@ -35,8 +35,6 @@ import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManagerV2
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.NoIndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingOperationsProcessors
-import io.lenses.streamreactor.connect.cloud.common.sink.seek.deprecated.IndexFilenames
-import io.lenses.streamreactor.connect.cloud.common.sink.seek.deprecated.IndexManagerV1
 import io.lenses.streamreactor.connect.cloud.common.sink.transformers.TopicsTransformers
 import io.lenses.streamreactor.connect.cloud.common.sink.writer.WriterManager
 import io.lenses.streamreactor.connect.cloud.common.storage.FileMetadata
@@ -140,10 +138,6 @@ class WriterManagerCreator[MD <: FileMetadata, SC <: CloudSinkConfig[_]] extends
     val indexManager: IndexManager = config.indexOptions.map(io =>
       new IndexManagerV2(
         bucketAndPrefixFn,
-        new IndexManagerV1(
-          new IndexFilenames(io.indexesDirectoryName),
-          bucketAndPrefixFn,
-        ),
         pendingOperationsProcessors,
         io.indexesDirectoryName,
         io.gcIntervalSeconds,
