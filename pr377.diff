@@ -1,0 +1,1962 @@
+diff --git a/dev-scripts/adls-local/.gitignore b/dev-scripts/adls-local/.gitignore
+new file mode 100644
+index 000000000..3a08fffbd
+--- /dev/null
++++ b/dev-scripts/adls-local/.gitignore
+@@ -0,0 +1,2 @@
++connectors/*.jar
++secrets/*
+diff --git a/dev-scripts/adls-local/README.md b/dev-scripts/adls-local/README.md
+new file mode 100644
+index 000000000..a02b37745
+--- /dev/null
++++ b/dev-scripts/adls-local/README.md
+@@ -0,0 +1,196 @@
++# Azure Data Lake Storage (ADLS) local dev environment
++
++Spins up a full local stack — Kafka 4.1 (KRaft) and Kafka Connect 4.1 — so you can exercise the `kafka-connect-azure-datalake` sink connector from this repo end-to-end against a real Azure Data Lake Storage Gen2 account, without any other infrastructure.
++
++## What it does
++
++1. Builds the connector fat-jar from source with JDK 17.
++2. Starts Docker Compose (Kafka, Connect).
++3. Creates topic `adls-dev-topic` with **3 partitions**.
++4. Deploys the connector with `connect.datalake.azure.auth.mode=connectionstring`.
++5. Produces 6 sample JSON records to the topic (2 per partition).
++6. Verifies JSON files appear in the ADLS Gen2 filesystem (one file per record, due to `WITH_FLUSH_COUNT = 1`).
++
++## Prerequisites
++
++| Requirement | Notes |
++|---|---|
++| Docker + Docker Compose v2 | `docker compose version` must work |
++| JDK 17 | Used to build the connector via sbt. macOS: `brew install --cask temurin@17` |
++| sbt | [scala-sbt.org/download](https://www.scala-sbt.org/download/) |
++| `curl`, `jq` | For deploy polling and verification |
++| Azure account | Free tier sufficient; see below |
++| `az` CLI (optional) | Used in `05-verify.sh` to count files; falls back to Portal instructions if absent |
++
++## Getting Azure credentials
++
++You need an **ADLS Gen2** storage account (hierarchical namespace enabled) and a filesystem (container) inside it. The connector authenticates with a **connection string**.
++
++### Option A — Azure Portal
++
++1. Go to the [Azure Portal](https://portal.azure.com) → **Create a resource** → search **Storage account** → Create.
++2. Fill in:
++   - **Resource group**: create a new one, e.g. `streamreactor-dev`.
++   - **Storage account name**: a globally-unique lowercase name, 3–24 characters, e.g. `srdev12345`.
++   - **Region**: any region near you.
++   - **Redundancy**: Locally-redundant storage (LRS) is cheapest.
++3. Click the **Advanced** tab → tick **"Enable hierarchical namespace"** — this is what makes it ADLS Gen2 (not plain blob storage). The connector requires this.
++4. Leave all other settings at defaults. Click **Review + create** → **Create**.
++5. Once deployed, open the storage account → **Data storage** → **Containers** → **+ Container** → name it `adls-dev` (this must match `ADLS_FILESYSTEM`). Leave public access as **Private**.
++6. In the same storage account → **Security + networking** → **Access keys** → click **Show keys** → copy the **Connection string** for `key1`.
++
++Export it:
++
++```bash
++export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=srdev12345;AccountKey=...;EndpointSuffix=core.windows.net"
++export ADLS_FILESYSTEM="adls-dev"
++```
++
++### Option B — Azure CLI
++
++Requires `az login` to be done first (`brew install azure-cli` or [install docs](https://docs.microsoft.com/en-us/cli/azure/install-azure-cli)).
++
++```bash
++RG=streamreactor-dev
++LOC=westeurope
++ACC=srdev$RANDOM      # globally unique, lowercase, 3-24 chars
++FS=adls-dev
++
++# Create resource group
++az group create -n "$RG" -l "$LOC"
++
++# Create ADLS Gen2 storage account (--hierarchical-namespace true is the key flag)
++az storage account create \
++  -n "$ACC" -g "$RG" -l "$LOC" \
++  --sku Standard_LRS \
++  --kind StorageV2 \
++  --hierarchical-namespace true
++
++# Retrieve connection string
++CONN=$(az storage account show-connection-string -n "$ACC" -g "$RG" -o tsv)
++
++# Create the filesystem (container)
++az storage fs create -n "$FS" --connection-string "$CONN"
++
++# Export for the setup script
++export AZURE_STORAGE_CONNECTION_STRING="$CONN"
++export ADLS_FILESYSTEM="$FS"
++```
++
++## Quick start
++
++```bash
++# Run everything in one go (from repo root):
++./dev-scripts/adls-local/scripts/00-setup.sh
++
++# Or step by step:
++./dev-scripts/adls-local/scripts/01-build-connector.sh
++docker compose -f dev-scripts/adls-local/docker-compose.yml up -d
++./dev-scripts/adls-local/scripts/02-create-topics.sh
++./dev-scripts/adls-local/scripts/03-deploy-connector.sh
++./dev-scripts/adls-local/scripts/04-produce-data.sh
++./dev-scripts/adls-local/scripts/05-verify.sh
++```
++
++## Rebuilding the connector jar
++
++```bash
++REBUILD=1 ./dev-scripts/adls-local/scripts/01-build-connector.sh
++```
++
++## Teardown
++
++```bash
++./dev-scripts/adls-local/scripts/99-teardown.sh
++```
++
++Removes the Docker Compose stack (including volumes) and the generated jar.  
++**The remote ADLS filesystem and storage account are not deleted** (safety). To clean up Azure resources:
++
++```bash
++# Delete the entire resource group (removes storage account + filesystem)
++az group delete -n streamreactor-dev --yes --no-wait
++```
++
++## Config reference
++
++### Filesystem naming rules
++
++The `ADLS_FILESYSTEM` value is the ADLS Gen2 container name. Naming constraints (enforced by the connector):
++
++- Lowercase letters, numbers and hyphens (`-`) only.
++- Must start and end with a letter or number.
++- No consecutive hyphens.
++- 3–63 characters long.
++
++### Connector config key reference
++
++| Key | Value in this script | Notes |
++|---|---|---|
++| `connector.class` | `io.lenses.streamreactor.connect.datalake.sink.DatalakeSinkConnector` | ADLS sink |
++| `tasks.max` | `3` | One task per partition |
++| `topics` | `adls-dev-topic` | |
++| `connect.datalake.kcql` | `INSERT INTO <fs>:adls-dev SELECT * FROM adls-dev-topic STOREAS \`JSON\` WITH_FLUSH_COUNT = 1` | Writes to `<filesystem>/adls-dev/` directory; 1 file per record |
++| `connect.datalake.azure.auth.mode` | `connectionstring` | See auth modes below |
++| `connect.datalake.azure.connection.string` | *(substituted at deploy time)* | Never stored on disk |
++| `connect.datalake.local.tmp.directory` | `/tmp/adls-staging` | Local staging directory inside the Connect container |
++
++The KCQL path format is `<filesystem>:<directory>`. The filesystem is the ADLS container name; the directory is the path within it where files are written.
++
++### Switching authentication mode
++
++Three auth modes are supported (set via `connect.datalake.azure.auth.mode`):
++
++**`connectionstring`** (used by this script) — single string from the portal containing account name, key, and endpoint. Simplest for local dev; does not require separate account name/key fields. Requires "Allow storage account key access" to be enabled on the account.
++
++**`credentials`** — account name + account key separately:
++
++```json
++{
++  "connect.datalake.azure.auth.mode": "credentials",
++  "connect.datalake.azure.account.name": "srdev12345",
++  "connect.datalake.azure.account.key": "<your-account-key>",
++  "connect.datalake.endpoint": "https://srdev12345.dfs.core.windows.net"
++}
++```
++
++**`default`** — uses the Azure DefaultAzureCredential chain (environment variables → managed identity → `az login` token). Requires the credential to be available _inside the Kafka Connect container_, not just on the host. For local dev this means setting `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` as Docker environment variables, or mounting a token file:
++
++```yaml
++# docker-compose.yml addition
++environment:
++  AZURE_CLIENT_ID: "..."
++  AZURE_CLIENT_SECRET: "..."
++  AZURE_TENANT_ID: "..."
++```
++
++### How the connection string is stored
++
++The connection string is PUT to Kafka Connect via its REST API at deploy time. It is stored inside the `connect-configs` Kafka topic (inside the local Docker Compose stack) — not on disk in this repository. The `connector-config.json` file committed to git contains only the `REPLACE_ME_CONNECTION_STRING` placeholder.
++
++## Verification
++
++After `00-setup.sh` completes:
++
++- `curl http://localhost:8083/connectors/adls-dev/status | jq .` returns `state: "RUNNING"` with all 3 tasks running.
++- The ADLS filesystem contains 6 JSON files (one per produced record).
++
++```bash
++# Check connector status
++curl http://localhost:8083/connectors/adls-dev/status | jq .
++
++# List files in ADLS (requires az CLI)
++az storage fs file list \
++  --file-system "${ADLS_FILESYSTEM}" \
++  --connection-string "${AZURE_STORAGE_CONNECTION_STRING}" \
++  --recursive \
++  --output table
++```
++
++## Cost note
++
++A Standard LRS StorageV2 account costs fractions of a cent at this data volume (a few kilobytes of JSON). The account accrues a small standing charge (~$0.02/GB/month for LRS in West Europe) while it exists. Delete the resource group when done to avoid any ongoing cost:
++
++```bash
++az group delete -n streamreactor-dev --yes
++```
+diff --git a/dev-scripts/adls-local/connector-config.json b/dev-scripts/adls-local/connector-config.json
+new file mode 100644
+index 000000000..c4f01b415
+--- /dev/null
++++ b/dev-scripts/adls-local/connector-config.json
+@@ -0,0 +1,16 @@
++{
++  "connector.class": "io.lenses.streamreactor.connect.datalake.sink.DatalakeSinkConnector",
++  "tasks.max": "3",
++  "topics": "adls-dev-topic",
++
++  "key.converter": "org.apache.kafka.connect.storage.StringConverter",
++  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
++  "value.converter.schemas.enable": "false",
++
++  "connect.datalake.kcql": "INSERT INTO REPLACE_ME_FILESYSTEM:adls-dev SELECT * FROM adls-dev-topic STOREAS `JSON` WITH_FLUSH_COUNT = 1",
++
++  "connect.datalake.azure.auth.mode": "connectionstring",
++  "connect.datalake.azure.connection.string": "REPLACE_ME_CONNECTION_STRING",
++
++  "connect.datalake.local.tmp.directory": "/tmp/adls-staging"
++}
+diff --git a/dev-scripts/adls-local/connectors/.gitkeep b/dev-scripts/adls-local/connectors/.gitkeep
+new file mode 100644
+index 000000000..e69de29bb
+diff --git a/dev-scripts/adls-local/docker-compose.yml b/dev-scripts/adls-local/docker-compose.yml
+new file mode 100644
+index 000000000..aeccc567d
+--- /dev/null
++++ b/dev-scripts/adls-local/docker-compose.yml
+@@ -0,0 +1,91 @@
++services:
++
++  # ---------------------------------------------------------------------------
++  # Kafka 4.1 in KRaft mode (single node acts as both broker and controller).
++  # ---------------------------------------------------------------------------
++  kafka:
++    image: apache/kafka:4.1.0
++    container_name: kafka-adls
++    hostname: kafka
++    ports:
++      - "9092:9092"   # external (host-accessible)
++    environment:
++      # KRaft — combined broker+controller
++      KAFKA_NODE_ID: 1
++      KAFKA_PROCESS_ROLES: broker,controller
++      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
++
++      # Listeners
++      # EXTERNAL → host access on 9092
++      # INTERNAL → Connect → broker inside the Docker network on 19092
++      # CONTROLLER → KRaft controller on 9093 (not exposed to host)
++      KAFKA_LISTENERS: "EXTERNAL://0.0.0.0:9092,INTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:9093"
++      KAFKA_ADVERTISED_LISTENERS: "EXTERNAL://localhost:9092,INTERNAL://kafka:19092"
++      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
++      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
++      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
++
++      # Single-node defaults
++      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
++      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
++      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
++      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
++      KAFKA_MIN_IN_SYNC_REPLICAS: 1
++      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
++
++      CLUSTER_ID: "local-adls-dev-01"
++
++    healthcheck:
++      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "kafka:19092"]
++      interval: 10s
++      timeout: 10s
++      retries: 10
++      start_period: 20s
++
++  # ---------------------------------------------------------------------------
++  # Kafka Connect 4.1 (Confluent CP 8.1.0 — Kafka 4.1 wire-compatible).
++  # The datalake connector fat-jar is mounted in from ./connectors/.
++  # The Azure SDK uses the JVM default trust store which already trusts public
++  # Azure CAs — no custom truststore is needed.
++  # ---------------------------------------------------------------------------
++  connect:
++    image: confluentinc/cp-kafka-connect-base:8.1.0
++    container_name: connect-adls
++    hostname: connect
++    ports:
++      - "8083:8083"
++    depends_on:
++      kafka:
++        condition: service_healthy
++    volumes:
++      - ./connectors:/connectors:ro
++      - ./secrets:/etc/secrets:ro
++    environment:
++      CONNECT_BOOTSTRAP_SERVERS: "kafka:19092"
++      CONNECT_REST_PORT: 8083
++      CONNECT_GROUP_ID: "adls-local"
++
++      # Internal topics (RF=1 for single-node)
++      CONNECT_CONFIG_STORAGE_TOPIC: "connect-configs"
++      CONNECT_OFFSET_STORAGE_TOPIC: "connect-offsets"
++      CONNECT_STATUS_STORAGE_TOPIC: "connect-status"
++      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
++      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
++      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
++
++      # Default converters (connector configs override per-topic)
++      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.storage.StringConverter"
++      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
++      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
++
++      # Plugin path: /connectors is the mounted fat-jar directory
++      CONNECT_PLUGIN_PATH: "/usr/share/java,/connectors"
++
++      CONNECT_REST_ADVERTISED_HOST_NAME: "connect"
++
++    healthcheck:
++      test: ["CMD", "curl", "-f", "http://localhost:8083/"]
++      interval: 10s
++      timeout: 5s
++      retries: 15
++      start_period: 60s
+diff --git a/dev-scripts/adls-local/scripts/00-setup.sh b/dev-scripts/adls-local/scripts/00-setup.sh
+new file mode 100755
+index 000000000..e5feee765
+--- /dev/null
++++ b/dev-scripts/adls-local/scripts/00-setup.sh
+@@ -0,0 +1,134 @@
++#!/usr/bin/env bash
++# Full end-to-end setup for the ADLS local dev environment.
++#
++# Usage:
++#   export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;..."
++#   export ADLS_FILESYSTEM="adls-dev"          # optional, default: adls-dev
++#
++#   ./00-setup.sh              # normal run (skips connector build if jar exists)
++#   ./00-setup.sh --clean      # tear down first, then rebuild everything from scratch
++#   REBUILD=1 ./00-setup.sh   # force connector rebuild even if jar exists
++#
++# What it does (in order):
++#   1. (optional) tear down existing stack if --clean
++#   2. Validate required env vars
++#   3. Build the connector fat-jar (01-build-connector.sh)
++#   4. Start Docker Compose (kafka + connect)
++#   5. Create Kafka topics (02-create-topics.sh)
++#   6. Deploy the connector (03-deploy-connector.sh)
++#   7. Produce sample records (04-produce-data.sh)
++#   8. Verify files in ADLS (05-verify.sh)
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++COMPOSE_DIR="${SCRIPT_DIR}/.."
++COMPOSE_FILE="${COMPOSE_DIR}/docker-compose.yml"
++
++step() { echo ""; echo "════════════════════════════════════════════════════"; echo "  STEP: $*"; echo "════════════════════════════════════════════════════"; }
++info() { echo "  >> $*"; }
++
++# ── Arg parsing ───────────────────────────────────────────────────────────────
++CLEAN=0
++for arg in "$@"; do
++  case "${arg}" in
++    --clean) CLEAN=1 ;;
++    *) echo "Unknown argument: ${arg}"; exit 1 ;;
++  esac
++done
++
++# ── Validate required env vars ────────────────────────────────────────────────
++if [[ -z "${AZURE_STORAGE_CONNECTION_STRING:-}" ]]; then
++  echo "ERROR: AZURE_STORAGE_CONNECTION_STRING is not set."
++  echo ""
++  echo "  See the README for step-by-step instructions to obtain it:"
++  echo "    dev-scripts/adls-local/README.md"
++  echo ""
++  echo "  Quick CLI path (requires az login):"
++  echo "    RG=streamreactor-dev"
++  echo "    LOC=westeurope"
++  echo "    ACC=srdev\$RANDOM"
++  echo "    az group create -n \"\$RG\" -l \"\$LOC\""
++  echo "    az storage account create -n \"\$ACC\" -g \"\$RG\" -l \"\$LOC\" --sku Standard_LRS --kind StorageV2 --hierarchical-namespace true"
++  echo "    CONN=\$(az storage account show-connection-string -n \"\$ACC\" -g \"\$RG\" -o tsv)"
++  echo "    az storage fs create -n adls-dev --connection-string \"\$CONN\""
++  echo "    export AZURE_STORAGE_CONNECTION_STRING=\"\$CONN\""
++  exit 1
++fi
++
++ADLS_FILESYSTEM="${ADLS_FILESYSTEM:-adls-dev}"
++info "Using ADLS filesystem: ${ADLS_FILESYSTEM}"
++
++# ── Clean / teardown ──────────────────────────────────────────────────────────
++if [[ "${CLEAN}" -eq 1 ]]; then
++  step "CLEAN — tearing down existing stack"
++  bash "${SCRIPT_DIR}/99-teardown.sh" || true
++fi
++
++# ── Step 1: build connector jar ───────────────────────────────────────────────
++step "1/5  Build connector fat-jar"
++bash "${SCRIPT_DIR}/01-build-connector.sh"
++
++# ── Step 2: start Kafka + Connect ─────────────────────────────────────────────
++step "2/5  Start Kafka + Kafka Connect"
++info "Bringing up kafka-adls and connect-adls containers ..."
++docker compose -f "${COMPOSE_FILE}" up -d
++
++info "Waiting for Kafka to become healthy ..."
++for i in {1..20}; do
++  STATUS=$(docker inspect -f '{{.State.Health.Status}}' kafka-adls 2>/dev/null || echo "starting")
++  echo "    kafka health: ${STATUS} (attempt ${i}/20)"
++  if [[ "${STATUS}" == "healthy" ]]; then
++    break
++  fi
++  sleep 5
++done
++STATUS=$(docker inspect -f '{{.State.Health.Status}}' kafka-adls 2>/dev/null || echo "unknown")
++if [[ "${STATUS}" != "healthy" ]]; then
++  echo "ERROR: Kafka container did not become healthy. Last 30 log lines:"
++  docker logs kafka-adls 2>&1 | tail -30
++  exit 1
++fi
++
++info "Waiting for Kafka Connect to pass its healthcheck ..."
++for i in {1..30}; do
++  STATUS=$(docker inspect -f '{{.State.Health.Status}}' connect-adls 2>/dev/null || echo "starting")
++  echo "    connect health: ${STATUS} (attempt ${i}/30)"
++  if [[ "${STATUS}" == "healthy" ]]; then
++    break
++  fi
++  sleep 10
++done
++STATUS=$(docker inspect -f '{{.State.Health.Status}}' connect-adls 2>/dev/null || echo "unknown")
++if [[ "${STATUS}" != "healthy" ]]; then
++  echo "ERROR: Kafka Connect container did not become healthy. Check logs:"
++  echo "  docker logs connect-adls"
++  exit 1
++fi
++
++# ── Step 3: create topics ─────────────────────────────────────────────────────
++step "3/5  Create Kafka topics"
++bash "${SCRIPT_DIR}/02-create-topics.sh"
++
++# ── Step 4: deploy connector ──────────────────────────────────────────────────
++step "4/5  Deploy adls-dev connector"
++bash "${SCRIPT_DIR}/03-deploy-connector.sh"
++
++# ── Step 5: produce data ──────────────────────────────────────────────────────
++step "5/5  Produce sample records"
++bash "${SCRIPT_DIR}/04-produce-data.sh"
++
++# ── Verify ────────────────────────────────────────────────────────────────────
++step "VERIFY"
++bash "${SCRIPT_DIR}/05-verify.sh"
++
++echo ""
++echo "══════════════════════════════════════════════════════"
++echo "  Setup complete!"
++echo ""
++echo "  Kafka Connect REST:  http://localhost:8083"
++echo "  Connector status:    http://localhost:8083/connectors/adls-dev/status"
++echo "  ADLS filesystem:     ${ADLS_FILESYSTEM}"
++echo ""
++echo "  Teardown:            ./dev-scripts/adls-local/scripts/99-teardown.sh"
++echo "══════════════════════════════════════════════════════"
+diff --git a/dev-scripts/adls-local/scripts/01-build-connector.sh b/dev-scripts/adls-local/scripts/01-build-connector.sh
+new file mode 100755
+index 000000000..e817f7764
+--- /dev/null
++++ b/dev-scripts/adls-local/scripts/01-build-connector.sh
+@@ -0,0 +1,100 @@
++#!/usr/bin/env bash
++# Build the kafka-connect-azure-datalake fat-jar using JDK 17 and copy it to ./connectors/.
++# Usage:
++#   ./01-build-connector.sh          # skip if jar already present
++#   REBUILD=1 ./01-build-connector.sh  # always rebuild
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
++CONNECTOR_DIR="${SCRIPT_DIR}/../connectors"
++SBT_MODULE="kafka-connect-azure-datalake"
++JAR_GLOB="${REPO_ROOT}/${SBT_MODULE}/target/libs/*.jar"
++
++echo "==> [01-build-connector] repo root: ${REPO_ROOT}"
++
++# ── JDK 17 detection ────────────────────────────────────────────────────────
++detect_java17() {
++  # 1. Honour explicit JAVA_HOME if it points at Java 17
++  if [[ -n "${JAVA_HOME:-}" ]]; then
++    local ver
++    ver=$("${JAVA_HOME}/bin/java" -version 2>&1 | awk -F '"' '/version/ {print $2}' | cut -d. -f1)
++    if [[ "${ver}" == "17" ]]; then
++      echo "${JAVA_HOME}"
++      return 0
++    fi
++  fi
++
++  # 2. macOS: /usr/libexec/java_home
++  if command -v /usr/libexec/java_home &>/dev/null; then
++    local jh
++    jh=$(/usr/libexec/java_home -v 17 2>/dev/null || true)
++    if [[ -n "${jh}" ]]; then
++      echo "${jh}"
++      return 0
++    fi
++  fi
++
++  # 3. SDKMAN
++  local sdk_dir="${HOME}/.sdkman/candidates/java"
++  if [[ -d "${sdk_dir}" ]]; then
++    local candidate
++    candidate=$(find "${sdk_dir}" -maxdepth 1 -name "17*" -type d | sort | tail -1)
++    if [[ -n "${candidate}" ]]; then
++      echo "${candidate}"
++      return 0
++    fi
++  fi
++
++  # 4. Common Linux paths
++  for dir in /usr/lib/jvm/java-17-openjdk-amd64 /usr/lib/jvm/java-17-openjdk /usr/lib/jvm/temurin-17; do
++    if [[ -d "${dir}" ]]; then
++      echo "${dir}"
++      return 0
++    fi
++  done
++
++  return 1
++}
++
++JAVA17_HOME=$(detect_java17 || true)
++if [[ -z "${JAVA17_HOME}" ]]; then
++  echo "ERROR: JDK 17 not found."
++  echo "  macOS:  brew install --cask temurin@17"
++  echo "  Linux:  sudo apt-get install -y temurin-17-jdk  (or equivalent)"
++  echo "  Manual: set JAVA_HOME to your JDK 17 installation."
++  exit 1
++fi
++
++export JAVA_HOME="${JAVA17_HOME}"
++export PATH="${JAVA_HOME}/bin:${PATH}"
++
++JAVA_REPORTED=$("${JAVA_HOME}/bin/java" -version 2>&1 | head -1)
++echo "==> [01-build-connector] using Java: ${JAVA_REPORTED} (JAVA_HOME=${JAVA_HOME})"
++
++# ── Skip if already built ────────────────────────────────────────────────────
++if [[ "${REBUILD:-0}" != "1" ]]; then
++  existing=$(ls "${CONNECTOR_DIR}"/*.jar 2>/dev/null | head -1 || true)
++  if [[ -n "${existing}" ]]; then
++    echo "==> [01-build-connector] connector jar already present: ${existing}"
++    echo "    Set REBUILD=1 to force a rebuild."
++    exit 0
++  fi
++fi
++
++# ── Build ────────────────────────────────────────────────────────────────────
++echo "==> [01-build-connector] running sbt assembly for ${SBT_MODULE} ..."
++cd "${REPO_ROOT}"
++sbt "project azure-datalake" assembly
++
++# ── Copy jar ─────────────────────────────────────────────────────────────────
++JAR=$(ls ${JAR_GLOB} 2>/dev/null | head -1 || true)
++if [[ -z "${JAR}" ]]; then
++  echo "ERROR: no jar found at ${JAR_GLOB} after build."
++  exit 1
++fi
++
++mkdir -p "${CONNECTOR_DIR}"
++cp -v "${JAR}" "${CONNECTOR_DIR}/"
++echo "==> [01-build-connector] connector jar ready: ${CONNECTOR_DIR}/$(basename "${JAR}")"
+diff --git a/dev-scripts/adls-local/scripts/02-create-topics.sh b/dev-scripts/adls-local/scripts/02-create-topics.sh
+new file mode 100755
+index 000000000..66c716f04
+--- /dev/null
++++ b/dev-scripts/adls-local/scripts/02-create-topics.sh
+@@ -0,0 +1,33 @@
++#!/usr/bin/env bash
++# Create the Kafka topic consumed by the adls connector (3 partitions).
++# Idempotent: uses --if-not-exists.
++
++set -euo pipefail
++
++TOPIC="adls-dev-topic"
++BOOTSTRAP="kafka:19092"
++KAFKA_CONTAINER="kafka-adls"
++KAFKA_TOPICS_SH="/opt/kafka/bin/kafka-topics.sh"
++
++echo "==> [02-create-topics] waiting for Kafka broker to be ready ..."
++for i in {1..20}; do
++  if docker exec "${KAFKA_CONTAINER}" "${KAFKA_TOPICS_SH}" \
++      --bootstrap-server "${BOOTSTRAP}" --list &>/dev/null; then
++    break
++  fi
++  echo "    attempt ${i}/20 — not ready yet, sleeping 5 s ..."
++  sleep 5
++done
++
++echo "==> [02-create-topics] creating topic: ${TOPIC} (3 partitions)"
++docker exec "${KAFKA_CONTAINER}" "${KAFKA_TOPICS_SH}" \
++  --bootstrap-server "${BOOTSTRAP}" \
++  --create \
++  --if-not-exists \
++  --topic "${TOPIC}" \
++  --partitions 3 \
++  --replication-factor 1
++
++echo "==> [02-create-topics] listing topics:"
++docker exec "${KAFKA_CONTAINER}" "${KAFKA_TOPICS_SH}" \
++  --bootstrap-server "${BOOTSTRAP}" --list
+diff --git a/dev-scripts/adls-local/scripts/03-deploy-connector.sh b/dev-scripts/adls-local/scripts/03-deploy-connector.sh
+new file mode 100755
+index 000000000..2954b52ef
+--- /dev/null
++++ b/dev-scripts/adls-local/scripts/03-deploy-connector.sh
+@@ -0,0 +1,156 @@
++#!/usr/bin/env bash
++# Deploy the adls-dev connector to the local Kafka Connect worker.
++#
++# Required env vars:
++#   AZURE_STORAGE_CONNECTION_STRING  — full connection string from the Azure portal
++#                                      (DefaultEndpointsProtocol=https;AccountName=...;...)
++#
++# Optional env vars:
++#   ADLS_FILESYSTEM   — ADLS Gen2 filesystem (container) name  (default: adls-dev)
++#
++# What it does:
++#   1. Validates env vars.
++#   2. Renders the final connector JSON by substituting placeholders.
++#   3. PUTs the config to the Kafka Connect REST API.
++#   4. Polls the /status endpoint until connector + all 3 tasks are RUNNING.
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++CONFIG_TEMPLATE="${SCRIPT_DIR}/../connector-config.json"
++CONNECT_URL="http://localhost:8083"
++CONNECTOR_NAME="adls-dev"
++ADLS_FILESYSTEM="${ADLS_FILESYSTEM:-adls-dev}"
++
++# ── Validate required env vars ────────────────────────────────────────────────
++if [[ -z "${AZURE_STORAGE_CONNECTION_STRING:-}" ]]; then
++  echo "ERROR: AZURE_STORAGE_CONNECTION_STRING is not set."
++  echo ""
++  echo "  Export the connection string for your ADLS Gen2 storage account:"
++  echo "    export AZURE_STORAGE_CONNECTION_STRING=\"DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net\""
++  echo ""
++  echo "  See the README for instructions on obtaining this value from the Azure portal or az CLI."
++  exit 1
++fi
++
++# ── Validate config template ──────────────────────────────────────────────────
++if [[ ! -f "${CONFIG_TEMPLATE}" ]]; then
++  echo "ERROR: connector config template not found at ${CONFIG_TEMPLATE}"
++  exit 1
++fi
++
++# ── Render final JSON (substitute placeholders) ───────────────────────────────
++TMP_CONFIG=$(mktemp /tmp/adls-connector-config.XXXXXX.json)
++trap 'rm -f "${TMP_CONFIG}"' EXIT
++
++# Escape the connection string for sed (it may contain / and & and special chars).
++# We use | as sed delimiter to avoid issues with / in the value.
++ESCAPED_CONN=$(printf '%s\n' "${AZURE_STORAGE_CONNECTION_STRING}" | sed 's/[\\&|]/\\&/g')
++ESCAPED_FS=$(printf '%s\n' "${ADLS_FILESYSTEM}" | sed 's/[\\&|]/\\&/g')
++
++sed \
++  -e "s|REPLACE_ME_CONNECTION_STRING|${ESCAPED_CONN}|g" \
++  -e "s|REPLACE_ME_FILESYSTEM|${ESCAPED_FS}|g" \
++  "${CONFIG_TEMPLATE}" > "${TMP_CONFIG}"
++
++echo "==> [03-deploy-connector] rendered config (connection string redacted):"
++if command -v jq &>/dev/null; then
++  jq 'del(."connect.datalake.azure.connection.string")' "${TMP_CONFIG}"
++else
++  grep -v "connection.string" "${TMP_CONFIG}" || cat "${TMP_CONFIG}"
++fi
++echo ""
++
++# ── Wait for Connect REST API ─────────────────────────────────────────────────
++echo "==> [03-deploy-connector] waiting for Kafka Connect REST API at ${CONNECT_URL} ..."
++for i in {1..30}; do
++  HTTP=$(curl -s -o /dev/null -w "%{http_code}" "${CONNECT_URL}/" 2>/dev/null || true)
++  if [[ "${HTTP}" == "200" ]]; then
++    echo "    Connect is up."
++    break
++  fi
++  echo "    attempt ${i}/30 — HTTP ${HTTP}, sleeping 5 s ..."
++  sleep 5
++done
++
++HTTP=$(curl -s -o /dev/null -w "%{http_code}" "${CONNECT_URL}/" 2>/dev/null || true)
++if [[ "${HTTP}" != "200" ]]; then
++  echo "ERROR: Connect REST API did not become available."
++  exit 1
++fi
++
++# ── Create or update the connector ───────────────────────────────────────────
++echo "==> [03-deploy-connector] deploying connector '${CONNECTOR_NAME}' ..."
++HTTP=$(curl -s -o /tmp/connect-response.json -w "%{http_code}" \
++  -X PUT \
++  -H "Content-Type: application/json" \
++  -d "@${TMP_CONFIG}" \
++  "${CONNECT_URL}/connectors/${CONNECTOR_NAME}/config" 2>/dev/null)
++
++echo "    response HTTP ${HTTP}:"
++(command -v jq &>/dev/null && jq . /tmp/connect-response.json || cat /tmp/connect-response.json)
++echo ""
++
++if [[ "${HTTP}" != "200" && "${HTTP}" != "201" ]]; then
++  echo "ERROR: connector deployment failed (HTTP ${HTTP})."
++  exit 1
++fi
++
++# ── Poll for RUNNING (both connector AND all tasks) ───────────────────────────
++echo "==> [03-deploy-connector] waiting for connector and tasks to reach RUNNING ..."
++for i in {1..30}; do
++  STATUS_JSON=$(curl -s "${CONNECT_URL}/connectors/${CONNECTOR_NAME}/status" 2>/dev/null || true)
++
++  if command -v jq &>/dev/null; then
++    CONN_STATE=$(echo "${STATUS_JSON}" | jq -r '.connector.state // "unknown"')
++    TASK_COUNT=$(echo "${STATUS_JSON}" | jq -r '.tasks // [] | length')
++    FAILED_TASKS=$(echo "${STATUS_JSON}" | jq -r '[.tasks // [] | .[] | select(.state == "FAILED")] | length')
++    RUNNING_TASKS=$(echo "${STATUS_JSON}" | jq -r '[.tasks // [] | .[] | select(.state == "RUNNING")] | length')
++  else
++    CONN_STATE=$(echo "${STATUS_JSON}" | grep -o '"state":"[^"]*"' | head -1 | cut -d'"' -f4)
++    TASK_COUNT=0
++    FAILED_TASKS=0
++    RUNNING_TASKS=0
++  fi
++
++  echo "    attempt ${i}/30 — connector=${CONN_STATE:-unknown} tasks=${RUNNING_TASKS}/${TASK_COUNT} running, ${FAILED_TASKS} failed"
++
++  # Any task failure → bail out immediately with full diagnostics
++  if [[ "${FAILED_TASKS}" -gt 0 ]]; then
++    echo ""
++    echo "ERROR: ${FAILED_TASKS} task(s) are in FAILED state."
++    echo "──────────────────────────────────────────────────"
++    echo "${STATUS_JSON}" | (command -v jq &>/dev/null && \
++      jq '.tasks[] | select(.state == "FAILED") | {id: .id, state: .state, trace: .trace}' || cat)
++    echo "──────────────────────────────────────────────────"
++    echo ""
++    echo "Connect worker logs (last 40 lines):"
++    echo "──────────────────────────────────────────────────"
++    docker logs connect-adls 2>&1 | tail -40
++    echo "──────────────────────────────────────────────────"
++    exit 1
++  fi
++
++  if [[ "${CONN_STATE}" == "FAILED" ]]; then
++    echo "ERROR: connector itself entered FAILED state."
++    echo "${STATUS_JSON}" | (command -v jq &>/dev/null && jq . || cat)
++    exit 1
++  fi
++
++  # All-good condition: connector RUNNING and all tasks RUNNING
++  if [[ "${CONN_STATE}" == "RUNNING" && "${TASK_COUNT}" -gt 0 && "${RUNNING_TASKS}" -eq "${TASK_COUNT}" ]]; then
++    echo "==> [03-deploy-connector] connector and all ${TASK_COUNT} task(s) are RUNNING."
++    echo ""
++    echo "${STATUS_JSON}" | (command -v jq &>/dev/null && jq . || cat)
++    exit 0
++  fi
++
++  sleep 5
++done
++
++echo "ERROR: connector did not reach a healthy state within the timeout."
++curl -s "${CONNECT_URL}/connectors/${CONNECTOR_NAME}/status" | (command -v jq &>/dev/null && jq . || cat)
++echo ""
++echo "Connect worker logs (last 40 lines):"
++docker logs connect-adls 2>&1 | tail -40
++exit 1
+diff --git a/dev-scripts/adls-local/scripts/04-produce-data.sh b/dev-scripts/adls-local/scripts/04-produce-data.sh
+new file mode 100755
+index 000000000..12c3fcc8d
+--- /dev/null
++++ b/dev-scripts/adls-local/scripts/04-produce-data.sh
+@@ -0,0 +1,40 @@
++#!/usr/bin/env bash
++# Produce 6 sample JSON records to adls-dev-topic (3 partitions).
++#
++# Records use distinct keys so Kafka's default (murmur2) partitioner spreads
++# them across all 3 partitions:
++#   keys user-1..user-6 — empirically distribute 2 per partition.
++#
++# The KCQL uses INSERT INTO <filesystem>:adls-dev with WITH_FLUSH_COUNT = 1,
++# so each record results in exactly one JSON file written to ADLS — making
++# verification straightforward (expect 6 files).
++
++set -euo pipefail
++
++KAFKA_CONTAINER="kafka-adls"
++BOOTSTRAP="kafka:19092"
++TOPIC="adls-dev-topic"
++PRODUCER="/opt/kafka/bin/kafka-console-producer.sh"
++
++echo "==> [04-produce-data] producing 6 records to '${TOPIC}' ..."
++
++# kafka-console-producer reads key<TAB>value lines when parse.key=true.
++# We pass a TAB via $'\t' expanded on the host before docker exec receives it.
++TAB=$'\t'
++
++printf '%s%s%s\n' \
++  "user-1${TAB}" "" '{"id":1,"name":"alice","dept":"engineering","score":95}' \
++  "user-2${TAB}" "" '{"id":2,"name":"bob","dept":"marketing","score":82}' \
++  "user-3${TAB}" "" '{"id":3,"name":"carol","dept":"engineering","score":77}' \
++  "user-4${TAB}" "" '{"id":4,"name":"dave","dept":"sales","score":91}' \
++  "user-5${TAB}" "" '{"id":5,"name":"eve","dept":"marketing","score":68}' \
++  "user-6${TAB}" "" '{"id":6,"name":"frank","dept":"sales","score":55}' \
++| docker exec -i "${KAFKA_CONTAINER}" "${PRODUCER}" \
++    --bootstrap-server "${BOOTSTRAP}" \
++    --topic "${TOPIC}" \
++    --property parse.key=true \
++    --property "key.separator=${TAB}"
++
++echo "==> [04-produce-data] 6 records produced to '${TOPIC}'."
++echo "    The connector will write one JSON file per record to ADLS (WITH_FLUSH_COUNT = 1)."
++echo "    Expect 6 files total across the 3 task directories."
+diff --git a/dev-scripts/adls-local/scripts/05-verify.sh b/dev-scripts/adls-local/scripts/05-verify.sh
+new file mode 100755
+index 000000000..8033a0757
+--- /dev/null
++++ b/dev-scripts/adls-local/scripts/05-verify.sh
+@@ -0,0 +1,151 @@
++#!/usr/bin/env bash
++# Verify that files have landed in ADLS after the connector processed the
++# records produced by 04-produce-data.sh.
++#
++# Checks:
++#   - Connector state is RUNNING
++#   - All 3 connector tasks are RUNNING
++#   - >= 6 JSON files appear in the ADLS filesystem (via az CLI if available,
++#     otherwise falls back to printing the Connect offset REST endpoint and
++#     instructing the user to check the Azure Portal).
++#
++# Required env vars (same as 03-deploy-connector.sh):
++#   AZURE_STORAGE_CONNECTION_STRING
++#
++# Optional:
++#   ADLS_FILESYSTEM   (default: adls-dev)
++
++set -euo pipefail
++
++CONNECT_URL="http://localhost:8083"
++CONNECTOR_NAME="adls-dev"
++ADLS_FILESYSTEM="${ADLS_FILESYSTEM:-adls-dev}"
++EXPECTED_FILES=6
++
++FAIL=0
++
++pass() { echo "  [PASS] $*"; }
++fail() { echo "  [FAIL] $*"; FAIL=1; }
++
++# ── Connector + task status ────────────────────────────────────────────────────
++echo "==> [05-verify] checking connector and task status ..."
++STATUS_JSON=$(curl -sf "${CONNECT_URL}/connectors/${CONNECTOR_NAME}/status" 2>/dev/null || true)
++
++if command -v jq &>/dev/null; then
++  CONN_STATE=$(echo "${STATUS_JSON}" | jq -r '.connector.state // "unknown"')
++  TASK_COUNT=$(echo "${STATUS_JSON}" | jq '.tasks | length')
++  FAILED_TASKS=$(echo "${STATUS_JSON}" | jq '[.tasks[] | select(.state != "RUNNING")] | length')
++else
++  CONN_STATE=$(echo "${STATUS_JSON}" | grep -o '"state":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
++  TASK_COUNT=0
++  FAILED_TASKS=0
++fi
++
++if [[ "${CONN_STATE}" == "RUNNING" ]]; then
++  pass "connector '${CONNECTOR_NAME}' is RUNNING"
++else
++  fail "connector '${CONNECTOR_NAME}' state is '${CONN_STATE:-unknown}' (expected RUNNING)"
++fi
++
++if command -v jq &>/dev/null; then
++  if [[ "${TASK_COUNT}" -eq 0 ]]; then
++    fail "connector has no tasks (deployment may not have started)"
++  elif [[ "${FAILED_TASKS}" -gt 0 ]]; then
++    fail "${FAILED_TASKS}/${TASK_COUNT} task(s) are not RUNNING:"
++    echo "${STATUS_JSON}" | jq '.tasks[] | select(.state != "RUNNING") | {id: .id, state: .state, trace: .trace}'
++  else
++    pass "all ${TASK_COUNT} task(s) are RUNNING"
++  fi
++else
++  echo "    (jq not available — skipping detailed task check)"
++fi
++
++# Dump Connect logs on task failure
++if [[ "${FAIL}" -eq 1 ]]; then
++  echo ""
++  echo "==> [05-verify] Connect worker logs (last 40 lines):"
++  echo "──────────────────────────────────────────────────"
++  docker logs connect-adls 2>&1 | tail -40
++  echo "──────────────────────────────────────────────────"
++fi
++
++# ── Wait for connector to flush ───────────────────────────────────────────────
++echo ""
++echo "==> [05-verify] waiting 15 s for connector to flush to ADLS ..."
++sleep 15
++
++# ── ADLS file count check ─────────────────────────────────────────────────────
++echo ""
++echo "==> [05-verify] checking files in ADLS filesystem '${ADLS_FILESYSTEM}' ..."
++
++if [[ -z "${AZURE_STORAGE_CONNECTION_STRING:-}" ]]; then
++  echo "  WARNING: AZURE_STORAGE_CONNECTION_STRING is not set — skipping az CLI check."
++  echo "  Please verify manually in the Azure Portal:"
++  echo "    Storage account → Data storage → Containers → ${ADLS_FILESYSTEM}"
++  echo "    Expect at least ${EXPECTED_FILES} JSON files."
++elif command -v az &>/dev/null; then
++  echo "  Using az CLI to count files ..."
++
++  FILE_COUNT=$(az storage fs file list \
++    --file-system "${ADLS_FILESYSTEM}" \
++    --connection-string "${AZURE_STORAGE_CONNECTION_STRING}" \
++    --recursive \
++    --output tsv \
++    --query "[?ends_with(name, '.json')] | length(@)" 2>/dev/null || echo "0")
++
++  # Fallback: az may output a table; count non-header lines
++  if [[ -z "${FILE_COUNT}" || "${FILE_COUNT}" == "0" ]]; then
++    FILE_COUNT=$(az storage fs file list \
++      --file-system "${ADLS_FILESYSTEM}" \
++      --connection-string "${AZURE_STORAGE_CONNECTION_STRING}" \
++      --recursive \
++      --output json 2>/dev/null \
++      | (command -v jq &>/dev/null && jq '[.[] | select(.name | endswith(".json"))] | length' || echo "0"))
++  fi
++
++  echo "==> [05-verify] files found in '${ADLS_FILESYSTEM}': ${FILE_COUNT} (expected >= ${EXPECTED_FILES})"
++
++  if [[ "${FILE_COUNT:-0}" -ge "${EXPECTED_FILES}" ]]; then
++    pass "filesystem '${ADLS_FILESYSTEM}' has ${FILE_COUNT} JSON file(s) (>= ${EXPECTED_FILES})"
++    echo ""
++    echo "  File listing:"
++    az storage fs file list \
++      --file-system "${ADLS_FILESYSTEM}" \
++      --connection-string "${AZURE_STORAGE_CONNECTION_STRING}" \
++      --recursive \
++      --output table 2>/dev/null || true
++  else
++    fail "filesystem '${ADLS_FILESYSTEM}' has ${FILE_COUNT:-0} JSON file(s) (expected >= ${EXPECTED_FILES})"
++    echo ""
++    echo "  Diagnostics:"
++    echo "    docker logs connect-adls 2>&1 | tail -50"
++    echo "    curl http://localhost:8083/connectors/${CONNECTOR_NAME}/status | jq ."
++    echo "    az storage fs file list --file-system ${ADLS_FILESYSTEM} --connection-string \"\$AZURE_STORAGE_CONNECTION_STRING\" --recursive --output table"
++  fi
++else
++  echo "  az CLI not found — skipping remote file count check."
++  echo "  Install: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli"
++  echo ""
++  echo "  Falling back to connector offset check via REST API ..."
++  OFFSETS_JSON=$(curl -s "${CONNECT_URL}/connectors/${CONNECTOR_NAME}/offsets" 2>/dev/null || true)
++  echo "  Connector offsets:"
++  echo "${OFFSETS_JSON}" | (command -v jq &>/dev/null && jq . || cat)
++  echo ""
++  echo "  Verify manually in the Azure Portal:"
++  echo "    Storage account → Data storage → Containers → ${ADLS_FILESYSTEM}"
++  echo "    Expect at least ${EXPECTED_FILES} JSON files."
++fi
++
++# ── Result ────────────────────────────────────────────────────────────────────
++echo ""
++if [[ "${FAIL}" -eq 0 ]]; then
++  echo "==> [05-verify] ALL CHECKS PASSED"
++  exit 0
++else
++  echo ""
++  echo "==> [05-verify] SOME CHECKS FAILED — see [FAIL] lines above"
++  echo "    Useful diagnostics:"
++  echo "      docker logs connect-adls 2>&1 | tail -50"
++  echo "      curl http://localhost:8083/connectors/${CONNECTOR_NAME}/status | jq ."
++  exit 1
++fi
+diff --git a/dev-scripts/adls-local/scripts/99-teardown.sh b/dev-scripts/adls-local/scripts/99-teardown.sh
+new file mode 100755
+index 000000000..48cf44fd8
+--- /dev/null
++++ b/dev-scripts/adls-local/scripts/99-teardown.sh
+@@ -0,0 +1,29 @@
++#!/usr/bin/env bash
++# Tear down the local ADLS dev environment.
++#
++# Removes:
++#   - Docker Compose stack (containers + volumes)
++#   - Generated connector jar (connectors/*.jar)
++#
++# Does NOT delete the remote ADLS filesystem or storage account — those are
++# cloud resources that require explicit cleanup. See the note printed below.
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++COMPOSE_DIR="${SCRIPT_DIR}/.."
++COMPOSE_FILE="${COMPOSE_DIR}/docker-compose.yml"
++CONNECTORS_DIR="${COMPOSE_DIR}/connectors"
++
++echo "==> [99-teardown] stopping Docker Compose stack ..."
++docker compose -f "${COMPOSE_FILE}" down -v --remove-orphans 2>/dev/null || true
++
++echo "==> [99-teardown] removing generated connector jars ..."
++find "${CONNECTORS_DIR}" -name "*.jar" -delete 2>/dev/null || true
++
++echo "==> [99-teardown] done."
++echo ""
++echo "  NOTE: The remote ADLS filesystem and storage account have NOT been deleted."
++echo "  To clean up the Azure resources, run:"
++echo "    az group delete -n <your-resource-group> --yes --no-wait"
++echo "  or delete the storage account directly in the Azure Portal."
+diff --git a/kafka-connect-aws-s3/src/main/scala/io/lenses/streamreactor/connect/aws/s3/storage/AwsS3StorageInterface.scala b/kafka-connect-aws-s3/src/main/scala/io/lenses/streamreactor/connect/aws/s3/storage/AwsS3StorageInterface.scala
+index 42fa503d5..85f17566b 100644
+--- a/kafka-connect-aws-s3/src/main/scala/io/lenses/streamreactor/connect/aws/s3/storage/AwsS3StorageInterface.scala
++++ b/kafka-connect-aws-s3/src/main/scala/io/lenses/streamreactor/connect/aws/s3/storage/AwsS3StorageInterface.scala
+@@ -34,6 +34,7 @@ import io.lenses.streamreactor.connect.cloud.common.storage.FileLoadError
+ import io.lenses.streamreactor.connect.cloud.common.storage.GeneralFileLoadError
+ import io.lenses.streamreactor.connect.cloud.common.storage.FileMoveError
+ import io.lenses.streamreactor.connect.cloud.common.storage.FileNotFoundError
++import io.lenses.streamreactor.connect.cloud.common.storage.NonOverwriteFileExistsError
+ import io.lenses.streamreactor.connect.cloud.common.storage.ListOfKeysResponse
+ import io.lenses.streamreactor.connect.cloud.common.storage.ListOfMetadataResponse
+ import io.lenses.streamreactor.connect.cloud.common.storage.ListResponse
+@@ -401,7 +402,17 @@ class AwsS3StorageInterface(
+       new ObjectWithETag[O](objectProtection.wrappedObject, putResponse.eTag())
+     }.toEither
+       .leftMap {
+-        ex =>
++        // NoOverwriteExistingObject lost the create race: the object already exists, so the
++        // ifNoneMatch("*") precondition fails with PreconditionFailed. Recoverable — the caller
++        // re-reads and adopts the lock. Scoped to NoOverwrite: an ObjectWithETag ifMatch
++        // mismatch also surfaces as PreconditionFailed but is the zombie-fencing signal and
++        // MUST stay fatal. Mirrors the recovery clause in createDirectoryIfNotExists.
++        case ex: S3Exception
++            if objectProtection.isInstanceOf[NoOverwriteExistingObject[_]] &&
++              "PreconditionFailed".equals(ex.awsErrorDetails().errorCode()) =>
++          logger.info(s"[{}] Lost no-overwrite create race uploading to s3 {}:{}", connectorTaskId.show, bucket, path)
++          NonOverwriteFileExistsError(ex, path)
++        case ex =>
+           logger.error(s"[{}] Failed upload from json object ({}) to s3 {}:{}",
+                        connectorTaskId.show,
+                        content,
+diff --git a/kafka-connect-aws-s3/src/test/scala/io/lenses/streamreactor/connect/aws/s3/storage/AwsS3StorageInterfaceTest.scala b/kafka-connect-aws-s3/src/test/scala/io/lenses/streamreactor/connect/aws/s3/storage/AwsS3StorageInterfaceTest.scala
+index d3a21073e..3c33885ec 100644
+--- a/kafka-connect-aws-s3/src/test/scala/io/lenses/streamreactor/connect/aws/s3/storage/AwsS3StorageInterfaceTest.scala
++++ b/kafka-connect-aws-s3/src/test/scala/io/lenses/streamreactor/connect/aws/s3/storage/AwsS3StorageInterfaceTest.scala
+@@ -16,14 +16,22 @@
+ package io.lenses.streamreactor.connect.aws.s3.storage
+ 
+ import cats.implicits.none
++import io.circe.Encoder
++import io.circe.generic.semiauto.deriveEncoder
+ import io.lenses.streamreactor.connect.cloud.common.config.ConnectorTaskId
++import io.lenses.streamreactor.connect.cloud.common.sink.seek.NoOverwriteExistingObject
++import io.lenses.streamreactor.connect.cloud.common.sink.seek.ObjectWithETag
++import io.lenses.streamreactor.connect.cloud.common.storage.FileCreateError
+ import io.lenses.streamreactor.connect.cloud.common.storage.FileMoveError
++import io.lenses.streamreactor.connect.cloud.common.storage.NonOverwriteFileExistsError
+ import org.mockito.ArgumentMatcher
+ import org.mockito.ArgumentMatchers
+ import org.mockito.Mockito
+ import org.scalatest.EitherValues
+ import org.scalatest.flatspec.AnyFlatSpecLike
+ import org.scalatest.matchers.should.Matchers
++import software.amazon.awssdk.awscore.exception.AwsErrorDetails
++import software.amazon.awssdk.core.sync.RequestBody
+ import software.amazon.awssdk.services.s3.S3Client
+ import software.amazon.awssdk.services.s3.model.CopyObjectRequest
+ import software.amazon.awssdk.services.s3.model.CopyObjectResponse
+@@ -32,6 +40,7 @@ import software.amazon.awssdk.services.s3.model.DeleteObjectResponse
+ import software.amazon.awssdk.services.s3.model.HeadObjectRequest
+ import software.amazon.awssdk.services.s3.model.HeadObjectResponse
+ import software.amazon.awssdk.services.s3.model.NoSuchKeyException
++import software.amazon.awssdk.services.s3.model.PutObjectRequest
+ import software.amazon.awssdk.services.s3.model.S3Exception
+ 
+ /**
+@@ -177,4 +186,60 @@ class AwsS3StorageInterfaceTest extends AnyFlatSpecLike with Matchers with Eithe
+     Mockito.verify(s3Client, Mockito.never()).copyObject(anyCopyObjectRequest())
+     Mockito.verify(s3Client, Mockito.never()).deleteObject(anyDeleteObjectRequest())
+   }
++
++  // ── writeBlobToFile — lost no-overwrite create race ──────────────────────
++
++  private case class TestIndexFile(owner: String, offset: Option[Long])
++  private implicit val testIndexFileEncoder: Encoder[TestIndexFile] = deriveEncoder[TestIndexFile]
++
++  private def anyPutObjectRequest(): PutObjectRequest = ArgumentMatchers.any(classOf[PutObjectRequest])
++  private def anyRequestBody():      RequestBody      = ArgumentMatchers.any(classOf[RequestBody])
++
++  private def s3ExceptionWith(errorCode: String, status: Int): S3Exception =
++    S3Exception.builder()
++      .statusCode(status)
++      .awsErrorDetails(AwsErrorDetails.builder().errorCode(errorCode).build())
++      .build().asInstanceOf[S3Exception]
++
++  "writeBlobToFile" should "return NonOverwriteFileExistsError when NoOverwriteExistingObject loses the race (PreconditionFailed)" in {
++    val s3Client         = newMockS3Client()
++    val storageInterface = new AwsS3StorageInterface(newMockTaskId(), s3Client, batchDelete = false, None)
++
++    Mockito.doThrow(s3ExceptionWith("PreconditionFailed", 412))
++      .when(s3Client).putObject(anyPutObjectRequest(), anyRequestBody())
++
++    val result =
++      storageInterface.writeBlobToFile("bucket", "path", NoOverwriteExistingObject(TestIndexFile("o", Some(1L))))
++
++    result.isLeft shouldBe true
++    result.left.value shouldBe a[NonOverwriteFileExistsError]
++  }
++
++  it should "return FileCreateError (not NonOverwriteFileExistsError) when ObjectWithETag and PreconditionFailed — fencing must stay fatal" in {
++    val s3Client         = newMockS3Client()
++    val storageInterface = new AwsS3StorageInterface(newMockTaskId(), s3Client, batchDelete = false, None)
++
++    Mockito.doThrow(s3ExceptionWith("PreconditionFailed", 412))
++      .when(s3Client).putObject(anyPutObjectRequest(), anyRequestBody())
++
++    val result =
++      storageInterface.writeBlobToFile("bucket", "path", ObjectWithETag(TestIndexFile("o", Some(1L)), "etag"))
++
++    result.isLeft shouldBe true
++    result.left.value shouldBe a[FileCreateError]
++  }
++
++  it should "return FileCreateError when NoOverwriteExistingObject fails with a non-precondition error" in {
++    val s3Client         = newMockS3Client()
++    val storageInterface = new AwsS3StorageInterface(newMockTaskId(), s3Client, batchDelete = false, None)
++
++    Mockito.doThrow(s3ExceptionWith("InternalError", 500))
++      .when(s3Client).putObject(anyPutObjectRequest(), anyRequestBody())
++
++    val result =
++      storageInterface.writeBlobToFile("bucket", "path", NoOverwriteExistingObject(TestIndexFile("o", Some(1L))))
++
++    result.isLeft shouldBe true
++    result.left.value shouldBe a[FileCreateError]
++  }
+ }
+diff --git a/kafka-connect-azure-datalake/src/main/scala/io/lenses/streamreactor/connect/datalake/storage/DatalakeStorageInterface.scala b/kafka-connect-azure-datalake/src/main/scala/io/lenses/streamreactor/connect/datalake/storage/DatalakeStorageInterface.scala
+index 25445d7a8..4975bd59c 100644
+--- a/kafka-connect-azure-datalake/src/main/scala/io/lenses/streamreactor/connect/datalake/storage/DatalakeStorageInterface.scala
++++ b/kafka-connect-azure-datalake/src/main/scala/io/lenses/streamreactor/connect/datalake/storage/DatalakeStorageInterface.scala
+@@ -452,6 +452,21 @@ class DatalakeStorageInterface(connectorTaskId: ConnectorTaskId, client: DataLak
+       }.toEither.leftMap(FileDeleteError(_, file))
+     } yield ()
+ 
++  /**
++   * True when a failed rename represents a NoOverwriteExistingObject create losing the race —
++   * i.e. the destination already exists. ADLS surfaces this as 409 PathAlreadyExists or 412.
++   * Scoped to NoOverwrite: an ObjectWithETag 412 is an eTag mismatch (fencing) and must NOT
++   * be reclassified as recoverable.
++   */
++  private def isLostNoOverwriteRace[O](
++    objectProtection: ObjectProtection[O],
++    dse:              DataLakeStorageException,
++  ): Boolean =
++    objectProtection match {
++      case NoOverwriteExistingObject(_) => dse.getStatusCode == 409 || dse.getStatusCode == 412
++      case _                            => false
++    }
++
+   override def writeBlobToFile[O](
+     bucket:           String,
+     path:             String,
+@@ -481,9 +496,10 @@ class DatalakeStorageInterface(connectorTaskId: ConnectorTaskId, client: DataLak
+     val destinationConditions: DataLakeRequestConditions = objectProtection match {
+       case NoOverwriteExistingObject(_) =>
+         // Atomic arbitration: exactly one of N concurrent renames to the same destination
+-        // wins; the rest get 412 Precondition Failed. The downstream Left(FileCreateError)
+-        // contract is unchanged — the numeric 412 replaces the historical 409 from
+-        // createFile(false), but all callers consume only the wrapper class.
++        // wins; the losers fail with EITHER 409 PathAlreadyExists (observed in prod) OR 412
++        // Precondition Failed. Both are mapped to the recoverable NonOverwriteFileExistsError
++        // (see isLostNoOverwriteRace + tryWriteViaRenameWithDirectoryRecovery), so the loser
++        // re-reads and adopts the lock instead of failing the task.
+         new DataLakeRequestConditions().setIfNoneMatch("*")
+       case ObjectWithETag(_, eTag) =>
+         // eTag here is the eTag of the CURRENT DESTINATION (sourced from topicPartitionToETags /
+@@ -574,6 +590,35 @@ class DatalakeStorageInterface(connectorTaskId: ConnectorTaskId, client: DataLak
+       }
+     }
+ 
++    // Classifies a failed rename into the correct UploadError. Applied to EVERY rename attempt —
++    // including the retry after 404 directory recovery — so a lost no-overwrite create race that
++    // surfaces only on the retried rename is still mapped to the recoverable
++    // NonOverwriteFileExistsError instead of a fatal FileCreateError.
++    def classifyRenameFailure(ex: Throwable): UploadError = ex match {
++      case dse: DataLakeStorageException if isLostNoOverwriteRace(objectProtection, dse) =>
++        // NoOverwriteExistingObject lost the create race: the destination already exists.
++        // ADLS Gen2 HNS surfaces this as EITHER 409 PathAlreadyExists (observed in prod on the
++        // rename) OR 412 Precondition Failed (setIfNoneMatch("*") arbitration). Both mean
++        // "another task won". Recoverable: IndexManagerV2.open re-reads and adopts the lock.
++        // This is scoped to NoOverwrite only — an ObjectWithETag 412 (eTag mismatch) is the
++        // zombie-fencing signal and stays a fatal FileCreateError below.
++        logger.info(
++          s"[${connectorTaskId.show}] Lost no-overwrite create race renaming $tmpPath -> $bucket:$path " +
++            s"(status ${dse.getStatusCode}); surfacing recoverable NonOverwriteFileExistsError",
++        )
++        NonOverwriteFileExistsError(dse, path)
++
++      case dse: DataLakeStorageException if dse.getStatusCode == 412 =>
++        // 412 Precondition Failed on an ObjectWithETag write: eTag mismatch (concurrent write
++        // by another task). This is the zombie-fencing mechanism and MUST stay fatal.
++        logger.warn(
++          s"[${connectorTaskId.show}] Precondition failed (412) renaming $tmpPath -> $bucket:$path",
++        )
++        FileCreateError(dse, content)
++
++      case other => FileCreateError(other, content)
++    }
++
+     def tryWriteViaRenameWithDirectoryRecovery(): Either[UploadError, String] =
+       tryWriteViaRename() match {
+         case Right(eTag) => Right(eTag)
+@@ -583,26 +628,19 @@ class DatalakeStorageInterface(connectorTaskId: ConnectorTaskId, client: DataLak
+           // Parent directory doesn't exist — create it and retry against the .tmp path.
+           // The 404 recovery is preserved in the invisible namespace (.tmp), so a crash
+           // between create-directory and rename still leaves no 0-byte blob at the destination.
++          // The retry is classified through classifyRenameFailure so a lost no-overwrite create
++          // race on the retried rename is reported as the recoverable NonOverwriteFileExistsError,
++          // not a fatal FileCreateError that would kill the losing task at cold start.
+           parentDirectory(path) match {
+             case Some(dir) =>
+               createDirectoryIfNotExists(bucket, dir) match {
+                 case Left(err) => Left(FileCreateError(err.exception, content))
+-                case Right(_)  => tryWriteViaRename().leftMap(ex => FileCreateError(ex, content))
++                case Right(_)  => tryWriteViaRename().leftMap(classifyRenameFailure)
+               }
+             case None => Left(FileCreateError(dse, content))
+           }
+ 
+-        case Left(dse: DataLakeStorageException) if dse.getStatusCode == 412 =>
+-          // 412 Precondition Failed: destination-slot condition not met.
+-          // For NoOverwriteExistingObject: destination already exists.
+-          // For ObjectWithETag: eTag mismatch (concurrent write by another task).
+-          // Both surface as Left(FileCreateError) — callers only inspect the wrapper class.
+-          logger.warn(
+-            s"[${connectorTaskId.show}] Precondition failed (412) renaming $tmpPath -> $bucket:$path",
+-          )
+-          Left(FileCreateError(dse, content))
+-
+-        case Left(other) => Left(FileCreateError(other, content))
++        case Left(other) => Left(classifyRenameFailure(other))
+       }
+ 
+     tryWriteViaRenameWithDirectoryRecovery() match {
+diff --git a/kafka-connect-azure-datalake/src/test/scala/io/lenses/streamreactor/connect/datalake/storage/DatalakeStorageInterfaceTest.scala b/kafka-connect-azure-datalake/src/test/scala/io/lenses/streamreactor/connect/datalake/storage/DatalakeStorageInterfaceTest.scala
+index d20555628..f734dfb8c 100644
+--- a/kafka-connect-azure-datalake/src/test/scala/io/lenses/streamreactor/connect/datalake/storage/DatalakeStorageInterfaceTest.scala
++++ b/kafka-connect-azure-datalake/src/test/scala/io/lenses/streamreactor/connect/datalake/storage/DatalakeStorageInterfaceTest.scala
+@@ -57,6 +57,7 @@ import io.lenses.streamreactor.connect.cloud.common.storage.FileMoveError
+ import io.lenses.streamreactor.connect.cloud.common.storage.ListOfKeysResponse
+ import io.lenses.streamreactor.connect.cloud.common.storage.ListOfMetadataResponse
+ import io.lenses.streamreactor.connect.cloud.common.storage.NonExistingFileError
++import io.lenses.streamreactor.connect.cloud.common.storage.NonOverwriteFileExistsError
+ import io.lenses.streamreactor.connect.cloud.common.storage.PathError
+ import io.lenses.streamreactor.connect.cloud.common.storage.UploadFailedError
+ import io.lenses.streamreactor.connect.cloud.common.storage.ZeroByteFileError
+@@ -1214,12 +1215,13 @@ class DatalakeStorageInterfaceTest
+     destConditionsCaptor.getValue.getIfNoneMatch should be("*")
+   }
+ 
+-  "writeBlobToFile" should "return FileCreateError when NoOverwriteExistingObject and destination exists (412 from rename)" in {
+-    val bucket   = "test-bucket"
+-    val path     = "test-path/index.lock"
+-    val tmpPath  = s"$path.tmp.${connectorTaskId.lockUuid}"
+-    val testData = TestIndexFile("owner-123", Some(100L))
+-
++  // Sets up the .tmp create + flush mocks and makes the rename throw the supplied exception.
++  private def setupAtomicWriteRenameThrows(
++    bucket:    String,
++    path:      String,
++    exception: Throwable,
++  ): Unit = {
++    val tmpPath   = s"$path.tmp.${connectorTaskId.lockUuid}"
+     val fsClient  = mock[DataLakeFileSystemClient]
+     val tmpClient = mock[DataLakeFileClient]
+     val flushResp = mock[Response[PathInfo]]
+@@ -1241,14 +1243,72 @@ class DatalakeStorageInterfaceTest
+         any[Context],
+       ),
+     ).thenReturn(flushResp)
++    when(tmpClient.renameWithResponse(eqTo(bucket), eqTo(path), any, any, any, any)).thenThrow(exception)
++  }
++
++  "writeBlobToFile" should "return NonOverwriteFileExistsError when NoOverwriteExistingObject and destination exists (412 from rename)" in {
++    val bucket   = "test-bucket"
++    val path     = "test-path/index.lock"
++    val testData = TestIndexFile("owner-123", Some(100L))
+ 
+     // Rename fails with 412 (destination already exists — NoOverwrite condition not met)
+-    when(tmpClient.renameWithResponse(eqTo(bucket), eqTo(path), any, any, any, any)).thenThrow(
+-      new DataLakeStorageException("ConditionNotMet", mockHttpResponse(412), null),
++    setupAtomicWriteRenameThrows(bucket,
++                                 path,
++                                 new DataLakeStorageException("ConditionNotMet", mockHttpResponse(412), null),
++    )
++
++    val result = storageInterface.writeBlobToFile(bucket, path, NoOverwriteExistingObject(testData))
++
++    result.isLeft should be(true)
++    result.left.value should be(a[NonOverwriteFileExistsError])
++  }
++
++  "writeBlobToFile" should "return NonOverwriteFileExistsError when NoOverwriteExistingObject and destination exists (409 PathAlreadyExists from rename)" in {
++    val bucket   = "test-bucket"
++    val path     = "test-path/index.lock"
++    val testData = TestIndexFile("owner-123", Some(100L))
++
++    // ADLS Gen2 HNS surfaces the lost no-overwrite create race as 409 PathAlreadyExists on rename.
++    setupAtomicWriteRenameThrows(bucket,
++                                 path,
++                                 new DataLakeStorageException("PathAlreadyExists", mockHttpResponse(409), null),
+     )
+ 
+     val result = storageInterface.writeBlobToFile(bucket, path, NoOverwriteExistingObject(testData))
+ 
++    result.isLeft should be(true)
++    result.left.value should be(a[NonOverwriteFileExistsError])
++  }
++
++  "writeBlobToFile" should "return FileCreateError (not NonOverwriteFileExistsError) when ObjectWithETag and rename 412s — fencing must stay fatal" in {
++    val bucket   = "test-bucket"
++    val path     = "test-path/index.lock"
++    val testData = TestIndexFile("owner-123", Some(100L))
++
++    // 412 on an eTag-conditional write is a concurrent-write fence, NOT a lost create race.
++    setupAtomicWriteRenameThrows(bucket,
++                                 path,
++                                 new DataLakeStorageException("ConditionNotMet", mockHttpResponse(412), null),
++    )
++
++    val result = storageInterface.writeBlobToFile(bucket, path, ObjectWithETag(testData, "existing-etag"))
++
++    result.isLeft should be(true)
++    result.left.value should be(a[FileCreateError])
++  }
++
++  "writeBlobToFile" should "return FileCreateError (not NonOverwriteFileExistsError) when ObjectWithETag and rename 409s — 409 reclassification is NoOverwrite-only" in {
++    val bucket   = "test-bucket"
++    val path     = "test-path/index.lock"
++    val testData = TestIndexFile("owner-123", Some(100L))
++
++    setupAtomicWriteRenameThrows(bucket,
++                                 path,
++                                 new DataLakeStorageException("PathAlreadyExists", mockHttpResponse(409), null),
++    )
++
++    val result = storageInterface.writeBlobToFile(bucket, path, ObjectWithETag(testData, "existing-etag"))
++
+     result.isLeft should be(true)
+     result.left.value should be(a[FileCreateError])
+   }
+@@ -1573,6 +1633,63 @@ class DatalakeStorageInterfaceTest
+     verify(directoryClient).createIfNotExists()
+   }
+ 
++  "writeBlobToFile" should "return NonOverwriteFileExistsError when the retry rename after 404 directory recovery loses the no-overwrite create race" in {
++    // Cold-start race: parent dir is missing so the first rename 404s and triggers directory
++    // recovery; by the time this task retries the rename, another task has already won the
++    // no-overwrite create, so the retry 409s. The loser must surface the RECOVERABLE
++    // NonOverwriteFileExistsError (→ LostCreateRaceError → re-read & adopt) and NOT a fatal
++    // FileCreateError that would kill the task — the very cold-start death this fix targets.
++    val bucket   = "test-bucket"
++    val path     = "a/b/index.lock"
++    val tmpPath  = s"$path.tmp.${connectorTaskId.lockUuid}"
++    val testData = TestIndexFile("owner-123", Some(100L))
++
++    val fsClient        = mock[DataLakeFileSystemClient]
++    val tmpClient       = mock[DataLakeFileClient]
++    val directoryClient = mock[DataLakeDirectoryClient]
++    val pathInfo        = mock[PathInfo]
++
++    when(client.getFileSystemClient(bucket)).thenReturn(fsClient)
++    when(fsClient.createFile(tmpPath, true)).thenReturn(tmpClient)
++
++    doAnswer((_: InvocationOnMock) => ()).when(tmpClient).append(any[ByteArrayInputStream], anyLong, anyLong)
++    val flushResp = mock[Response[PathInfo]]
++    when(flushResp.getValue).thenReturn(pathInfo)
++    when(
++      tmpClient.flushWithResponse(
++        anyLong,
++        anyBoolean,
++        anyBoolean,
++        any[PathHttpHeaders],
++        isNull[DataLakeRequestConditions],
++        isNull[java.time.Duration],
++        any[Context],
++      ),
++    ).thenReturn(flushResp)
++
++    // First rename 404s (parent dir missing); the retry after directory recovery 409s (lost race).
++    val renameInvocationCount = new java.util.concurrent.atomic.AtomicInteger(0)
++    when(tmpClient.renameWithResponse(eqTo(bucket), eqTo(path), any, any, any, any)).thenAnswer {
++      _: InvocationOnMock =>
++        if (renameInvocationCount.getAndIncrement() == 0)
++          throw new DataLakeStorageException("RenameDestinationParentPathNotFound", mockHttpResponse(404), null)
++        else
++          throw new DataLakeStorageException("PathAlreadyExists", mockHttpResponse(409), null)
++    }
++
++    when(fsClient.getDirectoryClient(anyString())).thenReturn(directoryClient)
++    when(directoryClient.createIfNotExists()).thenReturn(pathInfo)
++
++    val result = storageInterface.writeBlobToFile(bucket, path, NoOverwriteExistingObject(testData))
++
++    result.isLeft should be(true)
++    result.left.value should be(a[NonOverwriteFileExistsError])
++
++    // rename was attempted twice: first 404 → directory recovery, then 409 → lost race
++    verify(tmpClient, times(2)).renameWithResponse(eqTo(bucket), eqTo(path), any, any, any, any)
++    verify(directoryClient).createIfNotExists()
++  }
++
+   // ── createDirectoryIfNotExists ────────────────────────────────────────────
+ 
+   "createDirectoryIfNotExists" should "return Right(()) when the directory is created successfully" in {
+diff --git a/kafka-connect-cloud-common/src/main/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2.scala b/kafka-connect-cloud-common/src/main/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2.scala
+index 8cb9dfba9..6b1f46351 100644
+--- a/kafka-connect-cloud-common/src/main/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2.scala
++++ b/kafka-connect-cloud-common/src/main/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2.scala
+@@ -34,6 +34,7 @@ import io.lenses.streamreactor.connect.cloud.common.storage.EmptyFileError
+ import io.lenses.streamreactor.connect.cloud.common.storage.FileLoadError
+ import io.lenses.streamreactor.connect.cloud.common.storage.FileMetadata
+ import io.lenses.streamreactor.connect.cloud.common.storage.FileNotFoundError
++import io.lenses.streamreactor.connect.cloud.common.storage.NonOverwriteFileExistsError
+ import io.lenses.streamreactor.connect.cloud.common.storage.StorageInterface
+ import io.lenses.streamreactor.connect.cloud.common.storage.UploadError
+ 
+@@ -300,68 +301,121 @@ class IndexManagerV2(
+     for {
+       bucketAndPrefix <- bucketAndPrefixFn(topicPartition)
+       _               <- migrateOldPathIfExists(bucketAndPrefix, maybeOldPath, path, topicPartition)
+-      offset <- tryOpen(bucketAndPrefix.bucket, path) match {
++      offset <- decideOpen(
++        topicPartition,
++        path,
++        bucketAndPrefix,
++        tryOpen(bucketAndPrefix.bucket, path),
++        MaxOpenCreateRaceAttempts,
++      )
++    } yield offset
+ 
+-        case Left(FileNotFoundError(_, _)) =>
+-          createNewIndexFileNoOverwrite(topicPartition, path, bucketAndPrefix)
+-            .map(updateDataReturnOffset(topicPartition, _))
++  }
+ 
+-        case Left(EmptyFileError(_, eTag)) =>
+-          // The master lock exists as a 0-byte poison blob — residue of Bug B's non-atomic write.
+-          // A length-0 blob cannot carry committedOffset or PendingState by construction
+-          // (the serialiser produces at minimum ~40 bytes for any non-null IndexFile).
+-          // Take ownership via setIfMatch(eTag) instead of setIfNoneMatch("*") — the file
+-          // exists, so a NoOverwrite write would always 412.
+-          // NOTE: pendingOperationsProcessors is NOT invoked here — the 0-byte file proves
+-          // no PendingState was ever durably recorded; the recovery write sets pendingState=None.
+-          for {
+-            tpo <- oldIndexManager.seekOffsetsForTopicPartition(topicPartition)
+-            idx  = IndexFile(lockOwner, tpo.map(_.offset), Option.empty)
+-            blobWrite <- storageInterface.writeBlobToFile(bucketAndPrefix.bucket, path, ObjectWithETag(idx, eTag))
+-              .leftMap { err: UploadError =>
+-                new FatalCloudSinkError(err.message(), err.toExceptionOption, topicPartition)
+-              }
+-          } yield updateDataReturnOffset(topicPartition, blobWrite)
++  /**
++   * Decides how to open a master lock given the result of reading it, and is re-entrant so a
++   * lost NoOverwrite create race can re-read the now-existing lock and route it through the
++   * SAME arms (crucially, a re-read lock carrying a PendingState flows through
++   * `processPendingOperations`, not a naive eTag adoption — that is what makes recovery
++   * correct, see the architecture note on the reverted create-race adoption fix).
++   *
++   * @param tryOpenResult The result of `tryOpen` for this lock path.
++   * @param attemptsLeft  Bounded re-read budget for the lost-create-race cycle.
++   */
++  private def decideOpen(
++    topicPartition:  TopicPartition,
++    path:            String,
++    bucketAndPrefix: CloudLocation,
++    tryOpenResult:   Either[FileLoadError, ObjectWithETag[IndexFile]],
++    attemptsLeft:    Int,
++  ): Either[SinkError, Option[Offset]] =
++    tryOpenResult match {
+ 
+-        case Left(fileLoadError: FileLoadError) =>
+-          new FatalCloudSinkError(fileLoadError.message(), fileLoadError.toExceptionOption, topicPartition).asLeft[
+-            Option[Offset],
+-          ]
++      case Left(FileNotFoundError(_, _)) =>
++        createNewIndexFileNoOverwrite(topicPartition, path, bucketAndPrefix) match {
++          case Right(written) =>
++            updateDataReturnOffset(topicPartition, written).asRight[SinkError]
+ 
+-        case Right(objectWithetag @ ObjectWithETag(
+-              IndexFile(_, committedOffset, Some(PendingState(pendingOffset, pendingOperations))),
+-              _,
+-            )) =>
+-          topicPartitionToETags.put(topicPartition, objectWithetag.eTag)
+-          pendingOperationsProcessors.processPendingOperations(
+-            topicPartition,
+-            committedOffset,
+-            PendingState(pendingOffset, pendingOperations),
+-            update,
+-          ).map { resolvedOffset =>
+-            // processPendingOperations calls update() which already maintains topicPartitionToETags
+-            // with the correct eTag. We must NOT overwrite it with the stale original eTag.
+-            // Only ensure seekedOffsets is updated for cases where update() was not called
+-            // (e.g. when the recovery path cleared a stale PendingState on the last operation).
+-            resolvedOffset.foreach(o => seekedOffsets.put(topicPartition, o))
+-            resolvedOffset
+-          }.leftMap { err =>
+-            // On failure, the eTag we seeded above may now be stale: an intermediate
+-            // phase of processPendingOperations may have advanced the index file in
+-            // storage before the final fnIndexUpdate failed. Drop the cached eTag so
+-            // the next call re-reads the file and we never issue a conditional write
+-            // with the wrong If-Match. Mirrors the gcRemove-on-failure pattern used
+-            // when loading granular locks.
+-            val _ = topicPartitionToETags.remove(topicPartition)
+-            err
+-          }
++          case Left(_: LostCreateRaceError) if attemptsLeft > 1 =>
++            // Another task won the create. The lock now exists — re-read and re-decide through
++            // the same arms so the winner's offset (and any PendingState) is adopted/recovered.
++            logger.info(
++              s"[${connectorTaskId.show}] Lost master-lock create race for $topicPartition at $path; " +
++                s"re-reading existing lock (attempts left: ${attemptsLeft - 1})",
++            )
++            decideOpen(
++              topicPartition,
++              path,
++              bucketAndPrefix,
++              tryOpen(bucketAndPrefix.bucket, path),
++              attemptsLeft - 1,
++            )
+ 
+-        case Right(objectWithetag @ ObjectWithETag(IndexFile(_, _, _), _)) =>
+-          updateDataReturnOffset(topicPartition, objectWithetag).asRight[SinkError]
+-      }
+-    } yield offset
++          case Left(_: LostCreateRaceError) =>
++            // Bounded retries exhausted: the lock oscillated absent/present. Fail fatally so
++            // Connect restarts the task and re-seeks from the durable lock — no worse than the
++            // pre-fix behaviour, but only after exhausting the bounded re-reads.
++            FatalCloudSinkError(
++              s"Exhausted master-lock create-race retries for $topicPartition at $path",
++              topicPartition,
++            ).asLeft[Option[Offset]]
+ 
+-  }
++          case Left(other) => other.asLeft[Option[Offset]]
++        }
++
++      case Left(EmptyFileError(_, eTag)) =>
++        // The master lock exists as a 0-byte poison blob — residue of Bug B's non-atomic write.
++        // A length-0 blob cannot carry committedOffset or PendingState by construction
++        // (the serialiser produces at minimum ~40 bytes for any non-null IndexFile).
++        // Take ownership via setIfMatch(eTag) instead of setIfNoneMatch("*") — the file
++        // exists, so a NoOverwrite write would always 412.
++        // NOTE: pendingOperationsProcessors is NOT invoked here — the 0-byte file proves
++        // no PendingState was ever durably recorded; the recovery write sets pendingState=None.
++        for {
++          tpo <- oldIndexManager.seekOffsetsForTopicPartition(topicPartition)
++          idx  = IndexFile(lockOwner, tpo.map(_.offset), Option.empty)
++          blobWrite <- storageInterface.writeBlobToFile(bucketAndPrefix.bucket, path, ObjectWithETag(idx, eTag))
++            .leftMap { err: UploadError =>
++              new FatalCloudSinkError(err.message(), err.toExceptionOption, topicPartition)
++            }
++        } yield updateDataReturnOffset(topicPartition, blobWrite)
++
++      case Left(fileLoadError: FileLoadError) =>
++        new FatalCloudSinkError(fileLoadError.message(), fileLoadError.toExceptionOption, topicPartition).asLeft[
++          Option[Offset],
++        ]
++
++      case Right(objectWithetag @ ObjectWithETag(
++            IndexFile(_, committedOffset, Some(PendingState(pendingOffset, pendingOperations))),
++            _,
++          )) =>
++        topicPartitionToETags.put(topicPartition, objectWithetag.eTag)
++        pendingOperationsProcessors.processPendingOperations(
++          topicPartition,
++          committedOffset,
++          PendingState(pendingOffset, pendingOperations),
++          update,
++        ).map { resolvedOffset =>
++          // processPendingOperations calls update() which already maintains topicPartitionToETags
++          // with the correct eTag. We must NOT overwrite it with the stale original eTag.
++          // Only ensure seekedOffsets is updated for cases where update() was not called
++          // (e.g. when the recovery path cleared a stale PendingState on the last operation).
++          resolvedOffset.foreach(o => seekedOffsets.put(topicPartition, o))
++          resolvedOffset
++        }.leftMap { err =>
++          // On failure, the eTag we seeded above may now be stale: an intermediate
++          // phase of processPendingOperations may have advanced the index file in
++          // storage before the final fnIndexUpdate failed. Drop the cached eTag so
++          // the next call re-reads the file and we never issue a conditional write
++          // with the wrong If-Match. Mirrors the gcRemove-on-failure pattern used
++          // when loading granular locks.
++          val _ = topicPartitionToETags.remove(topicPartition)
++          err
++        }
++
++      case Right(objectWithetag @ ObjectWithETag(IndexFile(_, _, _), _)) =>
++        updateDataReturnOffset(topicPartition, objectWithetag).asRight[SinkError]
++    }
+ 
+   private def migrateOldPathIfExists(
+     bucketAndPrefix: CloudLocation,
+@@ -465,8 +519,13 @@ class IndexManagerV2(
+       )
+ 
+       blobWrite <- storageInterface.writeBlobToFile(bucketAndPrefix.bucket, path, NoOverwriteExistingObject(idx))
+-        .leftMap { err: UploadError =>
+-          new FatalCloudSinkError(err.message(), err.toExceptionOption, topicPartition)
++        .leftMap {
++          // Lost the create race (another task created the lock first). Surface a recoverable
++          // signal so `decideOpen` re-reads and adopts the winner's lock instead of failing.
++          case _: NonOverwriteFileExistsError => LostCreateRaceError(topicPartition): SinkError
++          // Any other write failure (permissions, network, disk) is genuinely fatal.
++          case err: UploadError =>
++            new FatalCloudSinkError(err.message(), err.toExceptionOption, topicPartition): SinkError
+         }
+     } yield {
+       blobWrite
+@@ -1426,6 +1485,27 @@ object IndexManagerV2 {
+ 
+   val MaxGcRetries: Int = 3
+ 
++  /**
++   * Bounded re-read attempts when a master-lock NoOverwrite create loses the race. One re-read
++   * normally suffices — cloud storage is read-after-write consistent for the destination — so
++   * the cap only guards against a pathological absent/present flicker before surfacing a fatal
++   * error.
++   */
++  val MaxOpenCreateRaceAttempts: Int = 3
++
++  /**
++   * Internal, recoverable signal: a master-lock NoOverwrite create lost the race because the
++   * lock already exists. It NEVER escapes `IndexManagerV2.open` — `decideOpen` either resolves
++   * it with a bounded re-read (adopting the winner's lock, including any PendingState recovery)
++   * or converts it to a `FatalCloudSinkError` on exhaustion.
++   */
++  private[seek] case class LostCreateRaceError(topicPartition: TopicPartition) extends SinkError {
++    override def exception():       Option[Throwable]   = Option.empty
++    override def message():         String              = s"lost master-lock create race for $topicPartition"
++    override def rollBack():        Boolean             = false
++    override def topicPartitions(): Set[TopicPartition] = Set(topicPartition)
++  }
++
+   private[seek] case class SweepMarker(lastRunEpochMillis: Long, nextRunEpochMillis: Long)
+ 
+   private[seek] object SweepMarker {
+diff --git a/kafka-connect-cloud-common/src/main/scala/io/lenses/streamreactor/connect/cloud/common/storage/UploadError.scala b/kafka-connect-cloud-common/src/main/scala/io/lenses/streamreactor/connect/cloud/common/storage/UploadError.scala
+index 912ea6dfb..57c13f5a6 100644
+--- a/kafka-connect-cloud-common/src/main/scala/io/lenses/streamreactor/connect/cloud/common/storage/UploadError.scala
++++ b/kafka-connect-cloud-common/src/main/scala/io/lenses/streamreactor/connect/cloud/common/storage/UploadError.scala
+@@ -56,6 +56,23 @@ case class FileCreateError(exception: Throwable, data: String) extends UploadErr
+   override def toExceptionOption: Option[Throwable] = exception.some
+ }
+ 
++/**
++ * Returned ONLY when a `NoOverwriteExistingObject` create lost a concurrent create race —
++ * i.e. the destination object already exists (Azure 409 PathAlreadyExists / 412, S3
++ * PreconditionFailed, GCS 412 generation mismatch).
++ *
++ * Unlike `FileCreateError` this is a *recoverable* signal: the caller (IndexManagerV2.open)
++ * re-reads the now-existing lock and adopts/recovers it (routing any PendingState through the
++ * crash-recovery path) rather than failing the task. It is NEVER emitted for an
++ * `ObjectWithETag` write — an eTag mismatch there is the zombie-fencing mechanism and must
++ * remain a fatal `FileCreateError`.
++ */
++case class NonOverwriteFileExistsError(exception: Throwable, fileName: String) extends UploadError {
++  override def message() = s"file already exists, lost no-overwrite create race ($fileName) ${exception.getMessage}"
++
++  override def toExceptionOption: Option[Throwable] = exception.some
++}
++
+ case class FileDeleteError(exception: Throwable, fileName: String) extends UploadError {
+   override def message() = s"error deleting file ($fileName) ${exception.getMessage}"
+ 
+diff --git a/kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2Test.scala b/kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2Test.scala
+index fb429257f..1ad87c857 100644
+--- a/kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2Test.scala
++++ b/kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2Test.scala
+@@ -31,7 +31,9 @@ import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
+ import io.lenses.streamreactor.connect.cloud.common.sink.seek.deprecated.IndexManagerV1
+ import io.lenses.streamreactor.connect.cloud.common.model.UploadableFile
+ import io.lenses.streamreactor.connect.cloud.common.storage.EmptyFileError
++import io.lenses.streamreactor.connect.cloud.common.storage.FileLoadError
+ import io.lenses.streamreactor.connect.cloud.common.storage.FileNotFoundError
++import io.lenses.streamreactor.connect.cloud.common.storage.NonOverwriteFileExistsError
+ import io.lenses.streamreactor.connect.cloud.common.storage.GeneralFileLoadError
+ import io.lenses.streamreactor.connect.cloud.common.storage.ListOfMetadataResponse
+ import io.lenses.streamreactor.connect.cloud.common.storage.NonExistingFileError
+@@ -127,6 +129,130 @@ class IndexManagerV2Test
+     result shouldBe Right(Map(topicPartition -> None))
+   }
+ 
++  test("open should adopt the existing lock when the master-lock create loses the race (clean lock)") {
++    val topicPartition  = Topic("topic1").withPartition(0)
++    val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
++    val path            = ".indexes/.locks/topic1/0.lock"
++
++    when(oldIndexManager.seekOffsetsForTopicPartition(topicPartition)).thenReturn(Option.empty.asRight)
++    when(bucketAndPrefixFn(topicPartition)).thenReturn(Right(bucketAndPrefix))
++    when(storageInterface.pathExists(anyString(), anyString())).thenReturn(Right(false))
++    when(storageInterface.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
++
++    // First read: lock absent → create. Second read (after losing the race): the winner's lock.
++    val absent: Either[FileLoadError, ObjectWithETag[IndexFile]] =
++      Left(FileNotFoundError(new Exception("Not found"), path))
++    val winnerLock: Either[FileLoadError, ObjectWithETag[IndexFile]] =
++      Right(ObjectWithETag(IndexFile("winner", Some(Offset(100)), None), "winner-etag"))
++    when(storageInterface.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
++      .thenReturn(absent, winnerLock)
++
++    // The NoOverwrite create loses the race.
++    when(
++      storageInterface.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
++        ArgumentMatchers.eq(indexFileEncoder),
++      ),
++    ).thenReturn(Left(NonOverwriteFileExistsError(new Exception("exists"), path)))
++
++    val result = indexManagerV2.open(Set(topicPartition))
++
++    result shouldBe Right(Map(topicPartition -> Some(Offset(100))))
++    // The adopted eTag drives subsequent conditional commits.
++    indexManagerV2.getSeekedOffsetForTopicPartition(topicPartition) shouldBe Some(Offset(100))
++    verify(storageInterface, times(2))
++      .getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder))
++    verify(storageInterface, times(1))
++      .writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
++        ArgumentMatchers.eq(indexFileEncoder),
++      )
++  }
++
++  test("open should resolve PendingState via processPendingOperations when the create loses the race") {
++    val topicPartition  = Topic("topic1").withPartition(0)
++    val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
++    val path            = ".indexes/.locks/topic1/0.lock"
++
++    val pendingOps = NonEmptyList.of[FileOperation](
++      CopyOperation("bucket", ".temp-upload/uuid/file.avro", "topic1/0/000000000060.avro", "copy-etag"),
++      DeleteOperation("bucket", ".temp-upload/uuid/file.avro", "copy-etag"),
++    )
++    val pendingState = PendingState(pendingOffset = Offset(60), pendingOperations = pendingOps)
++
++    when(oldIndexManager.seekOffsetsForTopicPartition(topicPartition)).thenReturn(Option.empty.asRight)
++    when(bucketAndPrefixFn(topicPartition)).thenReturn(Right(bucketAndPrefix))
++    when(storageInterface.pathExists(anyString(), anyString())).thenReturn(Right(false))
++    when(storageInterface.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
++
++    // First read: absent → create. Re-read after losing the race: winner's lock carrying a PendingState.
++    val absent: Either[FileLoadError, ObjectWithETag[IndexFile]] =
++      Left(FileNotFoundError(new Exception("Not found"), path))
++    val winnerPendingLock: Either[FileLoadError, ObjectWithETag[IndexFile]] =
++      Right(ObjectWithETag(IndexFile("winner", Some(Offset(50)), Some(pendingState)), "winner-etag"))
++    when(storageInterface.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
++      .thenReturn(absent, winnerPendingLock)
++
++    when(
++      storageInterface.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
++        ArgumentMatchers.eq(indexFileEncoder),
++      ),
++    ).thenReturn(Left(NonOverwriteFileExistsError(new Exception("exists"), path)))
++
++    // The re-read MUST flow through processPendingOperations (not a naive eTag adoption).
++    type FnIndexUpdate = (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]]
++    when(
++      pendingOperationsProcessors.processPendingOperations(
++        any[TopicPartition],
++        any[Option[Offset]],
++        any[PendingState],
++        any[FnIndexUpdate],
++        any[Boolean],
++        any[Option[String]],
++        any[Option[java.io.File]],
++      ),
++    ).thenReturn(Right(Some(Offset(60))))
++
++    val result = indexManagerV2.open(Set(topicPartition))
++
++    result shouldBe Right(Map(topicPartition -> Some(Offset(60))))
++    verify(pendingOperationsProcessors).processPendingOperations(
++      eqTo(topicPartition),
++      eqTo(Some(Offset(50))),
++      eqTo(pendingState),
++      any[FnIndexUpdate],
++      any[Boolean],
++      any[Option[String]],
++      any[Option[java.io.File]],
++    )
++  }
++
++  test("open should fail fatally after exhausting bounded create-race retries") {
++    val topicPartition  = Topic("topic1").withPartition(0)
++    val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
++    val path            = ".indexes/.locks/topic1/0.lock"
++
++    when(oldIndexManager.seekOffsetsForTopicPartition(topicPartition)).thenReturn(Option.empty.asRight)
++    when(bucketAndPrefixFn(topicPartition)).thenReturn(Right(bucketAndPrefix))
++    when(storageInterface.pathExists(anyString(), anyString())).thenReturn(Right(false))
++    when(storageInterface.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
++
++    // The lock oscillates absent/present: every read says absent, every create loses the race.
++    when(storageInterface.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
++      .thenReturn(Left(FileNotFoundError(new Exception("Not found"), path)))
++    when(
++      storageInterface.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
++        ArgumentMatchers.eq(indexFileEncoder),
++      ),
++    ).thenReturn(Left(NonOverwriteFileExistsError(new Exception("exists"), path)))
++
++    val result = indexManagerV2.open(Set(topicPartition))
++
++    result.isLeft shouldBe true
++    result.left.value shouldBe a[FatalCloudSinkError]
++    // Exactly MaxOpenCreateRaceAttempts (3) reads before giving up.
++    verify(storageInterface, times(3))
++      .getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder))
++  }
++
+   private def runOpen(topicPartition: TopicPartition, bucketAndPrefix: CloudLocation, path: String) = {
+     when(oldIndexManager.seekOffsetsForTopicPartition(topicPartition)).thenReturn(Option.empty.asRight)
+     when(bucketAndPrefixFn(topicPartition)).thenReturn(Right(bucketAndPrefix))
+@@ -2437,11 +2563,11 @@ class IndexManagerV2Test
+     val si              = mock[StorageInterface[_]]
+     setupSweepMocks(si, tp, bucketAndPrefix)
+ 
+-    val pk        = "name=report.lock.tmp.archive"
+-    val oldTime   = Instant.now().minusSeconds(7200)
+-    val realLock  = s"$indexesDirectoryName/${connectorTaskId.name}/.locks/${tp.topic}/${tp.partition}/$pk.lock"
+-    val realMeta  = TestFileMetadata(realLock, oldTime)
+-    val listResp  = ListOfMetadataResponse("bucket", Some("prefix"), Seq(realMeta), realMeta)
++    val pk       = "name=report.lock.tmp.archive"
++    val oldTime  = Instant.now().minusSeconds(7200)
++    val realLock = s"$indexesDirectoryName/${connectorTaskId.name}/.locks/${tp.topic}/${tp.partition}/$pk.lock"
++    val realMeta = TestFileMetadata(realLock, oldTime)
++    val listResp = ListOfMetadataResponse("bucket", Some("prefix"), Seq(realMeta), realMeta)
+ 
+     org.mockito.Mockito.doReturn(Right(Some(listResp))).when(si).listFileMetaRecursive(anyString(), any[Option[String]])
+     // Real lock content with committedOffset >= masterOffset (100), so the normal
+diff --git a/kafka-connect-gcp-storage/src/main/scala/io/lenses/streamreactor/connect/gcp/storage/storage/GCPStorageStorageInterface.scala b/kafka-connect-gcp-storage/src/main/scala/io/lenses/streamreactor/connect/gcp/storage/storage/GCPStorageStorageInterface.scala
+index e1d75c7ff..3b345f208 100644
+--- a/kafka-connect-gcp-storage/src/main/scala/io/lenses/streamreactor/connect/gcp/storage/storage/GCPStorageStorageInterface.scala
++++ b/kafka-connect-gcp-storage/src/main/scala/io/lenses/streamreactor/connect/gcp/storage/storage/GCPStorageStorageInterface.scala
+@@ -45,6 +45,7 @@ import io.lenses.streamreactor.connect.cloud.common.storage.FileLoadError
+ import io.lenses.streamreactor.connect.cloud.common.storage.GeneralFileLoadError
+ import io.lenses.streamreactor.connect.cloud.common.storage.FileMoveError
+ import io.lenses.streamreactor.connect.cloud.common.storage.FileNotFoundError
++import io.lenses.streamreactor.connect.cloud.common.storage.NonOverwriteFileExistsError
+ import io.lenses.streamreactor.connect.cloud.common.storage.ListOfKeysResponse
+ import io.lenses.streamreactor.connect.cloud.common.storage.ListOfMetadataResponse
+ import io.lenses.streamreactor.connect.cloud.common.storage.PathError
+@@ -217,16 +218,29 @@ class GCPStorageStorageInterface(
+         path,
+       )
+       new ObjectWithETag[O](objectProtection.wrappedObject, String.valueOf(created.getGeneration))
+-    }.toEither.leftMap { ex: Throwable =>
+-      logger.error(
+-        s"[{}] Failed upload from data string ({}) to Storage {}:{}",
+-        connectorTaskId.show,
+-        objectProtection.wrappedObject,
+-        bucket,
+-        path,
+-        ex,
+-      )
+-      FileCreateError(ex, content)
++    }.toEither.leftMap {
++      // NoOverwriteExistingObject lost the create race: the object already exists, so the
++      // generationMatch(0L) precondition fails with 412. Recoverable — the caller re-reads and
++      // adopts the lock. Scoped to NoOverwrite: an ObjectWithETag generationMatch mismatch also
++      // surfaces as 412 but is the zombie-fencing signal and MUST stay fatal.
++      case se: StorageException if objectProtection.isInstanceOf[NoOverwriteExistingObject[_]] && se.getCode == 412 =>
++        logger.info(
++          s"[{}] Lost no-overwrite create race uploading to Storage {}:{}",
++          connectorTaskId.show,
++          bucket,
++          path,
++        )
++        NonOverwriteFileExistsError(se, path)
++      case ex: Throwable =>
++        logger.error(
++          s"[{}] Failed upload from data string ({}) to Storage {}:{}",
++          connectorTaskId.show,
++          objectProtection.wrappedObject,
++          bucket,
++          path,
++          ex,
++        )
++        FileCreateError(ex, content)
+     }
+   }
+ 
+diff --git a/kafka-connect-gcp-storage/src/test/scala/io/lenses/streamreactor/connect/gcp/storage/GCPStorageStorageInterfaceTest.scala b/kafka-connect-gcp-storage/src/test/scala/io/lenses/streamreactor/connect/gcp/storage/GCPStorageStorageInterfaceTest.scala
+index d564fd41b..d863361c6 100644
+--- a/kafka-connect-gcp-storage/src/test/scala/io/lenses/streamreactor/connect/gcp/storage/GCPStorageStorageInterfaceTest.scala
++++ b/kafka-connect-gcp-storage/src/test/scala/io/lenses/streamreactor/connect/gcp/storage/GCPStorageStorageInterfaceTest.scala
+@@ -38,10 +38,14 @@ import com.google.cloud.storage.BlobId
+ import com.google.cloud.storage.BlobInfo
+ import com.google.cloud.storage.Storage
+ import com.google.cloud.storage.Storage.BlobListOption
++import com.google.cloud.storage.Storage.BlobTargetOption
++import com.google.cloud.storage.StorageException
+ import io.lenses.streamreactor.connect.cloud.common.config.ConnectorTaskId
+ import io.lenses.streamreactor.connect.cloud.common.config.ObjectMetadata
+ import io.lenses.streamreactor.connect.cloud.common.model.UploadableFile
+ import io.lenses.streamreactor.connect.cloud.common.model.UploadableString
++import io.lenses.streamreactor.connect.cloud.common.sink.seek.NoOverwriteExistingObject
++import io.lenses.streamreactor.connect.cloud.common.sink.seek.ObjectWithETag
+ import io.lenses.streamreactor.connect.cloud.common.storage._
+ import io.lenses.streamreactor.connect.gcp.storage.storage.GCPStorageFileMetadata
+ import io.lenses.streamreactor.connect.gcp.storage.storage.GCPStorageStorageInterface
+@@ -742,4 +746,43 @@ class GCPStorageStorageInterfaceTest
+     source
+   }
+ 
++  // ── writeBlobToFile — lost no-overwrite create race ──────────────────────
++
++  private case class TestIndexFile(owner: String, offset: Option[Long])
++  private implicit val testIndexFileEncoder: io.circe.Encoder[TestIndexFile] =
++    io.circe.generic.semiauto.deriveEncoder[TestIndexFile]
++
++  "writeBlobToFile" should "return NonOverwriteFileExistsError when NoOverwriteExistingObject loses the race (412)" in {
++    when(client.create(any[BlobInfo], any[Array[Byte]], any[BlobTargetOption]))
++      .thenThrow(new StorageException(412, "Precondition Failed"))
++
++    val result =
++      storageInterface.writeBlobToFile("bucket", "path", NoOverwriteExistingObject(TestIndexFile("o", Some(1L))))
++
++    result.isLeft should be(true)
++    result.left.value shouldBe a[NonOverwriteFileExistsError]
++  }
++
++  it should "return FileCreateError (not NonOverwriteFileExistsError) when ObjectWithETag and 412 — fencing must stay fatal" in {
++    when(client.create(any[BlobInfo], any[Array[Byte]], any[BlobTargetOption]))
++      .thenThrow(new StorageException(412, "Precondition Failed"))
++
++    val result =
++      storageInterface.writeBlobToFile("bucket", "path", ObjectWithETag(TestIndexFile("o", Some(1L)), "123"))
++
++    result.isLeft should be(true)
++    result.left.value shouldBe a[FileCreateError]
++  }
++
++  it should "return FileCreateError when NoOverwriteExistingObject fails with a non-412 error" in {
++    when(client.create(any[BlobInfo], any[Array[Byte]], any[BlobTargetOption]))
++      .thenThrow(new StorageException(500, "Internal Error"))
++
++    val result =
++      storageInterface.writeBlobToFile("bucket", "path", NoOverwriteExistingObject(TestIndexFile("o", Some(1L))))
++
++    result.isLeft should be(true)
++    result.left.value shouldBe a[FileCreateError]
++  }
++
+ }

@@ -318,6 +318,16 @@ trait CloudSinkMetricsMBean {
    */
   def getPendingOperationRetriesTotal: Long
 
+  /**
+   * Cumulative in-process retry attempts for transient failures on the commit-chain
+   * Copy (`mvFile`) and Delete (`deleteFile`) steps inside `RetryingStorageInterface`.
+   * Each increment corresponds to one retry attempt (not the initial attempt).
+   *
+   * Kept distinct from [[getPendingOperationRetriesTotal]] (upload-only) so that
+   * Copy/Delete retries can be tracked separately on dashboards and alerts.
+   */
+  def getCommitRetriesTotal: Long
+
   /** Cumulative sink errors classified as Fatal (task fails immediately). */
   def getSinkErrorsFatalTotal: Long
 
@@ -446,6 +456,7 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   // --- D. Retries & error classification ---
 
   private val pendingOperationRetriesTotal = new LongAdder()
+  private val commitRetriesTotal           = new LongAdder()
   private val sinkErrorsFatalTotal         = new LongAdder()
   private val sinkErrorsRetriableTotal     = new LongAdder()
   private val sinkErrorsNonFatalTotal      = new LongAdder()
@@ -539,6 +550,7 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
 
   // D. Retries & error classification
   override def getPendingOperationRetriesTotal: Long = pendingOperationRetriesTotal.sum()
+  override def getCommitRetriesTotal:           Long = commitRetriesTotal.sum()
   override def getSinkErrorsFatalTotal:         Long = sinkErrorsFatalTotal.sum()
   override def getSinkErrorsRetriableTotal:     Long = sinkErrorsRetriableTotal.sum()
   override def getSinkErrorsNonFatalTotal:      Long = sinkErrorsNonFatalTotal.sum()
@@ -639,6 +651,7 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
 
   // D. Retries & error classification mutators
   def incrementPendingOperationRetriesTotal(): Unit = pendingOperationRetriesTotal.increment()
+  def incrementCommitRetriesTotal():           Unit = commitRetriesTotal.increment()
   def incrementSinkErrorsFatalTotal():         Unit = sinkErrorsFatalTotal.increment()
   def incrementSinkErrorsRetriableTotal():     Unit = sinkErrorsRetriableTotal.increment()
   def incrementSinkErrorsNonFatalTotal():      Unit = sinkErrorsNonFatalTotal.increment()
