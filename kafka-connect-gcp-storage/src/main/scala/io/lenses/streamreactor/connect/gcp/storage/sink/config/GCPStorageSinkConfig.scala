@@ -25,6 +25,7 @@ import io.lenses.streamreactor.connect.cloud.common.formats.writer.schema.Schema
 import io.lenses.streamreactor.connect.cloud.common.model.CompressionCodec
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocationValidator
 import io.lenses.streamreactor.connect.cloud.common.sink.config.CloudSinkBucketOptions
+import io.lenses.streamreactor.connect.cloud.common.sink.config.CommitRetryConfig
 import io.lenses.streamreactor.connect.cloud.common.sink.config.IndexOptions
 import io.lenses.streamreactor.connect.gcp.common.auth.GCPConnectionConfig
 import io.lenses.streamreactor.connect.gcp.storage.config.GCPConfigSettings.LOG_METRICS_CONFIG
@@ -62,6 +63,7 @@ object GCPStorageSinkConfig extends PropsToConfigConverter[GCPStorageSinkConfig]
       gcpConfigDefBuilder.getCompressionCodec(),
       errorPolicy                 = gcpConfigDefBuilder.getErrorPolicyOrDefault,
       connectorRetryConfig        = gcpConfigDefBuilder.getRetryConfig,
+      commitRetryConfig           = gcpConfigDefBuilder.getCommitRetryConfig,
       logMetrics                  = logMetrics,
       schemaChangeDetector        = schemaChangeDetector,
       skipNullValues              = gcpConfigDefBuilder.skipNullValues(),
@@ -77,6 +79,7 @@ case class GCPStorageSinkConfig(
   indexOptions:                Option[IndexOptions],
   compressionCodec:            CompressionCodec,
   connectorRetryConfig:        RetryConfig,
+  commitRetryConfig:           CommitRetryConfig           = CommitRetryConfig.Default,
   errorPolicy:                 ErrorPolicy,
   logMetrics:                  Boolean,
   schemaChangeDetector:        SchemaChangeDetector,
