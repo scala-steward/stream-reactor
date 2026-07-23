@@ -264,6 +264,24 @@ class HttpSinkConfigTest extends AnyFunSuiteLike with Matchers with EitherValues
     thrown.getMessage should include(HttpSinkConfigDef.MaxQueueSizeProp)
   }
 
+  test("fails when batch count exceeds max queue size") {
+    val result = HttpSinkConfig.from(
+      Map(
+        HttpSinkConfigDef.HttpMethodProp         -> "put",
+        HttpSinkConfigDef.HttpEndpointProp       -> "http://myaddress.example.com",
+        HttpSinkConfigDef.HttpRequestContentProp -> "<note>\n<to>Dave</to>\n<from>Jason</from>\n<body>Hooray for Kafka Connect!</body>\n</note>",
+        HttpSinkConfigDef.BatchCountProp         -> "10",
+        HttpSinkConfigDef.MaxQueueSizeProp       -> "5",
+        ERROR_REPORTING_ENABLED_PROP             -> "false",
+        SUCCESS_REPORTING_ENABLED_PROP           -> "false",
+      ),
+    )
+
+    result.left.value shouldBe a[IllegalArgumentException]
+    result.left.value.getMessage should include(HttpSinkConfigDef.BatchCountProp)
+    result.left.value.getMessage should include(HttpSinkConfigDef.MaxQueueSizeProp)
+  }
+
   test("NullPayloadHandler should throw ConfigException for an invalid handler name") {
     val result = HttpSinkConfig.from(
       Map(

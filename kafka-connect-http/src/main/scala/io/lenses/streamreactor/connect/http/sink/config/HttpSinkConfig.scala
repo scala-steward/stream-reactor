@@ -221,7 +221,7 @@ object HttpSinkConfig {
         ),
       )
 
-      maxQueueSize = connectConfig.getInt(HttpSinkConfigDef.MaxQueueSizeProp)
+      maxQueueSize <- validateMaxQueueSize(batch, connectConfig.getInt(HttpSinkConfigDef.MaxQueueSizeProp))
       maxQueueOfferTimeout = FiniteDuration(
         connectConfig.getLong(HttpSinkConfigDef.MaxQueueOfferTimeoutProp),
         scala.concurrent.duration.MILLISECONDS,
@@ -246,6 +246,24 @@ object HttpSinkConfig {
       maxQueueOfferTimeout,
     )
   }
+
+  /**
+   * A record's backpressure permit is held for its whole lifetime in the writer, including while it
+   * sits in the batch accumulator. If a count-based batch trigger required more records than the
+   * queue can admit, the accumulator could never reach the trigger while producers are blocked on
+   * permits, so the batch record count must not exceed `maxQueueSize`.
+   */
+  private def validateMaxQueueSize(batch: BatchConfig, maxQueueSize: Int): Either[Throwable, Int] =
+    batch.batchCount match {
+      case Some(batchCount) if batchCount > maxQueueSize.toLong =>
+        Left(
+          new IllegalArgumentException(
+            s"'${HttpSinkConfigDef.BatchCountProp}' ($batchCount) must not be greater than " +
+              s"'${HttpSinkConfigDef.MaxQueueSizeProp}' ($maxQueueSize).",
+          ),
+        )
+      case _ => Right(maxQueueSize)
+    }
 
   def extractEndpoint(endpoint: String): Either[Throwable, String] = {
     def isValidUrl(url: String): Boolean = Try(new URL(url)).isSuccess

@@ -54,8 +54,12 @@ object HttpWriter {
    *
    * The semaphore has exactly `maxQueueSize` permits, matching the chunk cap in `enqueueGroups`.
    * Keeping those values paired guarantees that a chunk never requests more permits than can
-   * exist. Direct construction remains available for tests and benchmarks that inject or observe
-   * the internal queue and references.
+   * exist. A permit is held for the entire lifetime of a record inside the writer -- from enqueue
+   * until it is flushed (sent) or dropped -- so the permit count bounds queue + accumulator +
+   * in-flight records together. Because permits are held through the accumulator, the batch record
+   * count trigger must not exceed `maxQueueSize` (validated at config time), otherwise a batch
+   * could never fill while producers are blocked. Direct construction remains available for tests
+   * and benchmarks that inject or observe the internal queue and references.
    */
   def create(
     sinkName:             String,
@@ -105,9 +109,14 @@ object HttpWriter {
  * records.
  *
  * A single long-lived consumer fiber (started by `HttpWriterManager`) drives [[consume]], which
- * takes a chunk, releases its permits, feeds the records into a mutable [[BatchAccumulator]] and
- * flushes a batch whenever the configured [[BatchPolicy]] triggers (by count, size, or a
- * time-based interval deadline).
+ * takes a chunk, feeds the records into a mutable [[BatchAccumulator]] and flushes a batch whenever
+ * the configured [[BatchPolicy]] triggers (by count, size, or a time-based interval deadline). A
+ * record's permit is held for its whole lifetime in the writer -- it is released only when the
+ * record leaves the pipeline (flushed on a successful send, or dropped on a below-threshold
+ * failure), so the semaphore bounds queue + accumulator + in-flight records together rather than
+ * just the queue. Because a permit is held while a record sits in the accumulator, the batch record
+ * count trigger must not exceed `maxQueueSize` (enforced by config validation) or a batch could
+ * never fill while producers are blocked on permits.
  *
  * Production code should prefer [[HttpWriter.create]]. Direct construction is retained for tests
  * and benchmarks that need to inject or observe the writer's internal state.
@@ -141,6 +150,15 @@ class HttpWriter(
     offsetMapRef.get.flatMap { offsetMap =>
       enqueueGroups(filterDuplicates(newRecords.toSeq.toList, offsetMap))
     }
+
+  /**
+   * Clears the dedup high-water mark for the given partitions. Called when partitions are
+   * (re)assigned (Kafka rewinds the consumer to the last committed offset), so redelivered records
+   * are accepted again by [[filterDuplicates]] instead of being silently discarded as duplicates.
+   */
+  def resetAcceptedOffsets(partitions: Set[TopicPartition]): IO[Unit] =
+    if (partitions.isEmpty) IO.unit
+    else offsetMapRef.update(_ -- partitions)
 
   private def filterDuplicates(
     records:   List[RenderedRecord],
@@ -208,7 +226,11 @@ class HttpWriter(
   private def loop(acc: BatchAccumulator): IO[Unit] =
     nextChunk(acc).flatMap {
       case Some(chunk) =>
-        permits.releaseN(chunk.length.toLong) *> processChunk(acc, chunk) *> loop(acc)
+        // Permits are NOT released here: they follow the records into the accumulator and are only
+        // released once the records actually leave the pipeline (flushed on a successful send or
+        // dropped on a below-threshold failure). This keeps queue + accumulator + in-flight bounded
+        // by `maxQueueSize`.
+        processChunk(acc, chunk) *> loop(acc)
       case None =>
         flushIfNonEmpty(acc) *> loop(acc)
     }
@@ -276,11 +298,13 @@ class HttpWriter(
     acc.currentBatch match {
       case None => IO.unit
       case Some(batch) =>
+        val flushedCount = batch.length.toLong
         sendBatch(batch).attempt.flatMap {
           case Right(_) =>
             val flushedCtx = acc.flushedContext().resetErrors
-            commitContextRef.set(flushedCtx) *> IO(acc.resetTo(flushedCtx))
-          case Left(error) => handleFlushError(acc, error)
+            // These records have left the pipeline (sent), so return their permits to the semaphore.
+            commitContextRef.set(flushedCtx) *> IO(acc.resetTo(flushedCtx)) *> permits.releaseN(flushedCount)
+          case Left(error) => handleFlushError(acc, error, flushedCount)
         }
     }
 
@@ -288,8 +312,9 @@ class HttpWriter(
     sendBatch(NonEmptySeq.of(record)).attempt.flatMap {
       case Right(_) =>
         val flushedCtx = acc.candidateContextFor(record).resetErrors
-        commitContextRef.set(flushedCtx) *> IO(acc.resetTo(flushedCtx))
-      case Left(error) => handleFlushError(acc, error)
+        // The single record has left the pipeline (sent), so return its permit to the semaphore.
+        commitContextRef.set(flushedCtx) *> IO(acc.resetTo(flushedCtx)) *> permits.releaseN(1L)
+      case Left(error) => handleFlushError(acc, error, 1L)
     }
 
   /**
@@ -297,14 +322,18 @@ class HttpWriter(
    * count has crossed `errorThreshold` the error is re-raised (propagating out of the consumer
    * fiber to the task's error callback); otherwise it is logged and the failed batch is dropped
    * without advancing committed offsets, so Kafka will redeliver those records.
+   *
+   * `flushedCount` permits are returned to the semaphore in both cases: the batch leaves the
+   * accumulator whether it is dropped (below threshold) or the fiber is torn down (at threshold).
    */
-  private def handleFlushError(acc: BatchAccumulator, error: Throwable): IO[Unit] =
+  private def handleFlushError(acc: BatchAccumulator, error: Throwable, flushedCount: Long): IO[Unit] =
     addErrorToCommitContext(error).flatMap {
       case Some(_) =>
-        IO(logger.error(s"[$sinkName] Error in HttpWriter", error)) *> IO.raiseError(error)
+        IO(logger.error(s"[$sinkName] Error in HttpWriter", error)) *> permits.releaseN(flushedCount) *>
+          IO.raiseError(error)
       case None =>
         IO(logger.error(s"[$sinkName] Error in HttpWriter but not reached threshold so ignoring", error)) *>
-          commitContextRef.get.flatMap(ctx => IO(acc.resetTo(ctx)))
+          commitContextRef.get.flatMap(ctx => IO(acc.resetTo(ctx))) *> permits.releaseN(flushedCount)
     }
 
   private def sendBatch(records: NonEmptySeq[RenderedRecord]): IO[ProcessedTemplate] =

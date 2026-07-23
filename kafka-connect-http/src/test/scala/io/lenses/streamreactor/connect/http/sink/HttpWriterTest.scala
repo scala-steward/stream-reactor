@@ -16,6 +16,7 @@
 package io.lenses.streamreactor.connect.http.sink
 
 import cats.data.NonEmptySeq
+import cats.effect.Deferred
 import cats.effect.IO
 import cats.effect.Ref
 import cats.effect.std.Queue
@@ -63,7 +64,7 @@ class HttpWriterTest extends AsyncIOSpec with AsyncFunSuiteLike with Matchers wi
 
   private def buildWriter(
     batchPolicy:      BatchPolicy,
-    maxQueueSize:     Int              = 10000,
+    maxQueueSize:     Int               = 10000,
     offerTimeout:     FiniteDuration    = 1.minute,
     sender:           HttpRequestSender = successSender(),
     template:         TemplateType      = successTemplate(),
@@ -99,9 +100,21 @@ class HttpWriterTest extends AsyncIOSpec with AsyncFunSuiteLike with Matchers wi
     sender
   }
 
+  // A sender that signals when a request starts and then never completes, so a batch stays in-flight
+  // (and its permits stay held) for the duration of the test.
+  private def blockingSender(entered: Deferred[IO, Unit]): HttpRequestSender = {
+    val sender = mock[HttpRequestSender]
+    when(sender.sendHttpRequest(any[ProcessedTemplate])).thenReturn(entered.complete(()) *> IO.never)
+    sender
+  }
+
   // A real (pure) template avoids brittle mocking of the abstract process method.
   private def successTemplate(): TemplateType =
-    SimpleTemplate("http://bench.invalid", "content", Headers(Seq.empty, copyMessageHeaders = false), ErrorNullPayloadHandler)
+    SimpleTemplate("http://bench.invalid",
+                   "content",
+                   Headers(Seq.empty, copyMessageHeaders = false),
+                   ErrorNullPayloadHandler,
+    )
 
   private def eventually[A](io: IO[A])(cond: A => Boolean): IO[A] =
     io.flatMap(a => if (cond(a)) IO.pure(a) else IO.sleep(10.millis) *> eventually(io)(cond)).timeout(5.seconds)
@@ -110,10 +123,8 @@ class HttpWriterTest extends AsyncIOSpec with AsyncFunSuiteLike with Matchers wi
     for {
       commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
       offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map(topicPartition -> Offset(101)))
-      writerAndQueue   <- buildWriter(BatchPolicy(logger, Count(1000)),
-                                      commitContextRef = commitContextRef,
-                                      offsetMapRef     = offsetMapRef,
-      )
+      writerAndQueue <-
+        buildWriter(BatchPolicy(logger, Count(1000)), commitContextRef = commitContextRef, offsetMapRef = offsetMapRef)
       (writer, queue) = writerAndQueue
       // record1 (100) and record2 (101) are <= the last accepted offset (101) so are discarded;
       // only record3 (102) is enqueued (as a single chunk).
@@ -134,17 +145,18 @@ class HttpWriterTest extends AsyncIOSpec with AsyncFunSuiteLike with Matchers wi
     for {
       commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
       offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
-      writerAndQueue <- buildWriter(BatchPolicy(logger, Count(2)),
-                                    sender           = sender,
-                                    template         = template,
-                                    commitContextRef = commitContextRef,
-                                    offsetMapRef     = offsetMapRef,
+      writerAndQueue <- buildWriter(
+        BatchPolicy(logger, Count(2)),
+        sender           = sender,
+        template         = template,
+        commitContextRef = commitContextRef,
+        offsetMapRef     = offsetMapRef,
       )
       (writer, _) = writerAndQueue
-      fiber <- writer.consume().start
-      _     <- writer.add(NonEmptySeq.of(record1, record2))
-      ctx   <- eventually(commitContextRef.get)(_.committedOffsets.nonEmpty)
-      _     <- fiber.cancel
+      fiber      <- writer.consume().start
+      _          <- writer.add(NonEmptySeq.of(record1, record2))
+      ctx        <- eventually(commitContextRef.get)(_.committedOffsets.nonEmpty)
+      _          <- fiber.cancel
     } yield {
       verify(sender).sendHttpRequest(any[ProcessedTemplate])
       ctx.committedOffsets should contain(topicPartition -> Offset(101))
@@ -156,11 +168,12 @@ class HttpWriterTest extends AsyncIOSpec with AsyncFunSuiteLike with Matchers wi
     for {
       commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
       offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
-      writerAndQueue <- buildWriter(BatchPolicy(logger, Count(1000)),
-                                    maxQueueSize     = 1,
-                                    offerTimeout     = 200.millis,
-                                    commitContextRef = commitContextRef,
-                                    offsetMapRef     = offsetMapRef,
+      writerAndQueue <- buildWriter(
+        BatchPolicy(logger, Count(1000)),
+        maxQueueSize     = 1,
+        offerTimeout     = 200.millis,
+        commitContextRef = commitContextRef,
+        offsetMapRef     = offsetMapRef,
       )
       (writer, _) = writerAndQueue
       // no consumer is running, so the second record cannot be enqueued (capacity 1)
@@ -171,21 +184,68 @@ class HttpWriterTest extends AsyncIOSpec with AsyncFunSuiteLike with Matchers wi
     }
   }
 
+  test("backpressure covers in-flight records: add times out while a batch is still being sent") {
+    for {
+      commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
+      offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
+      entered          <- Deferred[IO, Unit]
+      writerAndQueue <- buildWriter(
+        BatchPolicy(logger, Count(2)),
+        maxQueueSize     = 2,
+        offerTimeout     = 200.millis,
+        sender           = blockingSender(entered),
+        commitContextRef = commitContextRef,
+        offsetMapRef     = offsetMapRef,
+      )
+      (writer, _) = writerAndQueue
+      fiber      <- writer.consume().start
+      // record1+record2 fill the Count(2) batch, which is now stuck in the (never-completing) send
+      // holding both permits.
+      _ <- writer.add(NonEmptySeq.of(record1, record2))
+      _ <- entered.get
+      // No permits remain (they are released only when the batch leaves the pipeline), so a further
+      // record cannot be admitted and the offer times out.
+      result <- writer.add(NonEmptySeq.of(record3)).attempt
+      _      <- fiber.cancel
+    } yield result match {
+      case Left(e)  => e shouldBe a[RetriableException]
+      case Right(_) => fail("expected a RetriableException")
+    }
+  }
+
+  test("resetAcceptedOffsets clears the dedup high-water mark so redelivered records are re-enqueued") {
+    for {
+      commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
+      offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
+      writerAndQueue <-
+        buildWriter(BatchPolicy(logger, Count(1000)), commitContextRef = commitContextRef, offsetMapRef = offsetMapRef)
+      (writer, queue) = writerAndQueue
+      _              <- writer.add(NonEmptySeq.of(record1, record2, record3))
+      _              <- queue.take
+      // Without a reset, re-adding the same records would be discarded as duplicates.
+      _              <- writer.resetAcceptedOffsets(Set(topicPartition))
+      _              <- writer.add(NonEmptySeq.of(record1, record2, record3))
+      queueSizeAfter <- queue.size
+      chunk          <- queue.take
+    } yield {
+      queueSizeAfter shouldBe 1
+      chunk.toSeq shouldBe Seq(record1, record2, record3)
+    }
+  }
+
   test("preCommit reports the offsets committed by a flush") {
     for {
       commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
       offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
-      writerAndQueue <- buildWriter(BatchPolicy(logger, Count(2)),
-                                    commitContextRef = commitContextRef,
-                                    offsetMapRef     = offsetMapRef,
-      )
+      writerAndQueue <-
+        buildWriter(BatchPolicy(logger, Count(2)), commitContextRef = commitContextRef, offsetMapRef = offsetMapRef)
       (writer, _) = writerAndQueue
-      fiber <- writer.consume().start
-      _     <- writer.add(NonEmptySeq.of(record1, record2))
-      _     <- eventually(commitContextRef.get)(_.committedOffsets.nonEmpty)
-      _     <- fiber.cancel
-      initial = Map(topicPartition -> new org.apache.kafka.clients.consumer.OffsetAndMetadata(0L))
-      offsets <- writer.preCommit(initial)
+      fiber      <- writer.consume().start
+      _          <- writer.add(NonEmptySeq.of(record1, record2))
+      _          <- eventually(commitContextRef.get)(_.committedOffsets.nonEmpty)
+      _          <- fiber.cancel
+      initial     = Map(topicPartition -> new org.apache.kafka.clients.consumer.OffsetAndMetadata(0L))
+      offsets    <- writer.preCommit(initial)
     } yield offsets.get(topicPartition).map(_.offset()) shouldBe Some(101L)
   }
 }

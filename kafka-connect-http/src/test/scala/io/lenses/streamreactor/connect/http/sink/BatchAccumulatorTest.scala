@@ -50,8 +50,8 @@ class BatchAccumulatorTest extends AnyFunSuiteLike with Matchers with LazyLoggin
   private val record2 = rec(tp1, 101)
 
   private def fixedClock(atMillis: Long): Clock = new Clock {
-    override def getZone: ZoneId               = ZoneId.systemDefault()
-    override def instant(): Instant            = Instant.ofEpochMilli(atMillis)
+    override def getZone:   ZoneId  = ZoneId.systemDefault()
+    override def instant(): Instant = Instant.ofEpochMilli(atMillis)
     override def withZone(zone: ZoneId): Clock = this
   }
 
@@ -83,7 +83,8 @@ class BatchAccumulatorTest extends AnyFunSuiteLike with Matchers with LazyLoggin
     val created = 1_000_000L
     val ctx     = defaultContext.copy(createdTimestamp = created, lastFlushedTimestamp = None)
     // now is 3s after creation, interval is 1s => elapsed
-    val acc = new BatchAccumulator(BatchPolicy(logger, Interval(Duration.ofSeconds(1), fixedClock(created + 3000))), ctx)
+    val acc =
+      new BatchAccumulator(BatchPolicy(logger, Interval(Duration.ofSeconds(1), fixedClock(created + 3000))), ctx)
 
     val r1 = acc.offer(record1)
     r1.greedyTriggerReached shouldBe true
@@ -139,10 +140,11 @@ class BatchAccumulatorTest extends AnyFunSuiteLike with Matchers with LazyLoggin
   }
 
   test("nextFlushDeadlineMillis is defined only when an interval condition is present") {
-    val created      = 5_000L
-    val ctx          = defaultContext.copy(createdTimestamp = created, lastFlushedTimestamp = None)
-    val countOnly    = new BatchAccumulator(BatchPolicy(logger, Count(10)), ctx)
-    val withInterval = new BatchAccumulator(BatchPolicy(logger, Interval(Duration.ofSeconds(2), fixedClock(created))), ctx)
+    val created   = 5_000L
+    val ctx       = defaultContext.copy(createdTimestamp = created, lastFlushedTimestamp = None)
+    val countOnly = new BatchAccumulator(BatchPolicy(logger, Count(10)), ctx)
+    val withInterval =
+      new BatchAccumulator(BatchPolicy(logger, Interval(Duration.ofSeconds(2), fixedClock(created))), ctx)
 
     countOnly.nextFlushDeadlineMillis shouldBe None
     withInterval.nextFlushDeadlineMillis shouldBe Some(created + 2000L)

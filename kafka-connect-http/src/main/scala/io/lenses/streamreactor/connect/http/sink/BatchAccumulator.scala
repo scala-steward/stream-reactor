@@ -52,9 +52,9 @@ final class BatchAccumulator(
 ) {
 
   private val recordBuffer = mutable.ArrayBuffer.empty[RenderedRecord]
-  private var carried: HttpCommitContext = initialContext
-  private var recordCount:   Long = 0L
-  private var recordBytes:   Long = 0L
+  private var carried:     HttpCommitContext = initialContext
+  private var recordCount: Long              = 0L
+  private var recordBytes: Long              = 0L
 
   private val intervalMillisOpt: Option[Long] =
     batchPolicy.conditions.collectFirst { case Interval(interval, _) => interval.toMillis }
@@ -115,9 +115,9 @@ final class BatchAccumulator(
    */
   def resetTo(context: HttpCommitContext): Unit = {
     recordBuffer.clear()
-    recordCount = 0L
-    recordBytes = 0L
-    carried     = context
+    recordCount                      = 0L
+    recordBytes                      = 0L
+    carried                          = context
     evalContext.createdTimestamp     = context.createdTimestamp
     evalContext.lastFlushedTimestamp = context.lastFlushedTimestamp
   }

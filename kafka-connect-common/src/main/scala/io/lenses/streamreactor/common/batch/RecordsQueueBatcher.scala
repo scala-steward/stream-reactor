@@ -86,7 +86,8 @@ object RecordsQueueBatcher extends LazyLogging {
     if (triggerReached || greedyTriggerReached) {
       NonEmptySeq.fromSeq(batch.toSeq)
         .map(value =>
-          NonEmptyBatchInfo(value, OffsetMergeUtils.createCommitContextForEvaluation(value.toSeq, initialContext),
+          NonEmptyBatchInfo(value,
+                            OffsetMergeUtils.createCommitContextForEvaluation(value.toSeq, initialContext),
                             queueSize,
           ),
         )

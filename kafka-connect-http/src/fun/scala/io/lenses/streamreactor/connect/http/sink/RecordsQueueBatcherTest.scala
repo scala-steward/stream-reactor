@@ -100,9 +100,11 @@ class RecordsQueueBatcherTest extends AnyFunSuiteLike with MockitoSugar with Mat
 
   }
 
-  test("takeBatch returned context has expected count, fileSize and merged offsets for a partial multi-partition batch") {
-    val tp1 = Topic("myTopic").withPartition(1)
-    val tp2 = Topic("myTopic").withPartition(2)
+  test(
+    "takeBatch returned context has expected count, fileSize and merged offsets for a partial multi-partition batch",
+  ) {
+    val tp1  = Topic("myTopic").withPartition(1)
+    val tp2  = Topic("myTopic").withPartition(2)
     val recA = RenderedRecord(tp1.atOffset(100), 100L, "recA", Seq.empty, testEndpoint)
     val recB = RenderedRecord(tp2.atOffset(50), 200L, "recB-longer", Seq.empty, testEndpoint)
     val recC = RenderedRecord(tp1.atOffset(101), 300L, "recC", Seq.empty, testEndpoint)

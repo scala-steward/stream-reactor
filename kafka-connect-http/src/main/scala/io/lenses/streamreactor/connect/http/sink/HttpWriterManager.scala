@@ -15,11 +15,14 @@
  */
 package io.lenses.streamreactor.connect.http.sink
 
+import cats.effect.FiberIO
 import cats.effect.IO
 import cats.effect.Ref
 import cats.effect.Resource
 import cats.effect.kernel.Deferred
 import cats.effect.kernel.Temporal
+import cats.effect.std.Semaphore
+import cats.implicits.toFoldableOps
 import cats.implicits.toTraverseOps
 import com.typesafe.scalalogging.LazyLogging
 import com.typesafe.scalalogging.StrictLogging
@@ -97,6 +100,7 @@ object HttpWriterManager extends StrictLogging {
       (_, resetterRelease) <- metricsResetter.scheduleResetAndUpdate.allocated
       retriableClient       = Retry(retriablePolicy)(client)
       writersRef           <- Ref.of[IO, Map[Topic, HttpWriter]](Map.empty)
+      writerCreationLock   <- Semaphore[IO](1)
       sender <- HttpRequestSender(
         sinkName,
         config.method.toHttp4sMethod,
@@ -114,6 +118,7 @@ object HttpWriterManager extends StrictLogging {
       //close the resetter first
       resetterRelease.guarantee(cResRel),
       writersRef,
+      writerCreationLock,
       terminate,
       config.errorThreshold,
       config.uploadSyncPeriod,
@@ -189,6 +194,7 @@ class HttpWriterManager(
   batchPolicy:                BatchPolicy,
   val close:                  IO[Unit],
   writersRef:                 Ref[IO, Map[Topic, HttpWriter]],
+  writerCreationLock:         Semaphore[IO],
   deferred:                   Deferred[IO, Either[Throwable, Unit]],
   errorThreshold:             Int,
   uploadSyncPeriod:           Int,
@@ -206,6 +212,11 @@ class HttpWriterManager(
   // during `put`, which always runs after `start`, so the callback is available by then.
   private val errCallbackRef: Ref[IO, Throwable => IO[Unit]] =
     Ref.unsafe[IO, Throwable => IO[Unit]]((_: Throwable) => IO.unit)
+
+  // Handles to the per-topic consumer fibers, retained so `awaitConsumers` can wait for them to
+  // finish (their in-flight work cancelled) before the HTTP client is released on shutdown.
+  private val consumerFibersRef: Ref[IO, List[FiberIO[Unit]]] =
+    Ref.unsafe[IO, List[FiberIO[Unit]]](List.empty)
 
   /**
    * Creates a new HTTP writer for a topic and starts its long-lived consumer fiber. The fiber runs
@@ -234,14 +245,28 @@ class HttpWriterManager(
 
   /**
    * Runs a writer's consumer loop on a background fiber. The loop is raced against the manager's
-   * termination `Deferred` so it is cancelled cleanly on `stop`.
+   * termination `Deferred` so it is cancelled cleanly on `stop`. The fiber handle is retained so
+   * `awaitConsumers` can join it during shutdown.
    */
   private def startConsumer(writer: HttpWriter, errCallback: Throwable => IO[Unit]): IO[Unit] =
     IO.race(writer.consume(), deferred.get)
       .void
       .handleErrorWith(e => IO(logger.error(s"[$sinkName] HttpWriter consumer failed", e)) *> errCallback(e))
       .start
-      .void
+      .flatMap(fiber => consumerFibersRef.update(fiber :: _))
+
+  /**
+   * Waits for the consumer fibers to finish once termination has been signalled (via `deferred`),
+   * so their in-flight requests are cancelled before the shared HTTP client is released. Bounded by
+   * a timeout so a stuck request cannot make shutdown hang indefinitely.
+   */
+  def awaitConsumers: IO[Unit] =
+    consumerFibersRef.get
+      .flatMap(fibers => fibers.traverse_(_.join.void))
+      .timeoutTo(
+        30.seconds,
+        IO(logger.warn(s"[$sinkName] Timed out waiting for consumer fibers to stop")),
+      )
 
   /**
    * Closes the reporting controllers.
@@ -258,16 +283,45 @@ class HttpWriterManager(
    * @return An `IO` action that returns the `HttpWriter`.
    */
   def getWriter(topic: Topic): IO[HttpWriter] =
-    writersRef.access.flatMap {
-      case (currentValue, updater) =>
-        currentValue.get(topic) match {
-          case Some(value) => IO.pure(value)
-          case None => for {
-              newWriter <- createNewHttpWriter()
-              _         <- updater(currentValue + (topic -> newWriter))
-            } yield newWriter
-        }
+    writersRef.get.flatMap { writers =>
+      writers.get(topic) match {
+        case Some(value) => IO.pure(value)
+        case None        =>
+          // Serialise creation so only one consumer fiber is ever started per topic: a lost
+          // optimistic update would otherwise leak a running fiber and strand records in a writer
+          // that is not in the map. The lock is only engaged on a cache miss (rare).
+          writerCreationLock.permit.use { _ =>
+            writersRef.get.flatMap { latest =>
+              latest.get(topic) match {
+                case Some(value) => IO.pure(value)
+                case None => for {
+                    newWriter <- createNewHttpWriter()
+                    _         <- writersRef.update(_ + (topic -> newWriter))
+                  } yield newWriter
+              }
+            }
+          }
+      }
     }
+
+  /**
+   * Resets the per-partition dedup high-water mark for the given partitions so that records
+   * redelivered after a rebalance (Kafka rewinds the consumer to the last committed offset) are not
+   * silently discarded as duplicates. Partitions whose topic has no writer yet need nothing: a
+   * freshly created writer starts with an empty dedup map.
+   */
+  def onPartitionsOpened(partitions: Set[TopicPartition]): IO[Unit] =
+    if (partitions.isEmpty) IO.unit
+    else
+      writersRef.get.flatMap { writers =>
+        partitions.groupBy(_.topic).toList.traverse_ {
+          case (topic, topicPartitions) =>
+            writers.get(topic) match {
+              case Some(writer) => writer.resetAcceptedOffsets(topicPartitions)
+              case None         => IO.unit
+            }
+        }
+      }
 
   /**
    * Pre-commits the current offsets.
