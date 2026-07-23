@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--                                                                          -->
+<!-- Copyright 2017-2026 Lenses.io Ltd                                       -->
+<!--                                                                          -->
+<!-- Licensed under the Apache License, Version 2.0 (the "License");         -->
+<!-- you may not use this file except in compliance with the License.        -->
+<!-- You may obtain a copy of the License at                                 -->
+<!--                                                                         -->
+<!-- http://www.apache.org/licenses/LICENSE-2.0                              -->
+<!--                                                                         -->
+<!-- Unless required by applicable law or agreed to in writing, software     -->
+<!-- distributed under the License is distributed on an "AS IS" BASIS,       -->
+<!-- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.-->
+<!-- See the License for the specific language governing permissions and     -->
+<!-- limitations under the License.                                          -->
+<!--                                                                         -->
+<!--
+    Root logger is WARN so that the throughput benchmarks measure compute, not
+    logging I/O. `BatchPolicy` (HTTP sink batching) and `CommitPolicy` (cloud sink
+    flush policy) log a line for every record considered while forming a
+    batch/evaluating a flush; at INFO that logging is charged to the timed section
+    of a benchmark run and would otherwise dominate the measurement, particularly
+    for larger batch sizes. `SinkThroughputComparisonTest`'s logging-cost scenario
+    raises `BatchPolicy` back to INFO temporarily (via `LoggerFactory` + logback's
+    `Logger.setLevel`) to measure that cost directly as a named line item - see
+    that test and benchmarks/EXECUTIVE_SUMMARY.md.
+-->
+<configuration>
+    <appender name="stdout" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{ISO8601} %-5p [%t] [%c] [%M:%L] %m%n</pattern>
+        </encoder>
+    </appender>
+    <!-- Trailing "$" required: these are Scala `object`s, and logback's logger hierarchy is
+         dot-separated, so "BatchPolicy" (no "$") is a distinct, unrelated logger name from
+         "BatchPolicy$" (the module's actual runtime logger name); it would silently not match. -->
+    <logger name="io.lenses.streamreactor.common.batch.BatchPolicy$" level="WARN"/>
+    <logger name="io.lenses.streamreactor.connect.cloud.common.sink.commit.CommitPolicy$" level="WARN"/>
+    <root level="WARN">
+        <appender-ref ref="stdout"/>
+    </root>
+</configuration>

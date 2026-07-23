@@ -551,6 +551,24 @@ lazy val `test-common` = (project in file("test-common"))
   )
   .disablePlugins(AssemblyPlugin)
 
+// Not part of `subProjects`/root aggregate: this is a local dev tool for comparing sink
+// throughput with the network mocked out, not a shipped connector or part of CI (fullTest).
+lazy val benchmarks = (project in file("benchmarks"))
+  .dependsOn(http)
+  .dependsOn(`gcp-storage`)
+  .dependsOn(`cloud-common` % "compile->compile;test->test")
+  .settings(
+    settings ++
+      Seq(
+        name := "benchmarks",
+        description := "Local throughput comparison harnesses for sink connectors (network egress mocked)",
+        libraryDependencies ++= baseDeps,
+        publish / skip := true,
+      ),
+  )
+  .disablePlugins(AssemblyPlugin)
+  .configureTests(baseTestDeps)
+
 addCommandAlias(
   "validateAll",
   "headerCheck;test:headerCheck;it:headerCheck;fun:headerCheck;scalafmtCheckAll;test-common/scalafmtCheck;test-common/headerCheck",
