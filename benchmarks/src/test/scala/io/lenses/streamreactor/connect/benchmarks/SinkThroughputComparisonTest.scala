@@ -57,11 +57,10 @@ import scala.concurrent.duration.FiniteDuration
  *  1. Pure CPU ceiling (egress latency = 0) -- isolates in-process cost from network latency; the
  *     sole zero-latency measurement point (GCS runs 200,000 records so its timed section is above
  *     single-GC-pause noise).
- *  2. Egress latency sweep (100/400/900ms) -- reproduces the real-world gap, and includes the
- *     "recommended settings" (`batch.count=10000`) HTTP configuration the customer reported
- *     still showing the same issue, plus a GCS `exactly.once.enable=false` variant that flushes
- *     with ~1 latency-charged op per flush (vs ~6-8 with exactly-once on) to expose the
- *     amortisation-ratio artifact behind the old "convergence" narrative.
+ *  2. Egress latency sweep (100/400/900ms) -- compares HTTP `batch.count=1500` and
+ *     `batch.count=10000` against GCS, including a GCS `exactly.once.enable=false` variant that
+ *     flushes with ~1 latency-charged op per flush (vs ~6-8 with exactly-once on) to make the
+ *     amortisation-ratio difference between the two GCS variants explicit.
  *  3. Record size sweep at 0ms latency -- isolates the cost of rendering/serialising larger
  *     payloads (run at 0ms, not 400ms, so the serialisation cost is not swamped by sleep time).
  *  4. Logging-cost delta -- quantifies how much of the HTTP pure-CPU cost is
@@ -82,9 +81,6 @@ class SinkThroughputComparisonTest extends AnyFunSuite {
 
   private val bucket = "bench-bucket"
 
-  // Batch/flush sizes mirror the customer's actual configuration (HTTP batch.count=1500) and
-  // GCS's flush.count=10000, plus the "recommended settings" HTTP batch.count=10000 the customer
-  // says produced the same symptoms.
   private val HttpBatchDefault     = 1500L
   private val HttpBatchRecommended = 10000L
   private val GcsFlushCount        = 10000L
@@ -182,12 +178,11 @@ class SinkThroughputComparisonTest extends AnyFunSuite {
       repeatHttp(family, "http batch=1500", HttpBatchDefault, batchesToRun = 5, warmup = 0, measured = 3, egressLatency = d)
       repeatHttp(family, "http batch=10000 (recommended)", HttpBatchRecommended, batchesToRun = 1, warmup = 0, measured = 3, egressLatency = d)
       // GCS with exactly-once ON (production default): the commit chain makes ~6-8 latency-charged
-      // storage calls per flush, so records are amortised over many more round-trips than the
-      // single upload the old benchmark counted.
+      // storage calls per flush, so records are amortised over many more round-trips than a single
+      // direct upload.
       repeatGcs(family, "gcs flush=10000", GcsFlushCount, batchesToRun = 1, warmup = 0, measured = 3, egressLatency = d)
       // GCS with exactly-once OFF: each flush is a single direct upload (~1 charged op per flush),
-      // so all 10,000 records are amortised over one round-trip. Included to expose the
-      // amortisation-ratio artifact that made exactly-once GCS appear to "converge" with HTTP.
+      // so all 10,000 records are amortised over one round-trip.
       repeatGcs(family,
                 "gcs flush=10000 eo=off",
                 GcsFlushCount,

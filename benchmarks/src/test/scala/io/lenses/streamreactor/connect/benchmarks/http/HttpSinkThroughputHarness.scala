@@ -77,8 +77,8 @@ class HttpSinkThroughputHarness {
    *                         effective batch count so the final partial batch is not left
    *                         stranded in the queue (see [[HttpSinkThroughputHarness]] scaladoc).
    * @param egressLatency   simulated network/server latency added to every stubbed HTTP response.
-   * @param requestContent  the `connect.http.request.content` template; defaults to the
-   *                         customer's own template.
+   * @param requestContent  the `connect.http.request.content` template; defaults to a simple
+   *                         pass-through template.
    */
   def run(
     scenario:       String,

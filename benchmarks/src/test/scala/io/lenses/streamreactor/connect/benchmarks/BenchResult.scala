@@ -154,8 +154,8 @@ object ResultsTablePrinter {
 
 /**
  * Best-effort heap usage sampling around a benchmark run. Not a substitute for a real profiler:
- * intended only to corroborate large, order-of-magnitude differences (e.g. the customer's "2x
- * memory" observation), not to make precise per-record allocation claims.
+ * intended only to corroborate large, order-of-magnitude differences, not to make precise
+ * per-record allocation claims.
  */
 object HeapSampler {
 
