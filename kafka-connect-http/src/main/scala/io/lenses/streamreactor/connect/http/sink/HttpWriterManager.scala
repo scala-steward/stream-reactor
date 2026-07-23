@@ -19,20 +19,17 @@ import cats.effect.IO
 import cats.effect.Ref
 import cats.effect.Resource
 import cats.effect.kernel.Deferred
-import cats.effect.kernel.Outcome
 import cats.effect.kernel.Temporal
 import cats.implicits.toTraverseOps
 import com.typesafe.scalalogging.LazyLogging
 import com.typesafe.scalalogging.StrictLogging
 import io.lenses.streamreactor.common.util.EitherUtils.unpackOrThrow
 import io.lenses.streamreactor.common.utils.CyclopsToScalaOption.convertToScalaOption
-import io.lenses.streamreactor.connect.cloud.common.model.Offset
 import io.lenses.streamreactor.connect.cloud.common.model.Topic
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
 import io.lenses.streamreactor.connect.http.sink.client.HttpRequestSender
 import io.lenses.streamreactor.common.batch.BatchPolicy
 import io.lenses.streamreactor.common.batch.HttpBatchPolicy
-import io.lenses.streamreactor.common.batch.HttpCommitContext
 import io.lenses.streamreactor.connect.http.sink.config.ExponentialRetryConfig
 import io.lenses.streamreactor.connect.http.sink.config.FixedRetryConfig
 import io.lenses.streamreactor.connect.http.sink.config.HttpSinkConfig
@@ -40,7 +37,6 @@ import io.lenses.streamreactor.connect.http.sink.metrics.HttpSinkMetricsMBean
 import io.lenses.streamreactor.connect.http.sink.metrics.MetricsResetter
 import io.lenses.streamreactor.connect.http.sink.reporter.model.HttpFailureConnectorSpecificRecordData
 import io.lenses.streamreactor.connect.http.sink.reporter.model.HttpSuccessConnectorSpecificRecordData
-import io.lenses.streamreactor.connect.http.sink.tpl.RenderedRecord
 import io.lenses.streamreactor.connect.http.sink.tpl.TemplateType
 import io.lenses.streamreactor.connect.reporting.ReportingController
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
@@ -53,7 +49,6 @@ import org.http4s.jdkhttpclient.JdkHttpClient
 
 import java.net.http.HttpClient
 import java.time.Duration
-import scala.collection.immutable.Queue
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
 
@@ -207,34 +202,46 @@ class HttpWriterManager(
   t: Temporal[IO],
 ) extends LazyLogging {
 
+  // The task-level error callback is supplied by `start`. Writers are created lazily (per topic)
+  // during `put`, which always runs after `start`, so the callback is available by then.
+  private val errCallbackRef: Ref[IO, Throwable => IO[Unit]] =
+    Ref.unsafe[IO, Throwable => IO[Unit]]((_: Throwable) => IO.unit)
+
   /**
-   * Creates a new HTTP writer.
+   * Creates a new HTTP writer for a topic and starts its long-lived consumer fiber. The fiber runs
+   * until the manager's termination signal fires; any unrecovered error is forwarded to the task
+   * error callback (which fails the next `put`).
    *
    * @return An `IO` action that creates a new `HttpWriter`.
    */
   private def createNewHttpWriter(): IO[HttpWriter] =
     for {
-      recordsQueueRef  <- Ref.of[IO, Queue[RenderedRecord]](Queue.empty)
-      commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
-      offsetsRef       <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
-    } yield new HttpWriter(
-      sinkName = sinkName,
-      sender   = httpRequestSender,
-      template = template,
-      recordsQueue =
-        new RecordsQueue(recordsQueueRef,
-                         commitContextRef,
-                         batchPolicy,
-                         maxQueueSize,
-                         maxQueueOfferTimeout,
-                         offsetsRef,
-        ),
-      errorThreshold   = errorThreshold,
-      tidyJson         = tidyJson,
-      errorReporter    = errorReportingController,
-      successReporter  = successReportingController,
-      commitContextRef = commitContextRef,
-    )
+      writer <- HttpWriter.create(
+        sinkName             = sinkName,
+        sender               = httpRequestSender,
+        template             = template,
+        batchPolicy          = batchPolicy,
+        maxQueueSize         = maxQueueSize,
+        maxQueueOfferTimeout = maxQueueOfferTimeout,
+        errorThreshold       = errorThreshold,
+        tidyJson             = tidyJson,
+        errorReporter        = errorReportingController,
+        successReporter      = successReportingController,
+      )
+      errCallback <- errCallbackRef.get
+      _           <- startConsumer(writer, errCallback)
+    } yield writer
+
+  /**
+   * Runs a writer's consumer loop on a background fiber. The loop is raced against the manager's
+   * termination `Deferred` so it is cancelled cleanly on `stop`.
+   */
+  private def startConsumer(writer: HttpWriter, errCallback: Throwable => IO[Unit]): IO[Unit] =
+    IO.race(writer.consume(), deferred.get)
+      .void
+      .handleErrorWith(e => IO(logger.error(s"[$sinkName] HttpWriter consumer failed", e)) *> errCallback(e))
+      .start
+      .void
 
   /**
    * Closes the reporting controllers.
@@ -294,88 +301,14 @@ class HttpWriterManager(
    * @param errCallback The error callback.
    * @return An `IO` action that starts the manager.
    */
-  def start(errCallback: Throwable => IO[Unit]): IO[Unit] = {
-    import scala.concurrent.duration._
+  def start(errCallback: Throwable => IO[Unit]): IO[Unit] =
     for {
-      _ <- IO(logger.info(s"[$sinkName] starting HttpWriterManager"))
-      _ <- fs2
-        .Stream
-        .fixedRate(uploadSyncPeriod.millis)
-        .evalMap(_ => process().flatMap(handleResult(_, errCallback)).void)
-        .interruptWhen(deferred)
-        .onComplete(fs2.Stream.eval(close))
-        .compile
-        .drain
-        .background
-        .allocated
+      _ <- errCallbackRef.set(errCallback)
+      _ <- IO(
+        logger.info(
+          s"[$sinkName] starting HttpWriterManager (per-topic consumer fibers; " +
+            s"'${io.lenses.streamreactor.connect.http.sink.config.HttpSinkConfigDef.UploadSyncPeriodProp}'=$uploadSyncPeriod is deprecated and ignored)",
+        ),
+      )
     } yield ()
-  }
-
-  /**
-   * Handles the result of the writer processes.
-   *
-   * @param writersResult The result of the writer processes.
-   * @param errCallback The error callback.
-   * @return An `IO` action that handles the result.
-   */
-  private def handleResult(
-    writersResult: List[Either[Throwable, _]],
-    errCallback:   Throwable => IO[Unit],
-  ): IO[Unit] =
-    for {
-      failures <- IO(writersResult.collect {
-        case Left(error: Throwable) => error
-      })
-      _ <-
-        if (failures.nonEmpty) {
-          logger.error(s"[$sinkName] Some writer processes failed: $failures")
-          failures.traverse(errCallback)
-        } else {
-          logger.debug(s"[$sinkName] All writer processes completed successfully")
-          IO.unit
-        }
-    } yield ()
-
-  /**
-   * Processes the writers.
-   *
-   * @return An `IO` action that processes the writers.
-   */
-  private def process(): IO[List[Either[Throwable, Unit]]] =
-    for {
-      // Log the start of the processing
-      _ <- IO.delay(logger.trace(s"[$sinkName] WriterManager.process()"))
-
-      // Retrieve the current writers
-      writers <- writersRef.get
-
-      // Log if there are no writers
-      _ <- IO.whenA(writers.isEmpty) {
-        IO.delay(
-          logger.trace(
-            s"[$sinkName] HttpWriterManager has no writers. " +
-              "Perhaps no records have been put to the sink yet.",
-          ),
-        )
-      }
-
-      // Create a list of fiber-starting IO operations for each writer
-      fiberIOs = writers.toList.map {
-        case (id, writer) =>
-          IO.delay(logger.trace(s"[$sinkName] Starting process for writer $id")) *>
-            writer.process().attempt.start
-      }
-
-      // Execute all fiber-starting IO operations sequentially
-      fibers <- fiberIOs.sequence
-
-      // Collect the results from all fibers
-      results <- fibers.traverse { fiber =>
-        fiber.join.flatMap {
-          case Outcome.Succeeded(io) => io
-          case Outcome.Errored(e)    => IO.pure(Left(e))
-          case Outcome.Canceled()    => IO.pure(Left(new RuntimeException("IO canceled")))
-        }
-      }
-    } yield results
 }

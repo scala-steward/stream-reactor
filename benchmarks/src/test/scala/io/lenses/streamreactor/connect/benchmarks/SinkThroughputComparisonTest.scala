@@ -100,7 +100,8 @@ class SinkThroughputComparisonTest extends AnyFunSuite {
     payloadBytes:  Int,
   ): BenchResult = {
     val records = RecordGenerator.sinkRecords("bench-http-topic", (batchCount * batchesToRun).toInt, payloadBytes = payloadBytes)
-    httpHarness.run(scenarioLabel, httpProps(batchCount), records, egressLatency)
+    // Single interpreter boundary: the harness is pure (IO[BenchResult]); we run it here.
+    httpHarness.run(scenarioLabel, httpProps(batchCount), records, egressLatency).unsafeRunSync()
   }
 
   private def gcsIteration(

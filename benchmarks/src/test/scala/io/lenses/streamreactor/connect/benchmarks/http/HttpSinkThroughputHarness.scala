@@ -19,7 +19,11 @@ import cats.data.NonEmptySeq
 import cats.effect.IO
 import cats.effect.Ref
 import cats.effect.Resource
-import cats.effect.unsafe.IORuntime
+import cats.effect.std.Queue
+import cats.effect.std.Semaphore
+import cats.implicits.toFoldableOps
+import io.lenses.streamreactor.common.batch.BatchPolicy
+import io.lenses.streamreactor.common.batch.Count
 import io.lenses.streamreactor.common.batch.HttpBatchPolicy
 import io.lenses.streamreactor.common.batch.HttpCommitContext
 import io.lenses.streamreactor.connect.benchmarks.BenchResult
@@ -27,7 +31,6 @@ import io.lenses.streamreactor.connect.benchmarks.HeapSampler
 import io.lenses.streamreactor.connect.cloud.common.model.Offset
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
 import io.lenses.streamreactor.connect.http.sink.HttpWriter
-import io.lenses.streamreactor.connect.http.sink.RecordsQueue
 import io.lenses.streamreactor.connect.http.sink.client.NoAuthenticationHttpRequestSender
 import io.lenses.streamreactor.connect.http.sink.config.HttpSinkConfig
 import io.lenses.streamreactor.connect.http.sink.metrics.HttpSinkMetrics
@@ -39,8 +42,8 @@ import org.http4s.Response
 import org.http4s.Status
 import org.http4s.client.Client
 
-import scala.collection.immutable.Queue
 import scala.concurrent.duration.Duration
+import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
 
 /**
@@ -55,14 +58,13 @@ import scala.concurrent.duration.FiniteDuration
  *    batching policy evaluation, request/body assembly, and the real `HttpSinkMetrics` -- is
  *    unmodified production code.
  *
- * Design note on the drain loop: production drives `HttpWriter.process()` from a fixed-rate
- * scheduler (`connect.http.upload.sync.period`, default 100ms) inside `HttpWriterManager`. That
- * scheduler is a polling artifact, not part of the pipeline's real cost, so it is not reused here.
- * This harness instead calls `HttpWriter.process()` back-to-back until the queue is drained,
- * which measures the pipeline's unconstrained throughput ceiling rather than a scheduler-limited
- * approximation of it (see the plan's "pure CPU ceiling" sweep).
+ * Design note on the drain loop: production drives the pipeline from a single long-lived consumer
+ * fiber per topic (`HttpWriter.consume()`), started by `HttpWriterManager`. This harness starts the
+ * same consumer fiber and feeds records into the writer's bounded queue via `HttpWriter.add`, then
+ * waits until the queue has drained and every batch has been sent (tracked via the success-count
+ * metric). This measures the pipeline's unconstrained throughput ceiling.
  */
-class HttpSinkThroughputHarness(implicit runtime: IORuntime) {
+class HttpSinkThroughputHarness {
 
   private val sinkName = "bench-http"
 
@@ -85,49 +87,55 @@ class HttpSinkThroughputHarness(implicit runtime: IORuntime) {
     egressLatency:  FiniteDuration = Duration.Zero,
     requestContent: String         = "{{#message}}{{value}}\n{{/message}}",
     pollChunkSize:  Int            = 500,
-  ): BenchResult = {
+  ): IO[BenchResult] = {
     val fullProps = props ++ Map(
-      "connect.http.endpoint"         -> "http://bench.invalid/mocked",
-      "connect.http.request.content"  -> requestContent,
-      "connect.http.method"           -> "POST",
+      "connect.http.endpoint"        -> "http://bench.invalid/mocked",
+      "connect.http.request.content" -> requestContent,
+      "connect.http.method"          -> "POST",
     )
 
-    val config = HttpSinkConfig.from(fullProps).fold(e => throw e, identity)
-    val template: TemplateType = RawTemplate(config.endpoint, config.content, config.headers, config.nullPayloadHandler)
-    val metrics = new HttpSinkMetrics()
-    val sender  = new NoAuthenticationHttpRequestSender(sinkName, config.method.toHttp4sMethod, stubClient(egressLatency), metrics)
-
-    val batchPolicy = {
-      val configured = config.batch.toBatchPolicy
-      if (configured.conditions.nonEmpty) configured else HttpBatchPolicy.Default
-    }
-
-    val (writer, queueRef) = buildWriter(sender, template, batchPolicy, config.maxQueueSize, config.maxQueueOfferTimeout).unsafeRunSync()
-
-    val (_, heapBefore, heapAfter, elapsedNanos) = {
-      val heapBefore = HeapSampler.usedHeapBytes()
-      val start      = System.nanoTime()
-
-      records.grouped(math.max(1, pollChunkSize)).foreach { chunk =>
-        putChunk(writer, template, chunk).unsafeRunSync()
+    for {
+      config <- IO(HttpSinkConfig.from(fullProps)).rethrow
+      metrics <- IO(new HttpSinkMetrics())
+      template = RawTemplate(config.endpoint, config.content, config.headers, config.nullPayloadHandler)
+      sender =
+        new NoAuthenticationHttpRequestSender(sinkName, config.method.toHttp4sMethod, stubClient(egressLatency), metrics)
+      batchPolicy = {
+        val configured = config.batch.toBatchPolicy
+        if (configured.conditions.nonEmpty) configured else HttpBatchPolicy.Default
       }
-      drainLoop(writer, queueRef).unsafeRunSync()
-
-      val elapsed    = System.nanoTime() - start
-      val heapAfter  = HeapSampler.usedHeapBytes()
-      ((), heapBefore, heapAfter, elapsed)
-    }
-
-    BenchResult(
+      writerAndQueue  <- buildWriter(sender, template, batchPolicy, config.maxQueueSize, config.maxQueueOfferTimeout)
+      (writer, queue)  = writerAndQueue
+      batchCount       = batchPolicy.conditions.collectFirst { case Count(c) => c.toInt }.getOrElse(records.length)
+      expectedRequests = math.ceil(records.length.toDouble / math.max(1, batchCount)).toInt
+      heapBefore <- IO(HeapSampler.usedHeapBytes())
+      start      <- IO.monotonic
+      // The consumer fiber runs for the duration of the `use` block and is cancelled on exit.
+      // `elapsed` is captured inside the block so the cancellation is excluded from the timed window.
+      elapsed <- writer.consume().background.use { _ =>
+        feedAll(writer, template, records, pollChunkSize) *>
+          awaitDrained(queue, metrics, expectedRequests) *>
+          IO.monotonic.map(_ - start)
+      }
+      heapAfter <- IO(HeapSampler.usedHeapBytes())
+    } yield BenchResult(
       sink               = "HTTP",
       scenario           = scenario,
       records            = records.length.toLong,
-      elapsedNanos       = elapsedNanos,
+      elapsedNanos       = elapsed.toNanos,
       networkOps         = metrics.get2xxCount,
       flushes            = metrics.get2xxCount, // one HTTP request per batch: request == flush
       heapUsedDeltaBytes = math.max(0L, heapAfter - heapBefore),
     )
   }
+
+  private def feedAll(
+    writer:        HttpWriter,
+    template:      TemplateType,
+    records:       IndexedSeq[SinkRecord],
+    pollChunkSize: Int,
+  ): IO[Unit] =
+    records.grouped(math.max(1, pollChunkSize)).toList.traverse_(chunk => putChunk(writer, template, chunk))
 
   private def stubClient(latency: FiniteDuration): Client[IO] =
     Client[IO] { _ =>
@@ -138,27 +146,32 @@ class HttpSinkThroughputHarness(implicit runtime: IORuntime) {
   private def buildWriter(
     sender:               NoAuthenticationHttpRequestSender,
     template:             TemplateType,
-    batchPolicy:          io.lenses.streamreactor.common.batch.BatchPolicy,
+    batchPolicy:          BatchPolicy,
     maxQueueSize:         Int,
     maxQueueOfferTimeout: FiniteDuration,
-  ): IO[(HttpWriter, Ref[IO, Queue[RenderedRecord]])] =
+  ): IO[(HttpWriter, Queue[IO, NonEmptySeq[RenderedRecord]])] =
     for {
-      recordsQueueRef  <- Ref.of[IO, Queue[RenderedRecord]](Queue.empty)
+      recordsQueue     <- Queue.unbounded[IO, NonEmptySeq[RenderedRecord]]
+      permits          <- Semaphore[IO](maxQueueSize.toLong)
       commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
       offsetsRef       <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
-      queue = new RecordsQueue(recordsQueueRef, commitContextRef, batchPolicy, maxQueueSize, maxQueueOfferTimeout, offsetsRef)
       writer = new HttpWriter(
-        sinkName        = sinkName,
-        sender          = sender,
-        template        = template,
-        recordsQueue    = queue,
-        errorThreshold  = Int.MaxValue,
-        tidyJson        = false,
-        errorReporter   = NoopReporters.error,
-        successReporter = NoopReporters.success,
-        commitContextRef = commitContextRef,
+        sinkName             = sinkName,
+        sender               = sender,
+        template             = template,
+        batchPolicy          = batchPolicy,
+        recordsQueue         = recordsQueue,
+        permits              = permits,
+        maxQueueSize         = maxQueueSize,
+        offsetMapRef         = offsetsRef,
+        maxQueueOfferTimeout = maxQueueOfferTimeout,
+        errorThreshold       = Int.MaxValue,
+        tidyJson             = false,
+        errorReporter        = NoopReporters.error,
+        successReporter      = NoopReporters.success,
+        commitContextRef     = commitContextRef,
       )
-    } yield (writer, recordsQueueRef)
+    } yield (writer, recordsQueue)
 
   private def putChunk(writer: HttpWriter, template: TemplateType, chunk: IndexedSeq[SinkRecord]): IO[Unit] =
     NonEmptySeq.fromSeq(chunk.toList) match {
@@ -170,9 +183,19 @@ class HttpSinkThroughputHarness(implicit runtime: IORuntime) {
         }
     }
 
-  private def drainLoop(writer: HttpWriter, queueRef: Ref[IO, Queue[RenderedRecord]]): IO[Unit] =
-    queueRef.get.flatMap { q =>
-      if (q.isEmpty) IO.unit
-      else writer.process() *> drainLoop(writer, queueRef)
-    }
+  // The consumer fiber runs concurrently; the run is complete once the queue is empty and every
+  // expected batch has been sent (the stub client reports each send as a 2xx).
+  private def awaitDrained(
+    queue:            Queue[IO, NonEmptySeq[RenderedRecord]],
+    metrics:          HttpSinkMetrics,
+    expectedRequests: Int,
+  ): IO[Unit] = {
+    def loop(): IO[Unit] =
+      for {
+        size <- queue.size
+        sent <- IO(metrics.get2xxCount)
+        _    <- if (size == 0 && sent >= expectedRequests) IO.unit else IO.sleep(1.milli) *> loop()
+      } yield ()
+    loop()
+  }
 }

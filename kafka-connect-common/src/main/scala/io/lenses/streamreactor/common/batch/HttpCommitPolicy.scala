@@ -34,23 +34,29 @@ import java.time.Duration
 case class BatchPolicy(logger: Logger, conditions: BatchPolicyCondition*) {
 
   def shouldBatch(context: CommitContext): BatchResult = {
-
-    val res                  = conditions.map(_.eval(context, debugEnabled = true))
-    val triggerReached       = res.exists(_.batchResult.triggerReached)
-    val fitsInBatch          = res.map(_.batchResult.fitsInBatch).distinct.headOption.contains(true)
-    val greedyTriggerReached = res.exists(_.batchResult.greedyTriggerReached)
-
-    //if (triggerReached) {
-    logger.info(generateLogLine(triggerReached, res))
-    //}
-
+    // Hot path: fold the conditions with three flags, allocating no intermediate collections and no
+    // log strings. The explanation is built only when a flush is actually logged (see below).
+    var triggerReached       = false
+    var greedyTriggerReached = false
+    var fitsInBatch          = false
+    var first                = true
+    conditions.foreach { condition =>
+      val r = condition.eval(context)
+      if (r.triggerReached) triggerReached             = true
+      if (r.greedyTriggerReached) greedyTriggerReached = true
+      if (first) {
+        fitsInBatch = r.fitsInBatch
+        first       = false
+      }
+    }
+    // Log at most once per flush, not per record: only when a trigger is reached and INFO is on.
+    if (triggerReached)
+      logger.info(generateLogLine(conditions.map(_.explain(context))))
     BatchResult(fitsInBatch, triggerReached, greedyTriggerReached)
+  }
 
-  }
-  def generateLogLine(flushing: Boolean, result: Seq[BatchConditionCommitResult]): String = {
-    val flushingOrNot = if (flushing) "" else "Not "
-    s"${flushingOrNot}Flushing for {${result.flatMap(_.logLine).mkString(", ")}}"
-  }
+  def generateLogLine(explanations: Seq[String]): String =
+    s"Flushing for {${explanations.mkString(", ")}}"
 
 }
 

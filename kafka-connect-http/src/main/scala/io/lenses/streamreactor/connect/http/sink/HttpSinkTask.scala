@@ -189,11 +189,12 @@ class HttpSinkTask extends SinkTask with LazyLogging with JarManifestProvided {
     (for {
       taskNumber <- taskNumberRef.get
       _          <- IO(MetricsRegistrar.unregisterMetricsMBean(sinkName, taskNumber))
+      // Signal termination first so the per-topic consumer fibers stop before their resources close.
+      _ <- deferred.complete(().asRight)
       _ <- maybeWriterManager.traverse { x =>
         x.closeReportingControllers()
         x.close
       }
-      _ <- deferred.complete(().asRight)
     } yield ()).unsafeRunSync()
 
 }

@@ -2,6 +2,7 @@ package io.lenses.streamreactor.connect.http.sink
 import cats.data.NonEmptySeq
 import cats.implicits.catsSyntaxOptionId
 import com.typesafe.scalalogging.LazyLogging
+import io.lenses.streamreactor.connect.cloud.common.model.Offset
 import io.lenses.streamreactor.connect.cloud.common.model.Topic
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
 import io.lenses.streamreactor.connect.cloud.common.sink.commit.CommitPolicy
@@ -97,6 +98,32 @@ class RecordsQueueBatcherTest extends AnyFunSuiteLike with MockitoSugar with Mat
       case _ => fail("Should be a non-empty batch")
     }
 
+  }
+
+  test("takeBatch returned context has expected count, fileSize and merged offsets for a partial multi-partition batch") {
+    val tp1 = Topic("myTopic").withPartition(1)
+    val tp2 = Topic("myTopic").withPartition(2)
+    val recA = RenderedRecord(tp1.atOffset(100), 100L, "recA", Seq.empty, testEndpoint)
+    val recB = RenderedRecord(tp2.atOffset(50), 200L, "recB-longer", Seq.empty, testEndpoint)
+    val recC = RenderedRecord(tp1.atOffset(101), 300L, "recC", Seq.empty, testEndpoint)
+
+    val batchPolicy = mock[BatchPolicy]
+    when(batchPolicy.shouldBatch(any[HttpCommitContext])).thenReturn(
+      BatchResult(fitsInBatch = true, triggerReached = false, greedyTriggerReached = false),
+      BatchResult(fitsInBatch = true, triggerReached = true, greedyTriggerReached  = false),
+    )
+
+    val result = takeBatch(batchPolicy, defaultContext, Queue(recA, recB, recC))
+
+    result match {
+      case NonEmptyBatchInfo(batch, updatedCommitContext, queueSize) =>
+        batch should be(NonEmptySeq.of(recA, recB))
+        updatedCommitContext.count should be(2L)
+        updatedCommitContext.fileSize should be((recA.length + recB.length).toLong)
+        updatedCommitContext.committedOffsets should be(Map(tp1 -> Offset(100L), tp2 -> Offset(50L)))
+        queueSize should be(3)
+      case _ => fail("Should be a non-empty batch")
+    }
   }
 
   test("takeBatch should return empty batch when the queue is empty") {

@@ -247,6 +247,23 @@ class HttpSinkConfigTest extends AnyFunSuiteLike with Matchers with EitherValues
     httpSinkConfig.nullPayloadHandler should be(CustomNullPayloadHandler(customValue))
   }
 
+  test("fails when max queue size is not positive") {
+    // The Range validator runs while the underlying Kafka AbstractConfig is parsed, so it surfaces
+    // as a thrown ConfigException rather than a Left.
+    val thrown = the[ConfigException] thrownBy HttpSinkConfig.from(
+      Map(
+        HttpSinkConfigDef.HttpMethodProp         -> "put",
+        HttpSinkConfigDef.HttpEndpointProp       -> "http://myaddress.example.com",
+        HttpSinkConfigDef.HttpRequestContentProp -> "<note>\n<to>Dave</to>\n<from>Jason</from>\n<body>Hooray for Kafka Connect!</body>\n</note>",
+        HttpSinkConfigDef.MaxQueueSizeProp       -> "0",
+        ERROR_REPORTING_ENABLED_PROP             -> "false",
+        SUCCESS_REPORTING_ENABLED_PROP           -> "false",
+      ),
+    )
+
+    thrown.getMessage should include(HttpSinkConfigDef.MaxQueueSizeProp)
+  }
+
   test("NullPayloadHandler should throw ConfigException for an invalid handler name") {
     val result = HttpSinkConfig.from(
       Map(

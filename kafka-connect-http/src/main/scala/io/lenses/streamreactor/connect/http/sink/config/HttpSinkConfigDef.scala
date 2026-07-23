@@ -19,6 +19,7 @@ import io.lenses.streamreactor.connect.http.sink.client.oauth2.OAuth2Config
 import io.lenses.streamreactor.connect.reporting.config.ReporterConfig
 import org.apache.kafka.common.config.ConfigDef
 import org.apache.kafka.common.config.ConfigDef.Importance
+import org.apache.kafka.common.config.ConfigDef.Range
 import org.apache.kafka.common.config.ConfigDef.Type
 import org.http4s.Status.BadGateway
 import org.http4s.Status.GatewayTimeout
@@ -340,6 +341,7 @@ object HttpSinkConfigDef {
         MaxQueueSizeProp,
         Type.INT,
         MaxQueueSizeDefault,
+        Range.atLeast(1),
         Importance.HIGH,
         MaxQueueSizeDoc,
       )
@@ -347,6 +349,7 @@ object HttpSinkConfigDef {
         MaxQueueOfferTimeoutProp,
         Type.LONG,
         MaxQueueOfferTimeoutDefault,
+        Range.atLeast(0L),
         Importance.HIGH,
         MaxQueueOfferTimeoutDoc,
       )
