@@ -54,19 +54,23 @@ class GCPStorageDirectoryLister(connectorTaskId: ConnectorTaskId, storage: Stora
      * Recursively lists subdirectories within the specified cloud location prefix up to a certain recursion level.
      *
      * This method iterates through the subdirectories of the given prefix within a cloud location, up to the specified recursion level.
-     * It filters the results based on ownership, exclusions, and wildcard patterns.
+     * `exclude` and `wildcardExcludes` are applied at every level, but `ownsDir` is applied only at the leaf level
+     * (mirroring AwsS3DirectoryLister), so that a directory is not dropped just because an ancestor of it hashes to
+     * a different task.
      *
-     * @param prefix        The prefix within the cloud location to search for subdirectories.
-     * @param recurseLevels The maximum recursion levels to search within subdirectories.
+     * @param prefix          The prefix within the cloud location to search for subdirectories.
+     * @param levelsRemaining The number of recursion levels left to search, including this one.
      * @return An iterable collection of subdirectory paths found within the specified prefix with the indicated recursion level.
      */
-    def listSubdirs(prefix: String, recurseLevels: Int): Iterable[String] = {
+    def listSubdirs(prefix: String, levelsRemaining: Int): Iterable[String] = {
       val blobListOptions = BlobListOption.dedupe(
         BlobListOption.delimiter("/"),
         BlobListOption.pageSize(filesLimit.toLong),
         BlobListOption.prefix(prefix),
         BlobListOption.currentDirectory(),
       )
+
+      val isLeafLevel = levelsRemaining <= 1
 
       val foundResults = storage
         .get(bucketAndPrefix.bucket)
@@ -76,21 +80,16 @@ class GCPStorageDirectoryLister(connectorTaskId: ConnectorTaskId, storage: Stora
         .filter(_.isDirectory)
         .map(_.getName)
         .toList
-        .filter { prefix =>
-          connectorTaskId.ownsDir(prefix) && !exclude.contains(prefix) && !wildcardExcludes.exists(we =>
-            prefix.contains(we),
-          )
+        .filter { dir =>
+          !exclude.contains(dir) && !wildcardExcludes.exists(dir.contains) &&
+          (!isLeafLevel || connectorTaskId.ownsDir(dir))
         }
 
-      logger.trace(s"[$connectorTaskId] Searching directory $prefix for $recurseLevels, found ${foundResults.size}")
+      logger.trace(
+        s"[$connectorTaskId] Searching directory $prefix for $levelsRemaining, found ${foundResults.size}",
+      )
 
-      foundResults.flatMap {
-        case d: String if recurseLevels > 1 =>
-          listSubdirs(d, recurseLevels - 1)
-        case _ =>
-          foundResults
-      }
-
+      if (isLeafLevel) foundResults else foundResults.flatMap(listSubdirs(_, levelsRemaining - 1))
     }
 
     val preWithTrailingSlash: String = ensureTrailingSlash(bucketAndPrefix.prefixOrDefault())

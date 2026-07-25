@@ -256,6 +256,57 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       ),
     )
   }
+  "lister" should "apply ownsDir only at the leaf level so every partition is owned by exactly one task" in {
+
+    val bucketName = "leaf-only-ownership"
+    val topics     = Seq("topicA", "topicB", "topicC")
+    val partitions = Seq("0000001", "0000002", "0000003")
+
+    val leafDirs: Set[String] = (for {
+      topic     <- topics
+      partition <- partitions
+    } yield s"prefix/$topic/$partition/").toSet
+
+    val files: Seq[String] = leafDirs.toSeq.zipWithIndex.map { case (dir, idx) => s"$dir$idx.txt" }
+
+    val mockClient: Storage = setUpMockClient(bucketName, files: _*)
+
+    val maxTasks = 2
+
+    def findFor(taskNo: Int): Set[String] =
+      new GCPStorageDirectoryLister(ConnectorTaskId("sinkName", maxTasks, taskNo), mockClient)
+        .findDirectories(
+          CloudLocation(bucketName, "prefix/".some),
+          filesLimit,
+          2,
+          Set.empty,
+          Set.empty,
+        ).unsafeRunSync()
+
+    val task0Dirs = findFor(0)
+    val task1Dirs = findFor(1)
+
+    // Pinned expectations (derived from Java's deterministic String.hashCode) guard against the leaf-only fix
+    // regressing back to filtering ownership at every recursion level.
+    task0Dirs should be(
+      Set(
+        "prefix/topicA/0000001/",
+        "prefix/topicA/0000003/",
+        "prefix/topicB/0000002/",
+        "prefix/topicC/0000001/",
+        "prefix/topicC/0000003/",
+      ),
+    )
+    task1Dirs should be(
+      Set("prefix/topicA/0000002/", "prefix/topicB/0000001/", "prefix/topicB/0000003/", "prefix/topicC/0000002/"),
+    )
+
+    (task0Dirs union task1Dirs) should be(leafDirs)
+    (task0Dirs intersect task1Dirs) should be(Set.empty)
+    task0Dirs should not be leafDirs
+    task1Dirs should not be leafDirs
+  }
+
   "lister" should "typical topic/partition/offset scenario without trailing slash" in {
 
     val bucketName = "typical-topic-partition-offset-no-slash"
