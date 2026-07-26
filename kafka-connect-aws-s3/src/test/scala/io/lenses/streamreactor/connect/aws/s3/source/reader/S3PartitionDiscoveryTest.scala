@@ -65,7 +65,14 @@ class S3PartitionDiscoveryTest extends AnyFlatSpecLike with Matchers with Mockit
       ),
     )
     val directoryLister = new AwsS3DirectoryLister(connectorTaskId, s3Client)
-    val options         = PartitionSearcherOptions(1, true, 100.millis, ExcludeIndexes)
+    // Every case here expects the directories one level below its root, which is a partition depth of 1.
+    val options = PartitionSearcherOptions(
+      partitionDepth     = 1,
+      prefixAsConfigured = false,
+      continuous         = true,
+      interval           = 100.millis,
+      wildcardExcludes   = ExcludeIndexes,
+    )
     val io = for {
       cancelledRef <- Ref[IO].of(false)
       readerRef    <- Ref[IO].of(Option.empty[ResultReader])
@@ -130,7 +137,14 @@ class S3PartitionDiscoveryTest extends AnyFlatSpecLike with Matchers with Mockit
       ),
     )
     val directoryLister = new AwsS3DirectoryLister(connectorTaskId, s3Client)
-    val options         = PartitionSearcherOptions(1, true, 100.millis, ExcludeIndexes)
+    // Every case here expects the directories one level below its root, which is a partition depth of 1.
+    val options = PartitionSearcherOptions(
+      partitionDepth     = 1,
+      prefixAsConfigured = false,
+      continuous         = true,
+      interval           = 100.millis,
+      wildcardExcludes   = ExcludeIndexes,
+    )
     val io = for {
       cancelledRef <- Ref[IO].of(false)
       readerRef    <- Ref[IO].of(Option.empty[ResultReader])
@@ -206,7 +220,14 @@ class S3PartitionDiscoveryTest extends AnyFlatSpecLike with Matchers with Mockit
       ),
     )
     val directoryLister = new AwsS3DirectoryLister(connectorTaskId, s3Client)
-    val options         = PartitionSearcherOptions(1, true, 100.millis, ExcludeIndexes)
+    // Every case here expects the directories one level below its root, which is a partition depth of 1.
+    val options = PartitionSearcherOptions(
+      partitionDepth     = 1,
+      prefixAsConfigured = false,
+      continuous         = true,
+      interval           = 100.millis,
+      wildcardExcludes   = ExcludeIndexes,
+    )
     val io = for {
       cancelledRef <- Ref[IO].of(false)
       readerRef    <- Ref[IO].of(Option.empty[ResultReader])
@@ -270,7 +291,13 @@ class S3PartitionDiscoveryTest extends AnyFlatSpecLike with Matchers with Mockit
       ),
     )
     val options =
-      PartitionSearcherOptions(1, continuous = true, interval = 100.millis, wildcardExcludes = ExcludeIndexes)
+      PartitionSearcherOptions(
+        partitionDepth     = 1,
+        prefixAsConfigured = false,
+        continuous         = true,
+        interval           = 100.millis,
+        wildcardExcludes   = ExcludeIndexes,
+      )
     List(0 -> "prefix1/subprefix_abc/", 1 -> "prefix1/subprefix_untitled/", 2 -> "prefix1/subprefix_xyz01/").foreach {
       case (i, partition) =>
         val taskId = ConnectorTaskId("sinkName", 3, i)

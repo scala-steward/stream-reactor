@@ -22,8 +22,13 @@ import org.apache.kafka.common.config.ConfigDef.Type
 trait CloudSourceSettingsKeys extends WithConnectorPrefix {
   val SOURCE_PARTITION_SEARCH_RECURSE_LEVELS: String = s"$connectorPrefix.source.partition.search.recurse.levels"
   private val SOURCE_PARTITION_SEARCH_RECURSE_LEVELS_DOC: String =
-    "When searching for new partitions on the S3 filesystem, how many levels deep to recurse."
+    s"Deprecated, use `$connectorPrefix.source.partition.search.depth` instead.  This setting does not mean the same depth on every cloud: on S3 the partition directories are found at 'recurse levels + 1' levels below the prefix, whereas on GCP Storage they are found at 'recurse levels' below it."
   private val SOURCE_PARTITION_SEARCH_RECURSE_LEVELS_DEFAULT: Int = 0
+
+  val SOURCE_PARTITION_SEARCH_DEPTH: String = s"$connectorPrefix.source.partition.search.depth"
+  private val SOURCE_PARTITION_SEARCH_DEPTH_DOC: String =
+    "How many directory levels below the configured prefix the partition directories live at, meaning the same on every cloud. 0 treats the prefix itself as the single partition directory, 1 its immediate children, and so on. When left unset the deprecated 'source.partition.search.recurse.levels' is used instead."
+  val SOURCE_PARTITION_SEARCH_DEPTH_UNSET: Int = -1
 
   val SOURCE_PARTITION_SEARCH_INTERVAL_MILLIS: String = s"$connectorPrefix.source.partition.search.interval"
   private val SOURCE_PARTITION_SEARCH_INTERVAL_MILLIS_DOC: String =
@@ -127,6 +132,18 @@ trait CloudSourceSettingsKeys extends WithConnectorPrefix {
       ConfigDef.Width.MEDIUM,
       SOURCE_PARTITION_SEARCH_RECURSE_LEVELS,
     )
+      .define(
+        SOURCE_PARTITION_SEARCH_DEPTH,
+        Type.INT,
+        SOURCE_PARTITION_SEARCH_DEPTH_UNSET,
+        ConfigDef.Range.atLeast(SOURCE_PARTITION_SEARCH_DEPTH_UNSET),
+        Importance.LOW,
+        SOURCE_PARTITION_SEARCH_DEPTH_DOC,
+        "Source",
+        3,
+        ConfigDef.Width.MEDIUM,
+        SOURCE_PARTITION_SEARCH_DEPTH,
+      )
       .define(
         SOURCE_PARTITION_SEARCH_MODE,
         Type.BOOLEAN,

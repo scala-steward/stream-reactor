@@ -71,9 +71,10 @@ class CloudPartitionSearcher(
       filesLimit <- IO.fromEither(fFilesLimit(root))
       foundPartitions <- directoryLister.findDirectories(root,
                                                          filesLimit,
-                                                         settings.recurseLevels,
+                                                         settings.partitionDepth,
                                                          originalPartitions,
                                                          settings.wildcardExcludes,
+                                                         settings.prefixAsConfigured,
       )
       _ <- IO {
         if (foundPartitions.nonEmpty)

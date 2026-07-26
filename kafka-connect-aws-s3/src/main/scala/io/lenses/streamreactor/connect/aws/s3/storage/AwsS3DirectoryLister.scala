@@ -16,105 +16,39 @@
 package io.lenses.streamreactor.connect.aws.s3.storage
 
 import cats.effect.IO
-import cats.implicits._
-import com.typesafe.scalalogging.LazyLogging
 import io.lenses.streamreactor.connect.cloud.common.config.ConnectorTaskId
-import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocation
-import io.lenses.streamreactor.connect.cloud.common.storage.DirectoryLister
+import io.lenses.streamreactor.connect.cloud.common.storage.DepthDirectoryLister
 import software.amazon.awssdk.services.s3.S3Client
 import software.amazon.awssdk.services.s3.model._
 
 import scala.jdk.CollectionConverters.IteratorHasAsScala
 
 class AwsS3DirectoryLister(connectorTaskId: ConnectorTaskId, s3Client: S3Client)
-    extends LazyLogging
-    with DirectoryLister {
+    extends DepthDirectoryLister(connectorTaskId) {
 
-  private val listObjectsF: ListObjectsV2Request => IO[Iterator[ListObjectsV2Response]] =
-    e => IO(s3Client.listObjectsV2Paginator(e).iterator().asScala)
-
-  /**
-   * @param wildcardExcludes allows ignoring paths containing certain strings.  Mainly it is used to prevent us from reading anything inside the .indexes key prefix, as these should be ignored by the source.
-   */
-  override def findDirectories(
-    bucketAndPrefix:  CloudLocation,
-    filesLimit:       Int,
-    recurseLevels:    Int,
-    exclude:          Set[String],
-    wildcardExcludes: Set[String],
-  ): IO[Set[String]] =
-    for {
-      iterator   <- listObjects(filesLimit, bucketAndPrefix)
-      prefixInfo <- extractPrefixesFromResponse(iterator, exclude, wildcardExcludes, recurseLevels)
-      flattened  <- flattenPrefixes(bucketAndPrefix, filesLimit, prefixInfo, recurseLevels, exclude, wildcardExcludes)
-    } yield flattened
-
-  private def listObjects(filesLimit: Int, bucketAndPrefix: CloudLocation): IO[Iterator[ListObjectsV2Response]] = {
-
-    def createListObjectsRequest(
-      bucketAndPrefix: CloudLocation,
-    ): ListObjectsV2Request = {
-
+  override protected def listChildDirectories(bucket: String, prefix: String, filesLimit: Int): IO[Set[String]] =
+    IO {
       val builder = ListObjectsV2Request
         .builder()
         .maxKeys(filesLimit)
-        .bucket(bucketAndPrefix.bucket)
+        .bucket(bucket)
         .delimiter("/")
-      bucketAndPrefix.prefix.foreach(builder.prefix)
-      builder.build()
-    }
+      if (prefix.nonEmpty) builder.prefix(prefix)
 
-    listObjectsF(createListObjectsRequest(bucketAndPrefix))
-  }
-
-  /**
-   * @param wildcardExcludes allows ignoring paths containing certain strings.  Mainly it is used to prevent us from reading anything inside the .indexes key prefix, as these should be ignored by the source.
-   */
-  private def flattenPrefixes(
-    bucketAndPrefix:  CloudLocation,
-    filesLimit:       Int,
-    prefixes:         Set[String],
-    recurseLevels:    Int,
-    exclude:          Set[String],
-    wildcardExcludes: Set[String],
-  ): IO[Set[String]] =
-    if (recurseLevels <= 0) IO.delay(prefixes)
-    else {
-      prefixes.map(bucketAndPrefix.fromRoot).toList
-        .traverse((bucketAndPrefix: CloudLocation) =>
-          findDirectories(bucketAndPrefix, filesLimit, recurseLevels - 1, exclude, wildcardExcludes),
-        )
-        .map { result =>
-          result.foldLeft(Set.empty[String])(_ ++ _)
+      s3Client
+        .listObjectsV2Paginator(builder.build())
+        .iterator()
+        .asScala
+        .foldLeft(Set.empty[String]) {
+          case (acc, listResp) =>
+            // With a delimiter set, S3 collapses everything below the next `/` into a common prefix, so the common
+            // prefixes are the child directories and `contents` holds only the objects directly in this one.  Each
+            // prefix is the full key up to and including that `/`, which is the directory path we want.  Listing
+            // `topic-1/` over keys `topic-1/0/1.avro`, `topic-1/0/2.avro` and `topic-1/1/3.avro` yields the common
+            // prefixes `topic-1/0/` and `topic-1/1/`.
+            acc ++ Option(listResp.commonPrefixes())
+              .map(_.iterator().asScala.map(_.prefix()).toSet)
+              .getOrElse(Set.empty)
         }
-    }
-
-  private def extractPrefixesFromResponse(
-    iterator:         Iterator[ListObjectsV2Response],
-    exclude:          Set[String],
-    wildcardExcludes: Set[String],
-    levelsToRecurse:  Int,
-  ): IO[Set[String]] =
-    IO {
-      val paths = iterator.foldLeft(Set.empty[String]) {
-        case (acc, listResp) =>
-          val commonPrefixesFiltered =
-            Option(listResp.commonPrefixes()).map(_.iterator().asScala).getOrElse(Iterator.empty)
-              .foldLeft(Set.empty[String]) { (acc, item) =>
-                val prefix = item.prefix()
-                if (levelsToRecurse > 0) {
-                  acc + prefix
-                } else {
-                  if (
-                    connectorTaskId.ownsDir(prefix) && !exclude.contains(prefix) && !wildcardExcludes.exists(we =>
-                      prefix.contains(we),
-                    )
-                  ) acc + prefix
-                  else acc
-                }
-              }
-          acc ++ commonPrefixesFiltered
-      }
-      paths
     }
 }

@@ -33,10 +33,10 @@ class CommitRetryConfigDefTest extends AnyFlatSpec with Matchers {
   private val configDef: ConfigDef = configKeys.addCommitRetrySettingsToConfigDef(new ConfigDef())
 
   private def minimalValidProps: Map[String, String] = Map(
-    configKeys.COMMIT_RETRY_MAX_ATTEMPTS -> "5",
+    configKeys.COMMIT_RETRY_MAX_ATTEMPTS  -> "5",
     configKeys.COMMIT_RETRY_BASE_DELAY_MS -> "200",
-    configKeys.COMMIT_RETRY_MULTIPLIER -> "2.0",
-    configKeys.COMMIT_RETRY_MAX_DELAY_MS -> "5000",
+    configKeys.COMMIT_RETRY_MULTIPLIER    -> "2.0",
+    configKeys.COMMIT_RETRY_MAX_DELAY_MS  -> "5000",
   )
 
   "CommitRetryConfigDef" should "parse valid defaults without error" in {
@@ -44,11 +44,15 @@ class CommitRetryConfigDefTest extends AnyFlatSpec with Matchers {
   }
 
   it should "accept multiplier equal to 1.0 (constant interval)" in {
-    noException should be thrownBy configDef.parse(minimalValidProps.updated(configKeys.COMMIT_RETRY_MULTIPLIER, "1.0").asJava)
+    noException should be thrownBy configDef.parse(minimalValidProps.updated(configKeys.COMMIT_RETRY_MULTIPLIER,
+                                                                             "1.0",
+    ).asJava)
   }
 
   it should "accept multiplier of 1.5" in {
-    noException should be thrownBy configDef.parse(minimalValidProps.updated(configKeys.COMMIT_RETRY_MULTIPLIER, "1.5").asJava)
+    noException should be thrownBy configDef.parse(minimalValidProps.updated(configKeys.COMMIT_RETRY_MULTIPLIER,
+                                                                             "1.5",
+    ).asJava)
   }
 
   it should "reject multiplier below 1.0" in {

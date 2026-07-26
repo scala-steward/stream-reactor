@@ -123,6 +123,10 @@ class CloudSourceSettingsTest extends AnyFlatSpec with Matchers with OptionValue
 
     override def getList(key: String): util.List[String] = ???
 
+    override protected def explicitlySetKeys: Set[String] = Set.empty
+
+    override protected def legacyRecurseLevels(levels: Int): (Int, Boolean) = (levels, false)
+
     override def connectorPrefix: String = "my.connector"
   }
 }

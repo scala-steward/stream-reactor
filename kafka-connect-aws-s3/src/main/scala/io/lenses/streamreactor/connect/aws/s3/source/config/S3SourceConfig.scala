@@ -48,12 +48,13 @@ object S3SourceConfig extends PropsToConfigConverter[S3SourceConfig] {
         s3ConfigDefBuilder,
         s3ConfigDefBuilder.getPartitionExtractor(parsedValues),
       )
-      backoff = s3ConfigDefBuilder.getEmptySourceBackoffSettings(parsedValues)
+      backoff            = s3ConfigDefBuilder.getEmptySourceBackoffSettings(parsedValues)
+      partitionSearcher <- s3ConfigDefBuilder.getPartitionSearcherOptions(parsedValues)
     } yield S3SourceConfig(
       S3ConnectionConfig(parsedValues),
       sbo,
       s3ConfigDefBuilder.getCompressionCodec(),
-      s3ConfigDefBuilder.getPartitionSearcherOptions(parsedValues),
+      partitionSearcher,
       s3ConfigDefBuilder.batchDelete(),
       s3ConfigDefBuilder.getSourceExtensionFilter,
       backoff,

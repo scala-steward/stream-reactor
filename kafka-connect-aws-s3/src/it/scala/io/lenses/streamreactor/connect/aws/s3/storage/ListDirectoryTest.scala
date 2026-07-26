@@ -47,7 +47,7 @@ class ListDirectoryTest
     new AwsS3DirectoryLister(connectorTaskId, client).findDirectories(
       topicRoot,
       filesLimit,
-      0,
+      1,
       Set.empty,
       Set.empty,
     ).asserting {
@@ -60,27 +60,7 @@ class ListDirectoryTest
 
   }
 
-  "s3StorageInterface" should "return empty on directories within a path 2 levels deep from bucket root" in {
-
-    val taskId = ConnectorTaskId("sinkName", 1, 0)
-
-    val bucketRoot = CloudLocation(BucketName)
-
-    new AwsS3DirectoryLister(taskId, client).findDirectories(bucketRoot,
-                                                             filesLimit,
-                                                             2,
-                                                             Set.empty,
-                                                             Set.empty,
-    ).asserting {
-      dirs =>
-        val partitionResults = Set.empty
-        dirs should be(partitionResults)
-        ()
-    }
-
-  }
-
-  "s3StorageInterface" should "return empty on listing directories within a path 3 levels deep from bucket root" in {
+  "s3StorageInterface" should "return empty on directories within a path 3 levels deep from bucket root" in {
 
     val taskId = ConnectorTaskId("sinkName", 1, 0)
 
@@ -100,7 +80,7 @@ class ListDirectoryTest
 
   }
 
-  "s3StorageInterface" should "list directories within a path 1 levels deep from bucket root" in {
+  "s3StorageInterface" should "return empty on listing directories within a path 4 levels deep from bucket root" in {
 
     val taskId = ConnectorTaskId("sinkName", 1, 0)
 
@@ -108,7 +88,27 @@ class ListDirectoryTest
 
     new AwsS3DirectoryLister(taskId, client).findDirectories(bucketRoot,
                                                              filesLimit,
-                                                             1,
+                                                             4,
+                                                             Set.empty,
+                                                             Set.empty,
+    ).asserting {
+      dirs =>
+        val partitionResults = Set.empty
+        dirs should be(partitionResults)
+        ()
+    }
+
+  }
+
+  "s3StorageInterface" should "list directories within a path 2 levels deep from bucket root" in {
+
+    val taskId = ConnectorTaskId("sinkName", 1, 0)
+
+    val bucketRoot = CloudLocation(BucketName)
+
+    new AwsS3DirectoryLister(taskId, client).findDirectories(bucketRoot,
+                                                             filesLimit,
+                                                             2,
                                                              Set.empty,
                                                              Set.empty,
     ).asserting {
@@ -117,6 +117,26 @@ class ListDirectoryTest
 
         val partitionResults = allValues.toSet
         dirs should be(partitionResults)
+        ()
+    }
+
+  }
+
+  // Same layout, same depth and same expectations as the GCP Storage lister asserts in
+  // GCPStorageDirectoryListerTest, so the two clouds cannot drift apart again.  See LC-316.
+  "s3StorageInterface" should "discover a topic/partition layout at the same depth as the GCP Storage lister" in {
+
+    val taskId = ConnectorTaskId("sinkName", 1, 0)
+
+    new AwsS3DirectoryLister(taskId, client).findDirectories(
+      CloudLocation(BucketName, "topic-1/".some),
+      filesLimit,
+      1,
+      Set.empty,
+      Set.empty,
+    ).asserting {
+      dirs =>
+        dirs should be((1 to 10).map(partition => s"topic-1/$partition/").toSet)
         ()
     }
 
