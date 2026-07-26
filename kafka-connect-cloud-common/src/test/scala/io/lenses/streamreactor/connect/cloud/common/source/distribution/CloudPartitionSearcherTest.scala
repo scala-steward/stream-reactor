@@ -89,7 +89,7 @@ class CloudPartitionSearcherTest extends AnyFlatSpec with Matchers {
   }
 
   // A legacy configuration searched from the prefix exactly as configured, so the searcher has to ask for that or a
-  // prefix without a trailing slash stops behaving as it did.  See LC-316.
+  // prefix without a trailing slash stops behaving as it did.
   "the searcher" should "ask for the configured depth and prefix handling for every root" in {
     searchesFor(options(partitionDepth = 1, prefixAsConfigured = true)) should be(
       Map(

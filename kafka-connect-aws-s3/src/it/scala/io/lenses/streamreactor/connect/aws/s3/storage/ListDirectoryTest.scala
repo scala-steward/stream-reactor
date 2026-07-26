@@ -123,7 +123,7 @@ class ListDirectoryTest
   }
 
   // Same layout, same depth and same expectations as the GCP Storage lister asserts in
-  // GCPStorageDirectoryListerTest, so the two clouds cannot drift apart again.  See LC-316.
+  // GCPStorageDirectoryListerTest, so the two clouds cannot drift apart again.
   "s3StorageInterface" should "discover a topic/partition layout at the same depth as the GCP Storage lister" in {
 
     val taskId = ConnectorTaskId("sinkName", 1, 0)

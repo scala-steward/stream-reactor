@@ -133,7 +133,6 @@ class DepthDirectoryListerTest extends AnyFlatSpec with Matchers {
   // The shape of the S3 source envelope integration tests: a single object sitting directly in the configured prefix.
   // Searching from the prefix as configured spends the first level arriving at the directory, so it lands one level
   // shallower than searching from the directory itself, and a prefix that already ends in a slash is unaffected.
-  // See LC-316.
   "findDirectories" should "land one level shallower when searching from a prefix without a trailing slash" in {
     val keys = Set("backups/avro/0")
 

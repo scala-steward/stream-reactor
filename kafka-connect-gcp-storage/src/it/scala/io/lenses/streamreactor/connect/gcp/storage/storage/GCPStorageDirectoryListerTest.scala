@@ -330,7 +330,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
 
     val perTask = (0 until maxTasks).map(findFor)
 
-    // Before LC-316 every task returned the prefix, so every task read every file under it.
+    // Previously every task returned the prefix, so every task read every file under it.
     perTask.count(_.nonEmpty) should be(1)
     perTask.reduce(_ union _) should be(Set("prefix/"))
   }
@@ -351,7 +351,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
   }
 
   // Same layout, same depth and same expectations as the S3 lister asserts in ListDirectoryTest, so the two clouds
-  // cannot drift apart again.  See LC-316.
+  // cannot drift apart again.
   "lister" should "discover a topic/partition layout at the same depth as the S3 lister" in {
 
     val bucketName = "cross-cloud-depth-parity"

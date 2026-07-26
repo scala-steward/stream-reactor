@@ -108,7 +108,7 @@ class GCPStorageSourceConfigTest extends AnyFunSuite with EitherValues with Opti
   }
 
   // The GCP Storage lister always searched from the directory the prefix names, so unlike S3 the depth never depended on
-  // the prefix spelling and the search must not start at the prefix as configured.  See LC-316.
+  // the prefix spelling and the search must not start at the prefix as configured.
   test("the search always starts from the directory the prefix names on GCP Storage") {
     searcherOptionsFor(
       "connect.gcpstorage.source.partition.search.recurse.levels" -> "1",

@@ -24,7 +24,7 @@ object PartitionSearcherOptions {
 
 /**
  * @param partitionDepth      how many directory levels below the prefix the partition directories live at.  0 means the prefix itself.
- * @param prefixAsConfigured  set when the depth came from the deprecated `recurse.levels` on a backend that searched from the prefix exactly as configured rather than from the directory it names, which is how S3 behaved.  See LC-316.
+ * @param prefixAsConfigured  set when the depth came from the deprecated `recurse.levels` on a backend that searched from the prefix exactly as configured rather than from the directory it names, which is how S3 behaved.
  * @param wildcardExcludes    allows ignoring paths containing certain strings.  Mainly it is used to prevent us from reading anything inside the .indexes key prefix, as these should be ignored by the source.
  */
 case class PartitionSearcherOptions(

@@ -34,7 +34,7 @@ trait DirectoryLister {
    * so a directory is not dropped because an ancestor of it hashes to a different task.
    *
    * @param wildcardExcludes    allows ignoring paths containing certain strings.  Mainly it is used to prevent us from reading anything inside the .indexes key prefix, as these should be ignored by the source.
-   * @param prefixAsConfigured  searches from the prefix exactly as configured rather than from the directory it names, which is how the deprecated `recurse.levels` behaved on S3.  A prefix without a trailing slash then spends its first level reaching the directory it names, and matches sibling directories sharing its name, because the cloud treats it as a key prefix rather than a directory.  See LC-316.
+   * @param prefixAsConfigured  searches from the prefix exactly as configured rather than from the directory it names, which is how the deprecated `recurse.levels` behaved on S3.  A prefix without a trailing slash then spends its first level reaching the directory it names, and matches sibling directories sharing its name, because the cloud treats it as a key prefix rather than a directory.
    */
   def findDirectories(
     bucketAndPrefix:    CloudLocation,

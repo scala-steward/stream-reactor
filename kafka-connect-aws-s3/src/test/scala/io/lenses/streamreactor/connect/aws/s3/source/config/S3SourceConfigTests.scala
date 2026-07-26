@@ -82,7 +82,7 @@ class S3SourceConfigTests
     ) shouldBe legacyOptions(partitionDepth = 2, continuous = true)
   }
   // The old S3 lister counted its first level from the prefix as configured, so the depth is one greater and the search
-  // has to start there for a prefix without a trailing slash to behave as it did.  See LC-316.
+  // has to start there for a prefix without a trailing slash to behave as it did.
   test("the deprecated recurse levels searches one level deeper from the prefix as configured") {
     configFrom(SOURCE_PARTITION_SEARCH_RECURSE_LEVELS -> "0").partitionDepth shouldBe 1
     configFrom(SOURCE_PARTITION_SEARCH_RECURSE_LEVELS -> "2").partitionDepth shouldBe 3
