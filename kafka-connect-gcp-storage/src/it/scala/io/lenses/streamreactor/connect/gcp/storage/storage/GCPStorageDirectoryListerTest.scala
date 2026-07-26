@@ -40,7 +40,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       client           = mockClient,
       connectorTaskId  = connectorTaskId,
       location         = CloudLocation(bucketName, none),
-      recursiveLevel   = 0,
+      partitionDepth   = 0,
       exclude          = Set.empty,
       wildcardExcludes = Set.empty,
       expected         = Set(""),
@@ -56,7 +56,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       client           = mockClient,
       connectorTaskId  = connectorTaskId,
       location         = CloudLocation(bucketName, none),
-      recursiveLevel   = 1,
+      partitionDepth   = 1,
       exclude          = Set.empty,
       wildcardExcludes = Set.empty,
       expected         = Set("prefix1/", "prefix2/", "prefix3/", "prefix4/"),
@@ -78,7 +78,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       client           = mockClient,
       connectorTaskId  = connectorTaskId,
       location         = CloudLocation(bucketName, none),
-      recursiveLevel   = 2,
+      partitionDepth   = 2,
       exclude          = Set.empty,
       wildcardExcludes = Set.empty,
       expected         = Set("prefix1/sub1/", "prefix2/sub2/", "prefix3/sub3/", "prefix4/sub4/"),
@@ -99,7 +99,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
     check(
       client           = mockClient,
       location         = CloudLocation(bucketName, none),
-      recursiveLevel   = 1,
+      partitionDepth   = 1,
       exclude          = Set("prefix1/", "prefix4/"),
       wildcardExcludes = Set.empty,
       expected         = Set("prefix2/", "prefix3/"),
@@ -123,7 +123,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       client           = mockClient,
       connectorTaskId  = taskId1,
       location         = CloudLocation(bucketName, none),
-      recursiveLevel   = 1,
+      partitionDepth   = 1,
       exclude          = Set.empty,
       wildcardExcludes = Set.empty,
       expected         = Set("prefix2/", "prefix4/"),
@@ -133,7 +133,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       client           = mockClient,
       connectorTaskId  = taskId2,
       location         = CloudLocation(bucketName, none),
-      recursiveLevel   = 1,
+      partitionDepth   = 1,
       exclude          = Set.empty,
       wildcardExcludes = Set.empty,
       expected         = Set("prefix1/", "prefix3/"),
@@ -143,7 +143,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       client           = mockClient,
       connectorTaskId  = taskId1,
       location         = CloudLocation(bucketName, none),
-      recursiveLevel   = 1,
+      partitionDepth   = 1,
       exclude          = Set("prefix2/", "prefix4/"),
       wildcardExcludes = Set.empty,
       expected         = Set.empty,
@@ -153,7 +153,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       client           = mockClient,
       connectorTaskId  = taskId2,
       location         = CloudLocation(bucketName, none),
-      recursiveLevel   = 1,
+      partitionDepth   = 1,
       exclude          = Set("prefix1/", "prefix3/"),
       wildcardExcludes = Set.empty,
       expected         = Set.empty,
@@ -163,7 +163,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       client           = mockClient,
       connectorTaskId  = taskId1,
       location         = CloudLocation(bucketName, none),
-      recursiveLevel   = 1,
+      partitionDepth   = 1,
       exclude          = Set("prefix2/"),
       wildcardExcludes = Set.empty,
       expected         = Set("prefix4/"),
@@ -173,7 +173,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       client           = mockClient,
       connectorTaskId  = taskId2,
       location         = CloudLocation(bucketName, none),
-      recursiveLevel   = 1,
+      partitionDepth   = 1,
       exclude          = Set("prefix1/"),
       wildcardExcludes = Set.empty,
       expected         = Set("prefix3/"),
@@ -199,13 +199,13 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       location         = CloudLocation(bucketName, "prefix1/".some),
       exclude          = Set.empty,
       wildcardExcludes = Set(".indexes"),
-      recursiveLevel   = 0,
+      partitionDepth   = 0,
       expected         = Set("prefix1/"),
     )
     check(
       client           = mockClient,
       location         = CloudLocation(bucketName, "prefix2/".some),
-      recursiveLevel   = 0,
+      partitionDepth   = 0,
       exclude          = Set.empty,
       wildcardExcludes = Set(".indexes"),
       expected         = Set("prefix2/"),
@@ -213,7 +213,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
     check(
       client           = mockClient,
       location         = CloudLocation(bucketName, "prefix3/".some),
-      recursiveLevel   = 1,
+      partitionDepth   = 1,
       exclude          = Set.empty,
       wildcardExcludes = Set(".indexes"),
       expected         = Set.empty,
@@ -221,7 +221,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
     check(
       client           = mockClient,
       location         = CloudLocation(bucketName, None),
-      recursiveLevel   = 1,
+      partitionDepth   = 1,
       exclude          = Set.empty,
       wildcardExcludes = Set(".indexes"),
       expected         = Set("prefix1/", "prefix2/"),
@@ -247,7 +247,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       location         = CloudLocation(bucketName, "/my/prefix/".some),
       exclude          = Set.empty,
       wildcardExcludes = Set(".indexes"),
-      recursiveLevel   = 2,
+      partitionDepth   = 2,
       expected = Set(
         "/my/prefix/myTopic/0000001/",
         "/my/prefix/myTopic/0000002/",
@@ -307,6 +307,70 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
     task1Dirs should not be leafDirs
   }
 
+  "lister" should "assign the single directory found at depth 0 to exactly one task" in {
+
+    val bucketName = "depth-zero-ownership"
+    val mockClient: Storage = setUpMockClient(
+      bucketName,
+      "prefix/myTopic/0000001/1.txt",
+      "prefix/myTopic/0000002/2.txt",
+    )
+
+    val maxTasks = 2
+
+    def findFor(taskNo: Int): Set[String] =
+      new GCPStorageDirectoryLister(ConnectorTaskId("sinkName", maxTasks, taskNo), mockClient)
+        .findDirectories(
+          CloudLocation(bucketName, "prefix/".some),
+          filesLimit,
+          0,
+          Set.empty,
+          Set.empty,
+        ).unsafeRunSync()
+
+    val perTask = (0 until maxTasks).map(findFor)
+
+    // Previously every task returned the prefix, so every task read every file under it.
+    perTask.count(_.nonEmpty) should be(1)
+    perTask.reduce(_ union _) should be(Set("prefix/"))
+  }
+
+  "lister" should "not rediscover the prefix at depth 0 once it is a known partition" in {
+
+    val bucketName = "depth-zero-exclude"
+    val mockClient: Storage = setUpMockClient(bucketName, "prefix/myTopic/0000001/1.txt")
+
+    check(
+      client           = mockClient,
+      location         = CloudLocation(bucketName, "prefix/".some),
+      partitionDepth   = 0,
+      exclude          = Set("prefix/"),
+      wildcardExcludes = Set.empty,
+      expected         = Set.empty,
+    )
+  }
+
+  // Same layout, same depth and same expectations as the S3 lister asserts in ListDirectoryTest, so the two clouds
+  // cannot drift apart again.
+  "lister" should "discover a topic/partition layout at the same depth as the S3 lister" in {
+
+    val bucketName = "cross-cloud-depth-parity"
+    val mockClient: Storage = setUpMockClient(
+      bucketName,
+      ((1 to 10).map(partition => s"topic-1/$partition/1.txt") ++
+        (1 to 10).map(partition => s"topic-2/$partition/1.txt")): _*,
+    )
+
+    check(
+      client           = mockClient,
+      location         = CloudLocation(bucketName, "topic-1/".some),
+      partitionDepth   = 1,
+      exclude          = Set.empty,
+      wildcardExcludes = Set.empty,
+      expected         = (1 to 10).map(partition => s"topic-1/$partition/").toSet,
+    )
+  }
+
   "lister" should "typical topic/partition/offset scenario without trailing slash" in {
 
     val bucketName = "typical-topic-partition-offset-no-slash"
@@ -326,7 +390,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       location         = CloudLocation(bucketName, "/my/prefix/".some),
       exclude          = Set.empty,
       wildcardExcludes = Set(".indexes"),
-      recursiveLevel   = 2,
+      partitionDepth   = 2,
       expected = Set(
         "/my/prefix/myTopic/0000001/",
         "/my/prefix/myTopic/0000002/",
@@ -345,7 +409,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
     client:           Storage,
     connectorTaskId:  ConnectorTaskId = connectorTaskId,
     location:         CloudLocation,
-    recursiveLevel:   Int,
+    partitionDepth:   Int,
     exclude:          Set[String],
     wildcardExcludes: Set[String],
     expected:         Set[String],
@@ -354,7 +418,7 @@ class GCPStorageDirectoryListerTest extends GCPProxyContainerTest with Matchers 
       .findDirectories(
         location,
         filesLimit,
-        recursiveLevel,
+        partitionDepth,
         exclude,
         wildcardExcludes,
       ).unsafeRunSync() should be(expected)

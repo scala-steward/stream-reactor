@@ -43,8 +43,15 @@ class PartitionDiscoveryTest extends AnyFlatSpecLike with Matchers with MockitoS
   private val noPostProcessAction = Option.empty[PostProcessAction]
   "PartitionDiscovery" should "handle failure on PartitionSearcher and resume" in {
     val fileQueueProcessor: SourceFileQueue = mock[SourceFileQueue]
-    val limit   = 10
-    val options = PartitionSearcherOptions(1, continuous = true, 100.millis, ExcludeIndexes)
+    val limit = 10
+    // The searcher is stubbed below, so the depth is never resolved against a prefix here.
+    val options = PartitionSearcherOptions(
+      partitionDepth     = 1,
+      prefixAsConfigured = false,
+      continuous         = true,
+      interval           = 100.millis,
+      wildcardExcludes   = ExcludeIndexes,
+    )
 
     trait Count {
       def getCount: IO[Int]
@@ -116,7 +123,8 @@ class PartitionDiscoveryTest extends AnyFlatSpecLike with Matchers with MockitoS
         ),
       ),
     )
-    callsMade >= 1
+    // The first search always raises, so anything less than two calls means the loop never resumed.
+    callsMade should be >= 2
   }
 
 }

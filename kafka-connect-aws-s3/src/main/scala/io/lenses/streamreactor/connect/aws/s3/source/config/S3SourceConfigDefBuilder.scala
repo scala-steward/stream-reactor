@@ -27,4 +27,10 @@ case class S3SourceConfigDefBuilder(props: Map[String, AnyRef])
 
   def getParsedValues: Map[String, _] = values().asScala.toMap
 
+  // The S3 lister searched from the prefix exactly as configured and counted that as its first level, so a recurse level
+  // of N searched N + 1 levels from the prefix as written.  For a prefix ending in `/` that is N + 1 levels below the
+  // directory, but for one without a trailing slash the first level is spent reaching the directory, and sibling
+  // directories sharing the prefix are matched too.
+  override protected def legacyRecurseLevels(levels: Int): (Int, Boolean) = ((levels max 0) + 1, true)
+
 }

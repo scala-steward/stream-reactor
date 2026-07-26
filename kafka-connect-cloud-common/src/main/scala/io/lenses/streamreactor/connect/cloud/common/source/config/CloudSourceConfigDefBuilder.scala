@@ -22,6 +22,8 @@ import io.lenses.streamreactor.common.config.base.traits.NumberRetriesSettings
 import io.lenses.streamreactor.connect.cloud.common.config.CompressionCodecSettings
 import org.apache.kafka.common.config.ConfigDef
 
+import scala.jdk.CollectionConverters.SetHasAsScala
+
 abstract class CloudSourceConfigDefBuilder(
   connectorPrefix: String,
   configDef:       ConfigDef,
@@ -31,4 +33,7 @@ abstract class CloudSourceConfigDefBuilder(
     with KcqlSettings
     with ErrorPolicySettings
     with NumberRetriesSettings
-    with CompressionCodecSettings {}
+    with CompressionCodecSettings {
+
+  override protected def explicitlySetKeys: Set[String] = originals().keySet().asScala.toSet
+}

@@ -91,7 +91,7 @@ class S3SourceTaskTest
     val dirs =
       new AwsS3DirectoryLister(ConnectorTaskId("name", 1, 1), client).findDirectories(root,
                                                                                       filesLimit,
-                                                                                      0,
+                                                                                      1,
                                                                                       Set.empty,
                                                                                       Set.empty,
       )
@@ -311,7 +311,9 @@ class S3SourceTaskTest
 
   "task" should "read stored bytes files continuously" in {
     val format = Format.Bytes
-    val dir    = "bytes"
+    // setUpTestData only writes the Bytes fixture to `bytesval`; asking for `bytes` used to reach it only because the
+    // prefix was matched as a key prefix rather than as a directory.
+    val dir = "bytesval"
 
     val task = new S3SourceTask()
 

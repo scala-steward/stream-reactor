@@ -139,6 +139,7 @@ abstract class CloudSourceTask[MD <: FileMetadata, C <: CloudSourceConfig[MD], C
     for {
       connectorTaskId <- IO.fromEither(new ConnectorTaskIdCreator(connectorPrefix).fromProps(props))
       config          <- IO.fromEither(convertPropsToConfig(connectorTaskId, props))
+      _               <- IO.delay(warnIfSinglePartitionAcrossTasks(connectorTaskId, config))
       client          <- IO.fromEither(createClient(config))
       storageInterface: StorageInterface[MD] <- IO.delay(createStorageInterface(connectorTaskId, config, client))
 
@@ -191,6 +192,16 @@ abstract class CloudSourceTask[MD <: FileMetadata, C <: CloudSourceConfig[MD], C
         lateArrivalTouchLoop,
       )
     }
+
+  /**
+   * At a partition depth of 0 the configured prefix is the only partition directory, and it is owned by exactly one
+   * task, so every other task stays idle.
+   */
+  private def warnIfSinglePartitionAcrossTasks(connectorTaskId: ConnectorTaskId, config: C): Unit =
+    if (config.partitionSearcher.partitionDepth == 0 && connectorTaskId.maxTasks > 1)
+      logger.warn(
+        s"[${connectorTaskId.show}] A partition search depth of 0 discovers the configured prefix as the only partition directory, so only one of the ${connectorTaskId.maxTasks} tasks will read anything. Increase the partition search depth to the level the partition directories live at to spread the work.",
+      )
 
   def createStorageInterface(connectorTaskId: ConnectorTaskId, config: C, client: CT): StorageInterface[MD]
 

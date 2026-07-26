@@ -27,4 +27,8 @@ case class GCPStorageSourceConfigDefBuilder(props: Map[String, AnyRef])
 
   def getParsedValues: Map[String, _] = values().asScala.toMap
 
+  // The GCP Storage lister searched from the directory the prefix names, whatever the spelling, and recursed exactly as
+  // many levels as configured, so a recurse level of N found directories N levels below it.
+  override protected def legacyRecurseLevels(levels: Int): (Int, Boolean) = (levels max 0, false)
+
 }
