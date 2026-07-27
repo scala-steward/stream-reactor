@@ -54,6 +54,10 @@ object SamplePages extends MockitoSugar {
     val blobName = s"${(page * 10) + no}.txt"
     when(blob.getCreateTimeOffsetDateTime).thenReturn(OffsetDateTime.now())
     when(blob.getName).thenReturn(blobName)
+    // Explicit non-empty size so these fixtures represent real data files. (Unknown/null size
+    // is fail-open in isDataObject and would still keep the blob, so this stub is documentary
+    // rather than load-bearing for the filter.)
+    when(blob.getSize).thenReturn(100L)
     blob
   }
 }

@@ -22,8 +22,13 @@ import io.lenses.streamreactor.connect.cloud.common.config.ConnectorTaskId
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.NoOverwriteExistingObject
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.ObjectWithETag
 import io.lenses.streamreactor.connect.cloud.common.storage.FileCreateError
+import io.lenses.streamreactor.connect.cloud.common.storage.FileListError
+import io.lenses.streamreactor.connect.cloud.common.storage.FileMetadata
 import io.lenses.streamreactor.connect.cloud.common.storage.FileMoveError
+import io.lenses.streamreactor.connect.cloud.common.storage.ListOfKeysResponse
+import io.lenses.streamreactor.connect.cloud.common.storage.ListOfMetadataResponse
 import io.lenses.streamreactor.connect.cloud.common.storage.NonOverwriteFileExistsError
+import io.lenses.streamreactor.connect.cloud.common.storage.StorageInterfaceListFilteringBehaviour
 import org.mockito.ArgumentMatcher
 import org.mockito.ArgumentMatchers
 import org.mockito.Mockito
@@ -39,9 +44,16 @@ import software.amazon.awssdk.services.s3.model.DeleteObjectRequest
 import software.amazon.awssdk.services.s3.model.DeleteObjectResponse
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException
 import software.amazon.awssdk.services.s3.model.PutObjectRequest
 import software.amazon.awssdk.services.s3.model.S3Exception
+import software.amazon.awssdk.services.s3.model.S3Object
+import software.amazon.awssdk.services.s3.paginators.ListObjectsV2Iterable
+
+import java.time.Instant
+import scala.jdk.CollectionConverters.SeqHasAsJava
 
 /**
  * The mvFile-based tests intentionally avoid `mockito-scala` (`MockitoSugar` /
@@ -54,7 +66,11 @@ import software.amazon.awssdk.services.s3.model.S3Exception
  * HeadObjectResponse` in CI. Plain Java Mockito sidesteps the Scala symbol
  * table entirely and is stable across environments.
  */
-class AwsS3StorageInterfaceTest extends AnyFlatSpecLike with Matchers with EitherValues {
+class AwsS3StorageInterfaceTest
+    extends AnyFlatSpecLike
+    with Matchers
+    with EitherValues
+    with StorageInterfaceListFilteringBehaviour {
 
   private def newMockS3Client(): S3Client        = Mockito.mock(classOf[S3Client])
   private def newMockTaskId():   ConnectorTaskId = Mockito.mock(classOf[ConnectorTaskId])
@@ -62,6 +78,8 @@ class AwsS3StorageInterfaceTest extends AnyFlatSpecLike with Matchers with Eithe
   private def anyHeadObjectRequest():   HeadObjectRequest   = ArgumentMatchers.any(classOf[HeadObjectRequest])
   private def anyCopyObjectRequest():   CopyObjectRequest   = ArgumentMatchers.any(classOf[CopyObjectRequest])
   private def anyDeleteObjectRequest(): DeleteObjectRequest = ArgumentMatchers.any(classOf[DeleteObjectRequest])
+  private def anyListObjectsV2Request(): ListObjectsV2Request =
+    ArgumentMatchers.any(classOf[ListObjectsV2Request])
 
   private def headRequestKeyMatcher(key: String): HeadObjectRequest =
     ArgumentMatchers.argThat(new ArgumentMatcher[HeadObjectRequest] {
@@ -281,5 +299,61 @@ class AwsS3StorageInterfaceTest extends AnyFlatSpecLike with Matchers with Eithe
 
     result.isLeft shouldBe true
     result.left.value shouldBe a[FileCreateError]
+  }
+
+  // ── LC-318: shared list-filtering contract (StorageInterfaceListFilteringBehaviour) ──────
+
+  private val filterTestBucket = "filter-test-bucket"
+
+  private def s3ObjectFor(obj: FilterFixtureObject): S3Object =
+    S3Object.builder().key(obj.key).size(obj.sizeBytes).lastModified(Instant.EPOCH).build()
+
+  /**
+   * Wires a fresh mocked S3Client + AwsS3StorageInterface returning exactly `objects` for both
+   * a single listObjectsV2 call and its paginator (used by the recursive listing methods).
+   */
+  private def newStorageInterfaceReturning(objects: Seq[FilterFixtureObject]): AwsS3StorageInterface = {
+    val s3Client         = newMockS3Client()
+    val storageInterface = new AwsS3StorageInterface(newMockTaskId(), s3Client, batchDelete = false, None)
+
+    val response = ListObjectsV2Response.builder().contents(objects.map(s3ObjectFor).asJava).build()
+    Mockito.doReturn(response).when(s3Client).listObjectsV2(anyListObjectsV2Request())
+
+    // The paginator is a real ListObjectsV2Iterable backed by the same mocked client, so it
+    // drives its pagination through the listObjectsV2 stub above (a single page, since the
+    // response above has no nextContinuationToken).
+    val paginator = new ListObjectsV2Iterable(s3Client, ListObjectsV2Request.builder().bucket(filterTestBucket).build())
+    Mockito.doReturn(paginator).when(s3Client).listObjectsV2Paginator(anyListObjectsV2Request())
+
+    storageInterface
+  }
+
+  override def listWithFixture(
+    objects: Seq[FilterFixtureObject],
+  ): Either[FileListError, Option[ListOfKeysResponse[_]]] =
+    newStorageInterfaceReturning(objects).list(filterTestBucket, none, none, objects.size)
+
+  override def listKeysRecursiveWithFixture(
+    objects: Seq[FilterFixtureObject],
+  ): Either[FileListError, Option[ListOfKeysResponse[_]]] =
+    newStorageInterfaceReturning(objects).listKeysRecursive(filterTestBucket, none)
+
+  override def listFileMetaRecursiveWithFixture(
+    objects: Seq[FilterFixtureObject],
+  ): Either[FileListError, Option[ListOfMetadataResponse[_ <: FileMetadata]]] =
+    newStorageInterfaceReturning(objects).listFileMetaRecursive(filterTestBucket, none)
+
+  // ── LC-318: S3-specific regression — all-filtered page marker asymmetry ─────────────────
+
+  "list" should "return None (no resume marker) when a page consists entirely of markers/zero-byte objects" in {
+    // S3 derives its resume marker from the *filtered* sequence via processAsKey, so an
+    // all-filtered page yields Right(None) and does not advance lastSeenFile. GCS keeps the
+    // raw last blob as its marker instead (see GCPStorageStorageInterfaceTest). That S3
+    // re-list characteristic is pre-existing and out of scope for LC-318; this test only
+    // pins the documented asymmetry so a naive "align GCS to S3" refactor cannot land silently.
+    val allFiltered = Seq(FilterFixtureObject(zeroByteKey, 0L), FilterFixtureObject(markerKey, 42L))
+    newStorageInterfaceReturning(allFiltered)
+      .list(filterTestBucket, none, none, allFiltered.size)
+      .value shouldBe None
   }
 }
