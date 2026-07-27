@@ -169,16 +169,22 @@ abstract class CloudSourceTask[MD <: FileMetadata, C <: CloudSourceConfig[MD], C
                                                           cancelledRef,
       )
 
-      // Late arrival touch task runs only on task 0 to avoid duplicate API calls
+      // Directories are partitioned across tasks by ownership (see DepthDirectoryLister/ConnectorTaskId.ownsDir), so
+      // every task touches only the directories it discovered and wrote offsets for. No task-0 gating is needed.
+      val discoveredPathsFn: () => IO[Seq[(CloudLocation, CloudLocation)]] =
+        () => readerManagerState.get.map(_.readerManagers.map(rm => rm.root -> rm.path))
+
       val lateArrivalTouchLoop: Option[IO[Unit]] =
-        if (connectorTaskId.taskNo == 0 && config.bucketOptions.exists(_.processLateArrival)) {
+        if (config.bucketOptions.exists(_.processLateArrival)) {
           Some(
-            LateArrivalTouchTask.run(connectorTaskId,
-                                     storageInterface,
-                                     config.bucketOptions,
-                                     config.lateArrivalInterval.seconds,
-                                     contextOffsetFn,
-                                     cancelledRef,
+            LateArrivalTouchTask.run(
+              connectorTaskId,
+              storageInterface,
+              config.bucketOptions,
+              config.lateArrivalInterval.seconds,
+              contextOffsetFn,
+              discoveredPathsFn,
+              cancelledRef,
             ),
           )
         } else {
