@@ -79,7 +79,7 @@ class BatchAccumulatorTest extends AnyFunSuiteLike with Matchers with LazyLoggin
     acc.currentBatch.map(_.toSeq) shouldBe Some(Seq(record1, record2))
   }
 
-  test("interval condition greedily triggers once the interval has elapsed") {
+  test("interval condition greedily triggers once the interval has elapsed and still appends the record") {
     val created = 1_000_000L
     val ctx     = defaultContext.copy(createdTimestamp = created, lastFlushedTimestamp = None)
     // now is 3s after creation, interval is 1s => elapsed
@@ -89,9 +89,30 @@ class BatchAccumulatorTest extends AnyFunSuiteLike with Matchers with LazyLoggin
     val r1 = acc.offer(record1)
     r1.greedyTriggerReached shouldBe true
     r1.triggerReached shouldBe false
-    r1.fitsInBatch shouldBe false
-    // a record that does not fit is not appended
-    acc.isEmpty shouldBe true
+    // an elapsed interval is a flush trigger, not a capacity limit, so the record fits and is appended
+    r1.fitsInBatch shouldBe true
+    acc.size shouldBe 1
+  }
+
+  test("an interval-only policy packs every record into one batch once the interval has elapsed") {
+    val created = 1_000_000L
+    val ctx     = defaultContext.copy(createdTimestamp = created, lastFlushedTimestamp = None)
+    // interval-only policy (no Count/FileSize), already elapsed: every offered record must fit so the
+    // whole chunk packs into a single batch rather than being rejected one at a time.
+    val acc =
+      new BatchAccumulator(BatchPolicy(logger, Interval(Duration.ofSeconds(1), fixedClock(created + 3000))), ctx)
+
+    val recA = rec(tp1, 100)
+    val recB = rec(tp1, 101)
+    val recC = rec(tp1, 102)
+    List(recA, recB, recC).foreach { record =>
+      val result = acc.offer(record)
+      result.fitsInBatch shouldBe true
+      result.greedyTriggerReached shouldBe true
+    }
+
+    acc.size shouldBe 3
+    acc.currentBatch.map(_.toSeq) shouldBe Some(Seq(recA, recB, recC))
   }
 
   test("interval condition does not trigger before the interval has elapsed") {

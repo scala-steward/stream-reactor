@@ -32,6 +32,7 @@ import ch.qos.logback.core.read.ListAppender
 import com.typesafe.scalalogging.LazyLogging
 import io.lenses.streamreactor.common.batch.BatchPolicy
 import io.lenses.streamreactor.common.batch.Count
+import io.lenses.streamreactor.common.batch.FileSize
 import io.lenses.streamreactor.common.batch.HttpCommitContext
 import io.lenses.streamreactor.common.batch.Interval
 import io.lenses.streamreactor.connect.cloud.common.model.Offset
@@ -345,6 +346,94 @@ class HttpWriterTest extends AsyncIOSpec with AsyncFunSuiteLike with Matchers wi
         offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
         writerAndQueue <- buildWriter(
           BatchPolicy(logger, Count(1000), Interval(Duration.ofSeconds(1), elapsedClock)),
+          template         = recordingTemplate(captured),
+          commitContextRef = commitContextRef,
+          offsetMapRef     = offsetMapRef,
+        )
+        (writer, _) = writerAndQueue
+        fiber      <- writer.consume().start
+        _          <- writer.add(NonEmptySeq.of(record1, record2, record3))
+        _          <- eventually(commitContextRef.get)(_.committedOffsets.nonEmpty)
+        _          <- fiber.cancel
+      } yield captured.asScala.toList.map(_.toList) shouldBe List(List(record1, record2, record3)),
+    )
+  }
+
+  // Direct regression guard for the time-only batching bug: with ONLY an (already-elapsed) interval
+  // configured -- no Count/FileSize -- the whole chunk must still pack into a single request. Before
+  // the fix, an elapsed interval reported `fitsInBatch=false` and, being the sole (hence first)
+  // condition, made the policy reject every record, so each record was sent alone via `flushSingle`.
+  test("an interval-only elapsed policy packs the whole chunk into a single request") {
+    val captured = new ConcurrentLinkedQueue[Seq[RenderedRecord]]()
+    TestControl.executeEmbed(
+      for {
+        commitContextRef <- Ref.of[IO, HttpCommitContext](contextAt(0L))
+        offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
+        writerAndQueue <- buildWriter(
+          BatchPolicy(logger, Interval(Duration.ofSeconds(1), elapsedClock)),
+          template         = recordingTemplate(captured),
+          commitContextRef = commitContextRef,
+          offsetMapRef     = offsetMapRef,
+        )
+        (writer, _) = writerAndQueue
+        fiber      <- writer.consume().start
+        _          <- writer.add(NonEmptySeq.of(record1, record2, record3))
+        _          <- eventually(commitContextRef.get)(_.committedOffsets.nonEmpty)
+        _          <- fiber.cancel
+      } yield captured.asScala.toList.map(_.toList) shouldBe List(List(record1, record2, record3)),
+    )
+  }
+
+  // A file-size limit must cut the batch before it overshoots. Each record body is 7 bytes, so with
+  // `FileSize(17)` the third record's candidate size is 21 > 17: `FileSize` reports
+  // `fitsInBatch = false, triggerReached = true`, so the AND fold in `shouldBatch` rejects it, the
+  // first two records (14 bytes) flush as one batch and the third starts a fresh one. `Count(1000)`
+  // is declared first and reports `fitsInBatch = true`; the old first-condition-wins fold would have
+  // taken that and appended the third record, shipping 21 bytes past the 17-byte limit. `FileSize`'s
+  // rejection must not be masked, so the byte ceiling is asserted directly below.
+  test("a file size limit cuts the batch before it overshoots even when count is declared first") {
+    val byteLimit = 17L
+    val captured  = new ConcurrentLinkedQueue[Seq[RenderedRecord]]()
+    TestControl.executeEmbed(
+      for {
+        commitContextRef <- Ref.of[IO, HttpCommitContext](contextAt(0L))
+        offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
+        writerAndQueue <- buildWriter(
+          BatchPolicy(logger, Count(1000), FileSize(byteLimit)),
+          template         = recordingTemplate(captured),
+          commitContextRef = commitContextRef,
+          offsetMapRef     = offsetMapRef,
+        )
+        (writer, _) = writerAndQueue
+        fiber      <- writer.consume().start
+        _          <- writer.add(NonEmptySeq.of(record1, record2, record3))
+        // The first batch (record1 + record2 = 14 bytes) triggers and commits offset 101; record3
+        // (which would take the batch to 21 bytes) starts a fresh batch and stays unflushed.
+        _ <- eventually(commitContextRef.get)(_.committedOffsets.get(topicPartition).exists(_.value == 101L))
+        _ <- fiber.cancel
+      } yield {
+        val batches = captured.asScala.toList.map(_.toList)
+        batches shouldBe List(List(record1, record2))
+        // No batch may exceed the configured byte limit -- states the property directly rather than
+        // relying only on the exact composition above.
+        batches.foreach(batch => batch.map(_.recordRendered.length.toLong).sum should be <= byteLimit)
+      },
+    )
+  }
+
+  // Coverage for the pure time-based path with no count/size condition: records accumulate while the
+  // interval has not yet elapsed and are flushed as a single batch when the deadline fires under
+  // virtual time. (This would also pass before the fix -- the discriminating interval case is
+  // "an interval-only elapsed policy packs the whole chunk into a single request" above; this one
+  // guards the not-yet-elapsed deadline path for an interval-only policy.)
+  test("an interval-only not-yet-elapsed policy flushes all accumulated records once the deadline fires") {
+    val captured = new ConcurrentLinkedQueue[Seq[RenderedRecord]]()
+    TestControl.executeEmbed(
+      for {
+        commitContextRef <- Ref.of[IO, HttpCommitContext](contextAt(0L))
+        offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
+        writerAndQueue <- buildWriter(
+          BatchPolicy(logger, Interval(Duration.ofMillis(500), notElapsedClock)),
           template         = recordingTemplate(captured),
           commitContextRef = commitContextRef,
           offsetMapRef     = offsetMapRef,

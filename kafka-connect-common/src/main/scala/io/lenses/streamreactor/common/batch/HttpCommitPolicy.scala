@@ -33,23 +33,36 @@ import java.time.Duration
  */
 case class BatchPolicy(logger: Logger, conditions: BatchPolicyCondition*) {
 
+  // A policy with no conditions never triggers (`fitsInBatch` defaults to true, nothing sets a
+  // trigger) and has no interval deadline, so the accumulator would grow until backpressure permits
+  // are exhausted and producers fail with `RetriableException` indefinitely -- a silent stall. This
+  // is unreachable in production (`BatchConfig.toBatchPolicy` falls back to `HttpBatchPolicy.Default`
+  // and Cosmos `FlushSettings` always emits `FileSize` + `Interval`); the guard makes the invariant
+  // explicit. Mockito mocks bypass the constructor, so this does not affect tests that mock the policy.
+  require(conditions.nonEmpty, "BatchPolicy requires at least one condition")
+
   def shouldBatch(context: CommitContext): BatchResult = {
     // Hot path: fold the conditions with three flags, allocating no intermediate collections and no
     // log strings. This is a pure decision function -- the flush explanation is logged by the flush
     // sites (see `logFlush`), which know the batch actually being sent, rather than here where only
     // the candidate batch is visible.
+    //
+    // `triggerReached`/`greedyTriggerReached` are ORed (any condition reaching its limit is enough to
+    // flush); `fitsInBatch` is ANDed (the record fits only if *every* condition agrees it does), so
+    // the result is independent of condition order. `Count`/`FileSize` only report
+    // `fitsInBatch = false` together with `triggerReached = true` (the record that overshoots the
+    // limit), so a rejected record always coincides with a flush; `Interval` always fits. Taking a
+    // single condition's `fitsInBatch` (e.g. only the first) would let condition order decide whether
+    // a record is rejected -- the defect that made an interval-only policy send one request per
+    // record.
     var triggerReached       = false
     var greedyTriggerReached = false
-    var fitsInBatch          = false
-    var first                = true
+    var fitsInBatch          = true
     conditions.foreach { condition =>
       val r = condition.eval(context)
       if (r.triggerReached) triggerReached             = true
       if (r.greedyTriggerReached) greedyTriggerReached = true
-      if (first) {
-        fitsInBatch = r.fitsInBatch
-        first       = false
-      }
+      if (!r.fitsInBatch) fitsInBatch                  = false
     }
     BatchResult(fitsInBatch, triggerReached, greedyTriggerReached)
   }
@@ -74,9 +87,12 @@ object BatchPolicy extends LazyLogging {
 }
 
 case class BatchResult(
-  fitsInBatch:          Boolean,
-  triggerReached:       Boolean,
-  greedyTriggerReached: Boolean, // room for more
+  fitsInBatch:    Boolean,
+  triggerReached: Boolean,
+  // A soft trigger: a time-based deadline has passed, so the batch may be flushed at the next
+  // convenient point (after packing anything already queued) rather than being forced immediately
+  // like `triggerReached`.
+  greedyTriggerReached: Boolean,
 )
 
 object HttpBatchPolicy extends LazyLogging {

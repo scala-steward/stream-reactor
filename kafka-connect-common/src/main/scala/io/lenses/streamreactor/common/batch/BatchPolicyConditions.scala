@@ -68,13 +68,17 @@ case class Interval(interval: Duration, clock: Clock) extends BatchPolicyConditi
   private val intervalMillis: Long = interval.toMillis
 
   override def eval(context: CommitContext): BatchResult = {
+    // An elapsed interval is a flush *trigger*, never a capacity limit: a record's arrival can never
+    // be "too late to fit", so `fitsInBatch` is always true and only the greedy trigger reflects the
+    // elapsed deadline. Reporting `fitsInBatch = false` here would make an interval-only policy
+    // reject every record (see `BatchPolicy.shouldBatch`), collapsing time-based batching into one
+    // request per record.
     // Compare epoch millis to avoid allocating three `Instant`s per record on the hot path; the
     // pretty (Instant-based) log string is built only in `explain`, when a flush is logged.
     val nowMillis       = clock.millis()
     val nextFlushMillis = context.lastModified + intervalMillis
-    val continueWhen    = nowMillis <= nextFlushMillis
     val triggerWhen     = nowMillis >= nextFlushMillis
-    BatchResult(continueWhen, triggerReached = false, greedyTriggerReached = triggerWhen)
+    BatchResult(fitsInBatch = true, triggerReached = false, greedyTriggerReached = triggerWhen)
   }
 
   override def explain(context: CommitContext): String = {

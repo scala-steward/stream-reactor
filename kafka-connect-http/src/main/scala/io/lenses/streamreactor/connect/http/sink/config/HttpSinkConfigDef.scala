@@ -130,6 +130,7 @@ object HttpSinkConfigDef {
   val TimeIntervalDoc: String =
     """
       |The time interval in milliseconds to wait before sending the request.
+      |When both 'connect.http.batch.count' and 'connect.http.batch.size' are disabled (set to 0), the interval alone decides when to flush and imposes no upper bound on a batch; 'connect.http.max.queue.size' then becomes the effective batch ceiling.
       |""".stripMargin
 
   val AuthenticationTypeProp: String = "connect.http.authentication.type"

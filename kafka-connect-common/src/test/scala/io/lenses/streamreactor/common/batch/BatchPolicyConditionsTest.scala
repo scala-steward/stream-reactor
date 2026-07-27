@@ -97,8 +97,17 @@ class BatchPolicyConditionsTest extends AnyFlatSpec with Matchers with MockitoSu
     )
   }
 
-  it should "greedily trigger once the interval has elapsed" in {
+  it should "greedily trigger at the boundary and still fit in the batch" in {
     val interval = Interval(Duration.ofMinutes(10), clockAt(600000L))
+    interval.eval(intervalContext(0L)) should be(
+      BatchResult(fitsInBatch = true, triggerReached = false, greedyTriggerReached = true),
+    )
+  }
+
+  it should "greedily trigger once the interval has strictly elapsed and still fit in the batch" in {
+    // Strictly past the deadline (now = 600001ms, nextFlush = 600000ms). An elapsed interval is a
+    // flush trigger, never a capacity limit, so the record must still fit.
+    val interval = Interval(Duration.ofMinutes(10), clockAt(600001L))
     interval.eval(intervalContext(0L)) should be(
       BatchResult(fitsInBatch = true, triggerReached = false, greedyTriggerReached = true),
     )
