@@ -39,13 +39,13 @@ class AwsS3DirectoryListerTest extends AsyncFlatSpecLike with AsyncIOSpec with M
     wildcardExcludes: Set[String],
     expected:         Set[String],
     client:           S3Client,
-    recursiveLevel:   Int             = 1,
+    partitionDepth:   Int             = 2,
     connectorTaskId:  ConnectorTaskId = connectorTaskId,
   ): IO[Assertion] =
     new AwsS3DirectoryLister(connectorTaskId, client).findDirectories(
       location,
       filesLimit,
-      recursiveLevel,
+      partitionDepth,
       exclude,
       wildcardExcludes,
     ).asserting {
@@ -91,7 +91,7 @@ class AwsS3DirectoryListerTest extends AsyncFlatSpecLike with AsyncIOSpec with M
     new AwsS3DirectoryLister(connectorTaskId, client).findDirectories(
       CloudLocation("bucket", none),
       filesLimit,
-      1,
+      2,
       Set.empty,
       Set.empty,
     ).asserting {
@@ -123,7 +123,7 @@ class AwsS3DirectoryListerTest extends AsyncFlatSpecLike with AsyncIOSpec with M
       Set.empty,
       Set("prefix2/", "prefix3/"),
       s3Client,
-      0,
+      1,
     )
   }
 
@@ -152,7 +152,7 @@ class AwsS3DirectoryListerTest extends AsyncFlatSpecLike with AsyncIOSpec with M
       Set.empty,
       Set("prefix2/", "prefix4/"),
       s3Client,
-      1,
+      2,
       taskId1,
     )
 
@@ -162,7 +162,7 @@ class AwsS3DirectoryListerTest extends AsyncFlatSpecLike with AsyncIOSpec with M
       Set.empty,
       Set("prefix1/", "prefix3/"),
       s3Client,
-      1,
+      2,
       taskId2,
     )
 
@@ -172,7 +172,7 @@ class AwsS3DirectoryListerTest extends AsyncFlatSpecLike with AsyncIOSpec with M
       Set.empty,
       Set.empty,
       s3Client,
-      0,
+      1,
       taskId1,
     )
 
@@ -182,7 +182,7 @@ class AwsS3DirectoryListerTest extends AsyncFlatSpecLike with AsyncIOSpec with M
       Set.empty,
       Set.empty,
       s3Client,
-      0,
+      1,
       taskId2,
     )
 
@@ -192,7 +192,7 @@ class AwsS3DirectoryListerTest extends AsyncFlatSpecLike with AsyncIOSpec with M
       Set.empty,
       Set("prefix4/"),
       s3Client,
-      1,
+      2,
       taskId1,
     )
 
@@ -202,7 +202,7 @@ class AwsS3DirectoryListerTest extends AsyncFlatSpecLike with AsyncIOSpec with M
       Set.empty,
       Set("prefix3/"),
       s3Client,
-      1,
+      2,
       taskId2,
     )
   }

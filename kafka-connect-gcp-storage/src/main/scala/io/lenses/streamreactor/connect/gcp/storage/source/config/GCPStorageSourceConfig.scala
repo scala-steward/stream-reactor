@@ -53,12 +53,13 @@ object GCPStorageSourceConfig extends PropsToConfigConverter[GCPStorageSourceCon
         gcpConfigDefBuilder,
         gcpConfigDefBuilder.getPartitionExtractor(parsedValues),
       )
-      backoff = gcpConfigDefBuilder.getEmptySourceBackoffSettings(parsedValues)
+      backoff            = gcpConfigDefBuilder.getEmptySourceBackoffSettings(parsedValues)
+      partitionSearcher <- gcpConfigDefBuilder.getPartitionSearcherOptions(parsedValues)
     } yield GCPStorageSourceConfig(
       gcpConnectionSettings,
       sbo,
       gcpConfigDefBuilder.getCompressionCodec(),
-      gcpConfigDefBuilder.getPartitionSearcherOptions(parsedValues),
+      partitionSearcher,
       gcpConfigDefBuilder.getSourceExtensionFilter,
       backoff,
       gcpConfigDefBuilder.getWriteWatermarkToHeaders,
