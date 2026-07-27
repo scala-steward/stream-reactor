@@ -255,39 +255,61 @@ class HttpWriter(
     }
 
   /**
-   * Folds a chunk into the accumulator. Records are offered synchronously inside `IO.defer` and an
-   * `IO` is materialised only when a flush is actually required, so the common "fits, no flush"
-   * record incurs no per-record `IO` allocation. The iterator is stateful and shared across
-   * `step()` recursions, so each recursion resumes where the previous flush segment stopped.
+   * Folds a chunk into the accumulator, then flushes only once nothing more is immediately
+   * available. A `greedyTriggerReached` (interval-elapsed) result does not force a flush on its own:
+   * doing so would cut the chunk short into a one-record batch and re-arm the interval for the rest.
+   * Instead the chunk is packed until a hard `triggerReached` (count/size) fires or the records run
+   * out, and if the interval is still pending we drain any already-queued chunks before flushing.
+   * This mirrors the pack-until-full behaviour of
+   * `io.lenses.streamreactor.common.batch.RecordsQueueBatcher.takeBatch`.
    */
-  private def processChunk(acc: BatchAccumulator, chunk: NonEmptySeq[RenderedRecord]): IO[Unit] = {
-    val iterator = chunk.toSeq.iterator
+  private def processChunk(acc: BatchAccumulator, chunk: NonEmptySeq[RenderedRecord]): IO[Unit] =
+    offerAll(acc, chunk.toSeq.iterator).flatMap(greedy => if (greedy) drainAndFlush(acc) else IO.unit)
 
-    def step(): IO[Unit] = IO.defer {
-      var flushAction: IO[Unit] = null
-      while (iterator.hasNext && (flushAction eq null)) {
+  /**
+   * Offers every record from `iterator` into the accumulator, returning whether a greedy (interval)
+   * trigger is pending and still unflushed. Records are offered synchronously inside `IO.defer` and
+   * an `IO` is materialised only when a flush is actually required, so the common "fits, no flush"
+   * record incurs no per-record `IO` allocation. The iterator is stateful and shared across
+   * `step()` recursions, so each recursion resumes where the previous flush segment stopped. A flush
+   * satisfies any pending greedy state, so the greedy flag is cleared once a flush has run.
+   */
+  private def offerAll(acc: BatchAccumulator, iterator: Iterator[RenderedRecord]): IO[Boolean] = {
+    def step(): IO[Boolean] = IO.defer {
+      var greedy = false
+      var next: IO[Boolean] = null
+      while (iterator.hasNext && (next eq null)) {
         val record = iterator.next()
         val result = acc.offer(record)
         if (result.fitsInBatch) {
-          if (result.triggerReached || result.greedyTriggerReached) flushAction = flush(acc)
+          if (result.triggerReached) next = flush(acc).as(false)
+          else if (result.greedyTriggerReached) greedy = true
         } else {
           // record does not fit the current batch: flush what we have, then place it in a fresh batch
-          flushAction = flushIfNonEmpty(acc) *> reofferAfterFlush(acc, record)
+          next = flushIfNonEmpty(acc) *> reofferAfterFlush(acc, record)
         }
       }
-      if (flushAction eq null) IO.unit else flushAction *> step()
+      if (next eq null) IO.pure(greedy) else next.flatMap(g => step().map(_ || g))
     }
 
     step()
   }
 
-  private def reofferAfterFlush(acc: BatchAccumulator, record: RenderedRecord): IO[Unit] =
+  // A greedy (interval) trigger is pending: rather than flush a short batch, pull any chunks already
+  // sitting in the queue (non-blocking) and pack them in too, flushing only once the queue is empty.
+  private def drainAndFlush(acc: BatchAccumulator): IO[Unit] =
+    recordsQueue.tryTake.flatMap {
+      case Some(next) => offerAll(acc, next.toSeq.iterator).flatMap(g => if (g) drainAndFlush(acc) else IO.unit)
+      case None       => flushIfNonEmpty(acc)
+    }
+
+  private def reofferAfterFlush(acc: BatchAccumulator, record: RenderedRecord): IO[Boolean] =
     IO(acc.offer(record)).flatMap { result =>
       if (result.fitsInBatch) {
-        if (result.triggerReached || result.greedyTriggerReached) flush(acc) else IO.unit
+        if (result.triggerReached) flush(acc).as(false) else IO.pure(result.greedyTriggerReached)
       } else {
         // even an empty batch rejects it (e.g. a single record over the size limit): send it alone
-        flushSingle(acc, record)
+        flushSingle(acc, record).as(false)
       }
     }
 
