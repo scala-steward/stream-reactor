@@ -270,9 +270,10 @@ class GCPStorageStorageInterface(
         case Some(page: Page[Blob]) =>
           val pages = page.getValues.asScala
           val newKeys: Seq[E] =
-            accumulatedKeys ++ pages.filter(p => extensionFilter.forall(_.filter(p.getName))).map(p =>
-              fnListElementCreate(p),
-            )
+            accumulatedKeys ++ pages
+              .filter(isDataObject)
+              .filter(p => extensionFilter.forall(_.filter(p.getName)))
+              .map(p => fnListElementCreate(p))
           val newLatestCreated = pages.lastOption.map(_.getCreateTimeOffsetDateTime.toInstant).orElse(latestCreated)
           listKeysRecursiveHelper(Option(page.getNextPage), newKeys, newLatestCreated)
       }
@@ -338,6 +339,27 @@ class GCPStorageStorageInterface(
       .getOrElse(accumulatedKeys)
   }
 
+  /**
+   * Mirrors AwsS3StorageInterface's list filtering: directory markers (keys ending in "/",
+   * e.g. console-created "folders") and zero-byte placeholder objects are never candidate
+   * data files, so they are excluded before the extension filter is applied. This must run
+   * while the Blob is still available, since object size isn't carried once mapped to a key
+   * or to GCPStorageFileMetadata.
+   *
+   * Size is fail-open: Blob.getSize is a nullable java.lang.Long, and `forall` keeps the
+   * object when size is unknown rather than silently dropping every blob whose listing
+   * metadata omits it (which would starve the source with no error). Real zero-byte
+   * placeholders always report size 0 and are still filtered; console-created folders are
+   * still caught by the "/" rule.
+   *
+   * Sink lock-sweep safety: IndexManagerV2 lists ".lock" files via listFileMetaRecursive.
+   * GCS locks are always written as non-empty JSON by writeBlobToFile (never zero-byte,
+   * never "/"-suffixed), so this filter cannot hide a real lock — that is a property of
+   * writeBlobToFile, not of the filter itself.
+   */
+  private def isDataObject(blob: Blob): Boolean =
+    !blob.getName.endsWith("/") && Option(blob.getSize).forall(_.longValue() > 0)
+
   override def list(
     bucket:     String,
     prefix:     Option[String],
@@ -354,10 +376,16 @@ class GCPStorageStorageInterface(
       case Left(ex) => FileListError(ex, bucket, prefix).asLeft
       case Right(page) =>
         val pageValues = page.getValues.asScala
-        val keys       = filterKeys(pageValues.map(_.getName).toSeq).filterNot(f => lastFile.map(_.file).contains(f))
+        val keys = filterKeys(pageValues.filter(isDataObject).map(_.getName).toSeq)
+          .filterNot(f => lastFile.map(_.file).contains(f))
         logger.trace(
           s"[${connectorTaskId.show}] Last file: $lastFile, Prefix: $prefix Page: ${pageValues.map(_.getName)}, Keys: $keys",
         )
+        // The pagination marker is derived from the RAW (unfiltered) last page value, not the
+        // filtered keys above. GCS pagination uses startOffset(marker.file) to resume, so this
+        // still advances past a page consisting entirely of directory markers/zero-byte objects.
+        // Deriving the marker from the filtered keys instead (mirroring S3's processAsKey) would
+        // yield no marker for an all-filtered page, stalling pagination on that page forever.
         pageValues
           .lastOption
           .map(value =>
