@@ -15,10 +15,13 @@
  */
 package io.lenses.streamreactor.connect.http.sink
 
+import cats.arrow.FunctionK
 import cats.data.NonEmptySeq
 import cats.effect.Deferred
 import cats.effect.IO
 import cats.effect.Ref
+import cats.effect.kernel.MonadCancel
+import cats.effect.kernel.Resource
 import cats.effect.std.Queue
 import cats.effect.std.Semaphore
 import cats.effect.testing.scalatest.AsyncIOSpec
@@ -39,6 +42,7 @@ import io.lenses.streamreactor.connect.cloud.common.model.Offset
 import io.lenses.streamreactor.connect.cloud.common.model.Topic
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
 import io.lenses.streamreactor.connect.http.sink.client.HttpRequestSender
+import io.lenses.streamreactor.connect.http.sink.client.HttpResponseFailure
 import io.lenses.streamreactor.connect.http.sink.client.HttpResponseSuccess
 import io.lenses.streamreactor.connect.http.sink.config.ErrorNullPayloadHandler
 import io.lenses.streamreactor.connect.http.sink.reporter.model.HttpFailureConnectorSpecificRecordData
@@ -80,16 +84,18 @@ class HttpWriterTest extends AsyncIOSpec with AsyncFunSuiteLike with Matchers wi
 
   private def buildWriter(
     batchPolicy:      BatchPolicy,
-    maxQueueSize:     Int               = 10000,
-    offerTimeout:     FiniteDuration    = 1.minute,
-    sender:           HttpRequestSender = successSender(),
-    template:         TemplateType      = successTemplate(),
+    maxQueueSize:     Int                   = 10000,
+    offerTimeout:     FiniteDuration        = 1.minute,
+    sender:           HttpRequestSender     = successSender(),
+    template:         TemplateType          = successTemplate(),
+    errorThreshold:   Int                   = 5,
+    permits:          Option[Semaphore[IO]] = None,
     commitContextRef: Ref[IO, HttpCommitContext],
     offsetMapRef:     Ref[IO, Map[TopicPartition, Offset]],
   ): IO[(HttpWriter, Queue[IO, NonEmptySeq[RenderedRecord]])] =
     for {
-      queue   <- Queue.unbounded[IO, NonEmptySeq[RenderedRecord]]
-      permits <- Semaphore[IO](maxQueueSize.toLong)
+      queue     <- Queue.unbounded[IO, NonEmptySeq[RenderedRecord]]
+      semaphore <- permits.fold(Semaphore[IO](maxQueueSize.toLong))(IO.pure)
     } yield {
       val writer = new HttpWriter(
         sinkName             = sinkName,
@@ -97,11 +103,11 @@ class HttpWriterTest extends AsyncIOSpec with AsyncFunSuiteLike with Matchers wi
         template             = template,
         batchPolicy          = batchPolicy,
         recordsQueue         = queue,
-        permits              = permits,
+        permits              = semaphore,
         maxQueueSize         = maxQueueSize,
         offsetMapRef         = offsetMapRef,
         maxQueueOfferTimeout = offerTimeout,
-        errorThreshold       = 5,
+        errorThreshold       = errorThreshold,
         tidyJson             = false,
         errorReporter        = mock[ReportingController[HttpFailureConnectorSpecificRecordData]],
         successReporter      = mock[ReportingController[HttpSuccessConnectorSpecificRecordData]],
@@ -122,6 +128,39 @@ class HttpWriterTest extends AsyncIOSpec with AsyncFunSuiteLike with Matchers wi
     val sender = mock[HttpRequestSender]
     when(sender.sendHttpRequest(any[ProcessedTemplate])).thenReturn(entered.complete(()) *> IO.never)
     sender
+  }
+
+  // A sender whose every request fails, so each flush takes the error path in `flush`/`flushSingle`.
+  private def failingSender(): HttpRequestSender = {
+    val sender = mock[HttpRequestSender]
+    when(sender.sendHttpRequest(any[ProcessedTemplate]))
+      .thenReturn(IO(HttpResponseFailure("boom", None, 500.some, "boom".some).asLeft[HttpResponseSuccess]))
+    sender
+  }
+
+  // A `Semaphore[IO]` that delegates to `underlying` but can park a fiber at a chosen point in the
+  // permit lifecycle so a test can inject a cancellation there deterministically: `afterTryAcquire`
+  // runs immediately after a successful `tryAcquireN` (the producer's acquire/offer boundary), and
+  // `beforeRelease` runs immediately before `releaseN` delegates (the consumer's send/release
+  // boundary). Both default to `IO.unit`. `acquireN` is intentionally NOT hooked: that wait is meant
+  // to stay cancelable, so a hook there would sit where cancellation is supposed to be observed.
+  private final class HookedSemaphore(
+    underlying:      Semaphore[IO],
+    afterTryAcquire: IO[Unit],
+    beforeRelease:   IO[Unit],
+  ) extends Semaphore[IO] {
+    override def available: IO[Long] = underlying.available
+    override def count:     IO[Long] = underlying.count
+    override def acquireN(n:    Long): IO[Unit] = underlying.acquireN(n)
+    override def tryAcquireN(n: Long): IO[Boolean] =
+      underlying.tryAcquireN(n).flatMap {
+        case true  => afterTryAcquire.as(true)
+        case false => IO.pure(false)
+      }
+    override def releaseN(n: Long): IO[Unit] = beforeRelease *> underlying.releaseN(n)
+    override def permit: Resource[IO, Unit] = underlying.permit
+    override def mapK[G[_]](f: FunctionK[IO, G])(implicit G: MonadCancel[G, _]): Semaphore[G] =
+      underlying.mapK(f)
   }
 
   // A real (pure) template avoids brittle mocking of the abstract process method.
@@ -279,6 +318,198 @@ class HttpWriterTest extends AsyncIOSpec with AsyncFunSuiteLike with Matchers wi
       } yield result match {
         case Left(e)  => e shouldBe a[RetriableException]
         case Right(_) => fail("expected a RetriableException")
+      },
+    )
+  }
+
+  // Test A: the reported bug. A cancellation observed between acquiring permits and offering the
+  // chunk must not strand the permits. The hooked semaphore parks the `add` fiber right after
+  // `tryAcquireN` succeeds; we cancel it (on its own fiber, since with the fix the target is masked
+  // and `cancel` would otherwise block), let it resume, then assert the lockstep invariant: the
+  // permits held equal the records actually sitting in the queue. Before the fix the fiber is
+  // cancelled at the (unmasked) park, so 2 permits are held with nothing queued and the invariant
+  // breaks; with the fix the offer always runs, so 2 permits map to 2 queued records.
+  test("a cancellation between acquiring permits and offering the chunk does not strand permits") {
+    TestControl.executeEmbed(
+      for {
+        commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
+        offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
+        entered          <- Deferred[IO, Unit]
+        resume           <- Deferred[IO, Unit]
+        underlying       <- Semaphore[IO](2L)
+        hooked            = new HookedSemaphore(underlying, entered.complete(()).void *> resume.get, IO.unit)
+        writerAndQueue <- buildWriter(
+          BatchPolicy(logger, Count(1000)),
+          maxQueueSize     = 2,
+          permits          = hooked.some,
+          commitContextRef = commitContextRef,
+          offsetMapRef     = offsetMapRef,
+        )
+        (writer, queue) = writerAndQueue
+        addFiber       <- writer.add(NonEmptySeq.of(record1, record2)).start
+        _              <- entered.get
+        cancelFiber    <- addFiber.cancel.start
+        // Quiescence barrier: `TestControl` picks randomly among runnable fibers, so this guarantees
+        // the cancellation has been fully delivered before we let the parked fiber resume.
+        _         <- IO.sleep(1.milli)
+        _         <- resume.complete(()).void
+        _         <- cancelFiber.join
+        _         <- addFiber.join
+        available <- hooked.available
+        queued    <- queue.tryTake.map(_.fold(0L)(_.length.toLong))
+      } yield (2L - available) shouldBe queued,
+    )
+  }
+
+  // Test C: the release side (mirror of Test A). A cancellation observed between sending a batch and
+  // releasing its permits must not strand them. The hooked semaphore parks the consumer fiber right
+  // before `releaseN`; we cancel the consumer (as `HttpWriterManager` does on stop), let it resume,
+  // and assert every permit is back. Before the fix the release is unmasked, so the cancellation
+  // skips it and 2 permits stay held for records that were already sent; with the fix the release
+  // always runs.
+  test("a cancellation between sending a batch and releasing permits does not strand permits") {
+    TestControl.executeEmbed(
+      for {
+        commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
+        offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
+        entered          <- Deferred[IO, Unit]
+        resume           <- Deferred[IO, Unit]
+        underlying       <- Semaphore[IO](2L)
+        hooked            = new HookedSemaphore(underlying, IO.unit, entered.complete(()).void *> resume.get)
+        writerAndQueue <- buildWriter(
+          BatchPolicy(logger, Count(2)),
+          maxQueueSize     = 2,
+          permits          = hooked.some,
+          commitContextRef = commitContextRef,
+          offsetMapRef     = offsetMapRef,
+        )
+        (writer, _)    = writerAndQueue
+        consumerFiber <- writer.consume().start
+        _             <- writer.add(NonEmptySeq.of(record1, record2))
+        _             <- entered.get
+        cancelFiber   <- consumerFiber.cancel.start
+        _             <- IO.sleep(1.milli)
+        _             <- resume.complete(()).void
+        _             <- cancelFiber.join
+        available     <- hooked.available
+      } yield available shouldBe 2L,
+    )
+  }
+
+  // Test D (below threshold): a flush failure that stays under the error threshold drops the batch
+  // and must return its permits. No cancellation involved -- this pins exact permit accounting on the
+  // error path (the semaphore has no upper bound, so an over-release would silently inflate capacity
+  // rather than fail).
+  test("permits are released when a flush fails below the error threshold") {
+    for {
+      commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
+      offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
+      underlying       <- Semaphore[IO](2L)
+      writerAndQueue <- buildWriter(
+        BatchPolicy(logger, Count(2)),
+        maxQueueSize     = 2,
+        sender           = failingSender(),
+        errorThreshold   = 5,
+        permits          = underlying.some,
+        commitContextRef = commitContextRef,
+        offsetMapRef     = offsetMapRef,
+      )
+      (writer, _) = writerAndQueue
+      fiber      <- writer.consume().start
+      _          <- writer.add(NonEmptySeq.of(record1, record2))
+      available  <- eventually(underlying.available)(_ == 2L)
+      _          <- fiber.cancel
+    } yield available shouldBe 2L
+  }
+
+  // Test D (at threshold): with `errorThreshold = 0` the sink tolerates zero failures, so the very
+  // first failed flush is re-raised (tearing down the consumer fiber). The batch's permits must
+  // still be returned first. A single `Count(2)` flush of two records is enough.
+  test("permits are released when a flush fails at the error threshold and the error is re-raised") {
+    for {
+      commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
+      offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
+      underlying       <- Semaphore[IO](2L)
+      writerAndQueue <- buildWriter(
+        BatchPolicy(logger, Count(2)),
+        maxQueueSize     = 2,
+        sender           = failingSender(),
+        errorThreshold   = 0,
+        permits          = underlying.some,
+        commitContextRef = commitContextRef,
+        offsetMapRef     = offsetMapRef,
+      )
+      (writer, _) = writerAndQueue
+      outcome <- writer.consume().start.flatMap { fiber =>
+        writer.add(NonEmptySeq.of(record1, record2)) *> fiber.join.timeout(10.seconds)
+      }
+      available <- underlying.available
+    } yield {
+      outcome.fold(canceled = false, errored = _ => true, completed = _ => false) shouldBe true
+      available shouldBe 2L
+    }
+  }
+
+  // Boundary guard for the tolerance count (the property the off-by-one violated): `errorThreshold`
+  // must tolerate exactly that many consecutive failed flushes and re-raise on the next one. With
+  // `errorThreshold = 1` and `Count(1)`, a two-record chunk produces two flushes: the first is
+  // tolerated (dropped), the second crosses the threshold and re-raises. Both flushes release their
+  // permit, so all capacity is returned regardless of which branch each took.
+  test("errorThreshold tolerates exactly that many failed flushes before re-raising") {
+    for {
+      commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
+      offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
+      underlying       <- Semaphore[IO](2L)
+      writerAndQueue <- buildWriter(
+        BatchPolicy(logger, Count(1)),
+        maxQueueSize     = 2,
+        sender           = failingSender(),
+        errorThreshold   = 1,
+        permits          = underlying.some,
+        commitContextRef = commitContextRef,
+        offsetMapRef     = offsetMapRef,
+      )
+      (writer, _) = writerAndQueue
+      outcome <- writer.consume().start.flatMap { fiber =>
+        writer.add(NonEmptySeq.of(record1, record2)) *> fiber.join.timeout(2.seconds)
+      }
+      available <- underlying.available
+    } yield {
+      outcome.fold(canceled = false, errored = _ => true, completed = _ => false) shouldBe true
+      available shouldBe 2L
+    }
+  }
+
+  // Test B: not a bug reproduction -- a guard against "fixing" the leak by masking the capacity wait
+  // itself. With one permit already taken and no consumer, a second `add` parks in `acquireN`.
+  // Cancelling it must be prompt (no virtual time elapses) and must leave no registered waiter
+  // (`count` goes negative while a waiter is queued). Masking the wait would instead defer the cancel
+  // until the offer timeout, which under `TestControl` manifests as a non-termination.
+  test("cancelling an add that is waiting for capacity is prompt and leaves no waiter") {
+    TestControl.executeEmbed(
+      for {
+        commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
+        offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
+        underlying       <- Semaphore[IO](1L)
+        writerAndQueue <- buildWriter(
+          BatchPolicy(logger, Count(1000)),
+          maxQueueSize     = 1,
+          offerTimeout     = 200.millis,
+          permits          = underlying.some,
+          commitContextRef = commitContextRef,
+          offsetMapRef     = offsetMapRef,
+        )
+        (writer, _) = writerAndQueue
+        _          <- writer.add(NonEmptySeq.of(record1))
+        waiter     <- writer.add(NonEmptySeq.of(record2)).start
+        _          <- IO.sleep(1.milli)
+        before     <- IO.monotonic
+        _          <- waiter.cancel
+        after      <- IO.monotonic
+        count      <- underlying.count
+      } yield {
+        (after - before).toNanos shouldBe 0L
+        count shouldBe 0L
       },
     )
   }

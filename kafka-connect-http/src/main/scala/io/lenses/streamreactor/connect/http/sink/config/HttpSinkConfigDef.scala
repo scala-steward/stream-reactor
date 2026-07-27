@@ -103,7 +103,7 @@ object HttpSinkConfigDef {
   val ErrorThresholdProp: String = "connect.http.error.threshold"
   val ErrorThresholdDoc: String =
     """
-      |The number of errors to tolerate before failing the sink.
+      |The number of consecutive failed flushes (per topic-partition, reset on the next successful flush) to tolerate before failing the sink. The sink fails on the next failure after this many.
       |""".stripMargin
   val ErrorThresholdDefault = 5
 

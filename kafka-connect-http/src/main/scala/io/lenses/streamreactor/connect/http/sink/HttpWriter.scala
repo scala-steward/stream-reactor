@@ -108,6 +108,11 @@ object HttpWriter {
  * operations and fiber hand-offs proportional to the number of `put` calls, not the number of
  * records.
  *
+ * Permit acquisition and the queue offer are atomic with respect to cancellation: once permits are
+ * acquired they are always paired with an enqueued chunk (and, symmetrically, a chunk's permits are
+ * always released once the batch has been sent), so a cancellation can never strand permits with no
+ * chunk for the consumer to release them against.
+ *
  * A single long-lived consumer fiber (started by `HttpWriterManager`) drives [[consume]], which
  * takes a chunk, feeds the records into a mutable [[BatchAccumulator]] and flushes a batch whenever
  * the configured [[BatchPolicy]] triggers (by count, size, or a time-based interval deadline). A
@@ -179,25 +184,42 @@ class HttpWriter(
     else
       records.grouped(maxQueueSize).toList.traverse_ { group =>
         val chunk = NonEmptySeq.fromSeqUnsafe(group)
-        // Keep the acquired permits and the enqueued chunk in lockstep: once permits are acquired,
-        // the offer (and its offset bookkeeping) must not be cancelled, otherwise those permits
-        // would be lost with no chunk for the consumer to release them against.
-        acquirePermits(group.size) *>
-          IO.uncancelable(_ => recordsQueue.offer(chunk) *> recordThePartitionOffsets(group))
+        tryEnqueueNow(chunk, group).flatMap {
+          case true  => IO.unit
+          case false => awaitCapacityAndEnqueue(chunk, group)
+        }
       }
 
-  // Fast path: try to reserve all permits without blocking. Only when capacity is exhausted do we
-  // block on `acquireN` under a single shared timeout budget (one timer per put call, not per
-  // record). `acquireN` releases any partially held permits if cancelled by the timeout.
-  private def acquirePermits(n: Int): IO[Unit] =
-    permits.tryAcquireN(n.toLong).flatMap {
-      case true => IO.unit
-      case false =>
-        permits.acquireN(n.toLong).timeoutTo(
-          maxQueueOfferTimeout,
-          IO.raiseError(new RetriableException("Enqueue timed out and records remain")),
-        )
+  // Fast path: reserve all permits without blocking. `tryAcquireN` and the offer share one
+  // uncancelable region, so cancellation can never land between them (which would strand permits
+  // with no queued chunk for the consumer to release them against).
+  private def tryEnqueueNow(chunk: NonEmptySeq[RenderedRecord], group: List[RenderedRecord]): IO[Boolean] =
+    IO.uncancelable { _ =>
+      permits.tryAcquireN(group.size.toLong).flatMap {
+        case true  => enqueue(chunk, group).as(true)
+        case false => IO.pure(false)
+      }
     }
+
+  // Slow path: only the wait for capacity is cancelable. `timeoutTo` runs this block in a fresh
+  // `racePair` child fiber, so the `IO.uncancelable`/`poll` pair belongs to that child: the wait is
+  // cancelable, but everything after the acquire returns is masked. `Semaphore.acquireN` hands back
+  // any permits it was granted if it is cancelled while waiting; once it returns normally, the mask
+  // carries through to the offer, so neither the timeout firing nor an outer cancellation can
+  // separate granted permits from their chunk. One timeout budget per put call (not per record).
+  private def awaitCapacityAndEnqueue(chunk: NonEmptySeq[RenderedRecord], group: List[RenderedRecord]): IO[Unit] =
+    IO.uncancelable { poll =>
+      poll(permits.acquireN(group.size.toLong)) *> enqueue(chunk, group)
+    }.timeoutTo(
+      maxQueueOfferTimeout,
+      IO.raiseError(new RetriableException("Enqueue timed out and records remain")),
+    )
+
+  // The offer relies on `recordsQueue` being unbounded (`HttpWriter.create` uses `Queue.unbounded`;
+  // the semaphore, not the queue, is what bounds occupancy). A bounded queue injected via direct
+  // construction would make this masked `offer` block uninterruptibly once full.
+  private def enqueue(chunk: NonEmptySeq[RenderedRecord], group: List[RenderedRecord]): IO[Unit] =
+    recordsQueue.offer(chunk) *> recordThePartitionOffsets(group)
 
   // Advances the per-partition max offset for a whole set of accepted records in a single atomic
   // update, rather than one `Ref` update per record.
@@ -323,6 +345,11 @@ class HttpWriter(
   private def flushIfNonEmpty(acc: BatchAccumulator): IO[Unit] =
     if (acc.isEmpty) IO.unit else flush(acc)
 
+  // The send result and the bookkeeping that acts on it (commit context, accumulator reset, permit
+  // release, or the error handling) must stay in lockstep: only `sendBatch` is polled (so an
+  // in-flight request is still cancelled promptly at shutdown), while the result handling is masked
+  // so a cancellation cannot land on the `attempt` bind and skip the permit release, stranding
+  // permits for records that have already left the pipeline.
   private def flush(acc: BatchAccumulator): IO[Unit] =
     acc.currentBatch match {
       case None => IO.unit
@@ -330,29 +357,35 @@ class HttpWriter(
         val flushedCount = batch.length.toLong
         // Log the once-per-flush explanation here (not in the batch policy) so the line describes the
         // batch actually being sent, covering hard, greedy and interval-deadline flushes uniformly.
-        IO(acc.logFlush()) *> sendBatch(batch).attempt.flatMap {
-          case Right(_) =>
-            val flushedCtx = acc.flushedContext().resetErrors
-            // These records have left the pipeline (sent), so return their permits to the semaphore.
-            commitContextRef.set(flushedCtx) *> IO(acc.resetTo(flushedCtx)) *> permits.releaseN(flushedCount)
-          case Left(error) => handleFlushError(acc, error, flushedCount)
+        IO(acc.logFlush()) *> IO.uncancelable { poll =>
+          poll(sendBatch(batch).attempt).flatMap {
+            case Right(_) =>
+              val flushedCtx = acc.flushedContext().resetErrors
+              // These records have left the pipeline (sent), so return their permits to the semaphore.
+              commitContextRef.set(flushedCtx) *> IO(acc.resetTo(flushedCtx)) *> permits.releaseN(flushedCount)
+            case Left(error) => handleFlushError(acc, error, flushedCount)
+          }
         }
     }
 
   private def flushSingle(acc: BatchAccumulator, record: RenderedRecord): IO[Unit] =
-    IO(acc.logFlushSingle(record)) *> sendBatch(NonEmptySeq.of(record)).attempt.flatMap {
-      case Right(_) =>
-        val flushedCtx = acc.candidateContextFor(record).resetErrors
-        // The single record has left the pipeline (sent), so return its permit to the semaphore.
-        commitContextRef.set(flushedCtx) *> IO(acc.resetTo(flushedCtx)) *> permits.releaseN(1L)
-      case Left(error) => handleFlushError(acc, error, 1L)
+    IO(acc.logFlushSingle(record)) *> IO.uncancelable { poll =>
+      poll(sendBatch(NonEmptySeq.of(record)).attempt).flatMap {
+        case Right(_) =>
+          val flushedCtx = acc.candidateContextFor(record).resetErrors
+          // The single record has left the pipeline (sent), so return its permit to the semaphore.
+          commitContextRef.set(flushedCtx) *> IO(acc.resetTo(flushedCtx)) *> permits.releaseN(1L)
+        case Left(error) => handleFlushError(acc, error, 1L)
+      }
     }
 
   /**
-   * On a flush failure the error is recorded against the commit context. If the accumulated error
-   * count has crossed `errorThreshold` the error is re-raised (propagating out of the consumer
-   * fiber to the task's error callback); otherwise it is logged and the failed batch is dropped
-   * without advancing committed offsets, so Kafka will redeliver those records.
+   * On a flush failure the error is recorded against the commit context. The sink tolerates exactly
+   * `errorThreshold` consecutive failed flushes (per topic-partition, reset on the next successful
+   * flush); the failure after that -- the `errorThreshold + 1`th -- is re-raised, propagating out of
+   * the consumer fiber to the task's error callback. Below that boundary the error is logged and the
+   * failed batch is dropped without advancing committed offsets, so Kafka will redeliver those
+   * records.
    *
    * `flushedCount` permits are returned to the semaphore in both cases: the batch leaves the
    * accumulator whether it is dropped (below threshold) or the fiber is torn down (at threshold).
@@ -393,8 +426,11 @@ class HttpWriter(
       case _ => initialOffsetAndMetaMap
     }.orElse(IO(Map.empty[TopicPartition, OffsetAndMetadata]))
 
+  // Use `updateAndGet` (not `getAndUpdate`): the threshold must be tested against the context that
+  // already includes the current failure, otherwise it is evaluated against a count one short and
+  // the sink tolerates one more failure than `errorThreshold` names.
   private def addErrorToCommitContext(e: Throwable): IO[Option[Throwable]] =
-    commitContextRef.getAndUpdate {
+    commitContextRef.updateAndGet {
       commitContext => commitContext.addError(e)
     }.map(cc =>
       cc
