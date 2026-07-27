@@ -241,17 +241,24 @@ class HttpWriter(
    * flush deadline, returning `None` when the deadline fires first.
    */
   private def nextChunk(acc: BatchAccumulator): IO[Option[NonEmptySeq[RenderedRecord]]] =
-    if (acc.isEmpty) recordsQueue.take.map(_.some)
-    else acc.nextFlushDeadlineMillis match {
-      case None => recordsQueue.take.map(_.some)
-      case Some(deadline) =>
-        IO.realTime.flatMap { now =>
-          val waitMillis = math.max(0L, deadline - now.toMillis)
-          IO.race(recordsQueue.take, IO.sleep(waitMillis.millis)).map {
-            case Left(chunk) => chunk.some
-            case Right(_)    => none
+    // `IO.defer` so the branch decision reads the accumulator at execution time, not when this IO is
+    // constructed. `loop` builds the recursive `... *> loop(acc)` step (which calls `nextChunk`)
+    // before `processChunk` has folded the chunk into the accumulator, so without deferring, an
+    // empty-accumulator snapshot would be captured and the interval deadline branch would never be
+    // taken for records that were just accumulated -- time-based flushes would never fire.
+    IO.defer {
+      if (acc.isEmpty) recordsQueue.take.map(_.some)
+      else acc.nextFlushDeadlineMillis match {
+        case None => recordsQueue.take.map(_.some)
+        case Some(deadline) =>
+          IO.realTime.flatMap { now =>
+            val waitMillis = math.max(0L, deadline - now.toMillis)
+            IO.race(recordsQueue.take, IO.sleep(waitMillis.millis)).map {
+              case Left(chunk) => chunk.some
+              case Right(_)    => none
+            }
           }
-        }
+      }
     }
 
   /**
@@ -321,7 +328,9 @@ class HttpWriter(
       case None => IO.unit
       case Some(batch) =>
         val flushedCount = batch.length.toLong
-        sendBatch(batch).attempt.flatMap {
+        // Log the once-per-flush explanation here (not in the batch policy) so the line describes the
+        // batch actually being sent, covering hard, greedy and interval-deadline flushes uniformly.
+        IO(acc.logFlush()) *> sendBatch(batch).attempt.flatMap {
           case Right(_) =>
             val flushedCtx = acc.flushedContext().resetErrors
             // These records have left the pipeline (sent), so return their permits to the semaphore.
@@ -331,7 +340,7 @@ class HttpWriter(
     }
 
   private def flushSingle(acc: BatchAccumulator, record: RenderedRecord): IO[Unit] =
-    sendBatch(NonEmptySeq.of(record)).attempt.flatMap {
+    IO(acc.logFlushSingle(record)) *> sendBatch(NonEmptySeq.of(record)).attempt.flatMap {
       case Right(_) =>
         val flushedCtx = acc.candidateContextFor(record).resetErrors
         // The single record has left the pipeline (sent), so return its permit to the semaphore.

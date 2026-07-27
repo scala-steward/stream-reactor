@@ -85,12 +85,18 @@ object RecordsQueueBatcher extends LazyLogging {
 
     if (triggerReached || greedyTriggerReached) {
       NonEmptySeq.fromSeq(batch.toSeq)
-        .map(value =>
+        .map { value =>
+          // Log the once-per-batch explanation using the accepted count/fileSize (not evalContext's
+          // last candidate values), so the line matches the batch actually produced. This also covers
+          // greedy-only (interval) batches, which `shouldBatch` never logged.
+          evalContext.count    = count
+          evalContext.fileSize = fileSize
+          batchPolicy.logFlush(evalContext)
           NonEmptyBatchInfo(value,
                             OffsetMergeUtils.createCommitContextForEvaluation(value.toSeq, initialContext),
                             queueSize,
-          ),
-        )
+          )
+        }
         .getOrElse(EmptyBatchInfo(queueSize))
     } else {
       EmptyBatchInfo(queueSize)

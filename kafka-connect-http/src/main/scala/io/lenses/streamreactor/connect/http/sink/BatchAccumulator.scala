@@ -85,6 +85,26 @@ final class BatchAccumulator(
   }
 
   /**
+   * Emits the batch policy's once-per-flush explanation for the batch currently accumulated. Unlike
+   * `offer`, which leaves `evalContext` holding the last candidate values (`recordCount + 1`), this
+   * sets the context from the actual accumulated totals so the logged counts match the batch that is
+   * really flushed.
+   */
+  def logFlush(): Unit = logFlushWith(recordCount, recordBytes)
+
+  /**
+   * Emits the explanation for a single record flushed on its own (an oversized record that did not
+   * fit even an empty batch).
+   */
+  def logFlushSingle(record: RenderedRecord): Unit = logFlushWith(1L, record.length.toLong)
+
+  private def logFlushWith(count: Long, bytes: Long): Unit = {
+    evalContext.count    = count
+    evalContext.fileSize = bytes
+    batchPolicy.logFlush(evalContext)
+  }
+
+  /**
    * The accumulated batch, if any records have been added.
    */
   def currentBatch: Option[NonEmptySeq[RenderedRecord]] =

@@ -177,9 +177,10 @@ object Dependencies {
   import Versions._
 
   // functional libraries
-  val catsEffectKernel = "org.typelevel" %% "cats-effect-kernel" % catsEffectVersion
-  val catsEffectStd    = "org.typelevel" %% "cats-effect-std"    % catsEffectVersion
-  val catsEffect       = "org.typelevel" %% "cats-effect"        % catsEffectVersion
+  val catsEffectKernel  = "org.typelevel" %% "cats-effect-kernel"  % catsEffectVersion
+  val catsEffectStd     = "org.typelevel" %% "cats-effect-std"     % catsEffectVersion
+  val catsEffect        = "org.typelevel" %% "cats-effect"         % catsEffectVersion
+  val catsEffectTestkit = "org.typelevel" %% "cats-effect-testkit" % catsEffectVersion
 
   val circeGeneric       = "io.circe" %% "circe-generic"        % circeVersion
   val circeGenericExtras = "io.circe" %% "circe-generic-extras" % circeGenericExtrasVersion
@@ -599,7 +600,7 @@ trait Dependencies {
 
   val kafkaConnectHttpDeps: Seq[ModuleID] = Seq(http4sJdkClient, http4sCirce, histogram)
 
-  val kafkaConnectHttpTestDeps: Seq[ModuleID] = baseTestDeps ++ Seq(catsEffectScalatest)
+  val kafkaConnectHttpTestDeps: Seq[ModuleID] = baseTestDeps ++ Seq(catsEffectScalatest, catsEffectTestkit)
 
   val kafkaConnectCassandraDeps: Seq[ModuleID] = Seq(
     cassandraDriver,

@@ -35,7 +35,9 @@ case class BatchPolicy(logger: Logger, conditions: BatchPolicyCondition*) {
 
   def shouldBatch(context: CommitContext): BatchResult = {
     // Hot path: fold the conditions with three flags, allocating no intermediate collections and no
-    // log strings. The explanation is built only when a flush is actually logged (see below).
+    // log strings. This is a pure decision function -- the flush explanation is logged by the flush
+    // sites (see `logFlush`), which know the batch actually being sent, rather than here where only
+    // the candidate batch is visible.
     var triggerReached       = false
     var greedyTriggerReached = false
     var fitsInBatch          = false
@@ -49,11 +51,17 @@ case class BatchPolicy(logger: Logger, conditions: BatchPolicyCondition*) {
         first       = false
       }
     }
-    // Log at most once per flush, not per record: only when a trigger is reached and INFO is on.
-    if (triggerReached)
-      logger.info(generateLogLine(conditions.map(_.explain(context))))
     BatchResult(fitsInBatch, triggerReached, greedyTriggerReached)
   }
+
+  /**
+   * Emits the once-per-flush explanation at INFO, describing the batch actually being sent. Called
+   * by the flush sites rather than by [[shouldBatch]], which only ever sees the candidate batch
+   * (current batch plus the record under consideration) and so cannot describe what is really
+   * flushed. The scala-logging macro gates both the string build and the write on `isInfoEnabled`.
+   */
+  def logFlush(context: CommitContext): Unit =
+    logger.info(generateLogLine(conditions.map(_.explain(context))))
 
   def generateLogLine(explanations: Seq[String]): String =
     s"Flushing for {${explanations.mkString(", ")}}"
