@@ -31,6 +31,7 @@ package io.lenses.streamreactor.connect.gcp.storage
  * limitations under the License.
  */
 import cats.implicits.catsSyntaxOptionId
+import com.google.api.gax.paging.Page
 import com.google.cloud.ReadChannel
 import com.google.cloud.RestorableState
 import com.google.cloud.storage.Blob
@@ -47,6 +48,7 @@ import io.lenses.streamreactor.connect.cloud.common.model.UploadableString
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.NoOverwriteExistingObject
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.ObjectWithETag
 import io.lenses.streamreactor.connect.cloud.common.storage._
+import io.lenses.streamreactor.connect.cloud.common.storage.StorageInterfaceListFilteringBehaviour
 import io.lenses.streamreactor.connect.gcp.storage.storage.GCPStorageFileMetadata
 import io.lenses.streamreactor.connect.gcp.storage.storage.GCPStorageStorageInterface
 import SamplePages.emptyPage
@@ -83,7 +85,8 @@ class GCPStorageStorageInterfaceTest
     with OptionValues
     with MockitoSugar
     with ArgumentMatchersSugar
-    with BeforeAndAfter {
+    with BeforeAndAfter
+    with StorageInterfaceListFilteringBehaviour {
 
   private val client: Storage = mock[Storage](Answers.RETURNS_DEEP_STUBS)
 
@@ -783,6 +786,102 @@ class GCPStorageStorageInterfaceTest
 
     result.isLeft should be(true)
     result.left.value shouldBe a[FileCreateError]
+  }
+
+  // ── LC-318: shared list-filtering contract (StorageInterfaceListFilteringBehaviour) ──────
+
+  private def mockFixtureBlob(obj: FilterFixtureObject): Blob = {
+    val blob = mock[Blob]
+    when(blob.getName).thenReturn(obj.key)
+    when(blob.getSize).thenReturn(java.lang.Long.valueOf(obj.sizeBytes))
+    when(blob.getCreateTimeOffsetDateTime).thenReturn(OffsetDateTime.now())
+    blob
+  }
+
+  private def mockFixturePage(objects: Seq[FilterFixtureObject], nextPage: Page[Blob] = null): Page[Blob] = {
+    // Blobs must be fully stubbed BEFORE starting the `page.getValues` stub below: nesting a
+    // `when(...).thenReturn(...)` call inside the argument expression of another unfinished
+    // `when(...).thenReturn(...)` confuses Mockito's (thread-local) stubbing progress tracker
+    // and raises UnfinishedStubbingException.
+    val blobs = objects.map(mockFixtureBlob)
+    val page  = mock[Page[Blob]]
+    when(page.getValues).thenReturn(blobs.asJava)
+    when(page.getNextPage).thenReturn(nextPage)
+    page
+  }
+
+  override def listWithFixture(
+    objects: Seq[FilterFixtureObject],
+  ): Either[FileListError, Option[ListOfKeysResponse[_]]] = {
+    val page = mockFixturePage(objects)
+    doReturn(page).when(client).list(bucket, BlobListOption.pageSize(objects.size.toLong))
+    storageInterface.list(bucket, none, none, objects.size)
+  }
+
+  override def listKeysRecursiveWithFixture(
+    objects: Seq[FilterFixtureObject],
+  ): Either[FileListError, Option[ListOfKeysResponse[_]]] = {
+    val page = mockFixturePage(objects)
+    doReturn(page).when(client).list(bucket)
+    storageInterface.listKeysRecursive(bucket, none)
+  }
+
+  override def listFileMetaRecursiveWithFixture(
+    objects: Seq[FilterFixtureObject],
+  ): Either[FileListError, Option[ListOfMetadataResponse[_ <: FileMetadata]]] = {
+    val page = mockFixturePage(objects)
+    doReturn(page).when(client).list(bucket)
+    storageInterface.listFileMetaRecursive(bucket, none)
+  }
+
+  // ── LC-318: GCS-specific regression tests (not part of the shared contract) ──────────────
+
+  "list" should "still advance the pagination marker when a page consists entirely of markers/zero-byte objects" in {
+    // GCS deliberately keeps the RAW last blob as its pagination marker (unlike S3, whose
+    // marker is derived from the filtered sequence and would be None here). This proves a
+    // page of nothing but directory markers/zero-byte objects does not stall pagination:
+    // the next poll can still resume via startOffset(marker).
+    // Marker size is non-zero so it is filtered only by the "/"-suffix rule (same witness
+    // discipline as the shared mixedFixture).
+    val allFiltered = Seq(FilterFixtureObject(zeroByteKey, 0L), FilterFixtureObject(markerKey, 42L))
+    val page        = mockFixturePage(allFiltered)
+    doReturn(page).when(client).list(bucket, BlobListOption.pageSize(allFiltered.size.toLong))
+
+    val result = storageInterface.list(bucket, none, none, allFiltered.size)
+
+    val response = result.value.value
+    response.files shouldBe empty
+    response.latestFileMetadata.file should be(markerKey)
+  }
+
+  "listKeysRecursive" should "exclude zero-byte objects and directory markers across multiple pages" in {
+    val secondPage = mockFixturePage(Seq(FilterFixtureObject(validKey, 42L)))
+    val firstPage = mockFixturePage(
+      Seq(FilterFixtureObject(zeroByteKey, 0L), FilterFixtureObject(markerKey, 42L)),
+      nextPage = secondPage,
+    )
+    doReturn(firstPage).when(client).list(bucket)
+
+    val result = storageInterface.listKeysRecursive(bucket, none)
+
+    result.value.value.files should contain only validKey
+  }
+
+  "list" should "keep an object whose size is not reported (fail open) rather than dropping it" in {
+    // Blob.getSize is a nullable java.lang.Long. Mockito returns 0L for an *unstubbed* boxed
+    // Long, so null (the real "size omitted" case) must be stubbed explicitly. Dropping
+    // unknown-size objects would silently starve the source, so isDataObject fails open.
+    // Reverting `forall` to `exists` must fail here.
+    val blob = mock[Blob]
+    when(blob.getName).thenReturn(validKey)
+    when(blob.getSize).thenReturn(null.asInstanceOf[java.lang.Long])
+    when(blob.getCreateTimeOffsetDateTime).thenReturn(OffsetDateTime.now())
+    val page = mock[Page[Blob]]
+    when(page.getValues).thenReturn(Seq(blob).asJava)
+    when(page.getNextPage).thenReturn(null)
+    doReturn(page).when(client).list(bucket, BlobListOption.pageSize(1L))
+
+    storageInterface.list(bucket, none, none, 1).value.value.files should contain only validKey
   }
 
 }
