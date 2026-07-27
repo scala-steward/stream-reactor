@@ -32,7 +32,6 @@ import io.lenses.streamreactor.connect.cloud.common.model.Topic
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
 import io.lenses.streamreactor.connect.http.sink.client.HttpRequestSender
 import io.lenses.streamreactor.common.batch.BatchPolicy
-import io.lenses.streamreactor.common.batch.HttpBatchPolicy
 import io.lenses.streamreactor.connect.http.sink.config.ExponentialRetryConfig
 import io.lenses.streamreactor.connect.http.sink.config.FixedRetryConfig
 import io.lenses.streamreactor.connect.http.sink.config.HttpSinkConfig
@@ -114,7 +113,7 @@ object HttpWriterManager extends StrictLogging {
       sinkName,
       template,
       sender,
-      if (batchPolicy.conditions.nonEmpty) batchPolicy else HttpBatchPolicy.Default,
+      batchPolicy,
       //close the resetter first
       resetterRelease.guarantee(cResRel),
       writersRef,

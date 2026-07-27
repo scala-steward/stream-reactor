@@ -90,9 +90,9 @@ class RecordsQueueBatcherLoggingTest extends AnyFlatSpec with Matchers {
 
   it should "log exactly one flush line for a hard count trigger, describing the accepted batch" in {
     val (batchLogger, appender) = capturingLogger()
-    val policy         = BatchPolicy(batchLogger, Count(2))
-    val initialContext = HttpCommitContext.default("sink")
-    val records        = Queue(testRecord(1), testRecord(2), testRecord(3))
+    val policy                  = BatchPolicy(batchLogger, Count(2))
+    val initialContext          = HttpCommitContext.default("sink")
+    val records                 = Queue(testRecord(1), testRecord(2), testRecord(3))
 
     val result = RecordsQueueBatcher.takeBatch(policy, initialContext, records)
 

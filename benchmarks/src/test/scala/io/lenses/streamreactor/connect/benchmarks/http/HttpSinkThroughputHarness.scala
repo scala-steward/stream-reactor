@@ -24,7 +24,6 @@ import cats.effect.std.Semaphore
 import cats.implicits.toFoldableOps
 import io.lenses.streamreactor.common.batch.BatchPolicy
 import io.lenses.streamreactor.common.batch.Count
-import io.lenses.streamreactor.common.batch.HttpBatchPolicy
 import io.lenses.streamreactor.common.batch.HttpCommitContext
 import io.lenses.streamreactor.connect.benchmarks.BenchResult
 import io.lenses.streamreactor.connect.benchmarks.HeapSampler
@@ -100,10 +99,7 @@ class HttpSinkThroughputHarness {
       template = RawTemplate(config.endpoint, config.content, config.headers, config.nullPayloadHandler)
       sender =
         new NoAuthenticationHttpRequestSender(sinkName, config.method.toHttp4sMethod, stubClient(egressLatency), metrics)
-      batchPolicy = {
-        val configured = config.batch.toBatchPolicy
-        if (configured.conditions.nonEmpty) configured else HttpBatchPolicy.Default
-      }
+      batchPolicy = config.batch.toBatchPolicy
       writerAndQueue  <- buildWriter(sender, template, batchPolicy, config.maxQueueSize, config.maxQueueOfferTimeout)
       (writer, queue)  = writerAndQueue
       batchCount       = batchPolicy.conditions.collectFirst { case Count(c) => c.toInt }.getOrElse(records.length)
