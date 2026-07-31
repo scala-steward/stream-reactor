@@ -398,7 +398,7 @@ class HttpWriter(
         case Right(_) =>
           val flushedCtx = acc.candidateContextFor(record).resetErrors
           // The single record has left the pipeline (sent), so return its permit to the semaphore.
-          commitContextRef.set(flushedCtx) *> IO(acc.resetTo(flushedCtx)) *> permits.releaseN(1L)
+          commitContextRef.set(flushedCtx) *> IO(acc.resetTo(flushedCtx)) *> permits.release
         case Left(error) => handleFlushError(acc, error, 1L)
       }
     }
