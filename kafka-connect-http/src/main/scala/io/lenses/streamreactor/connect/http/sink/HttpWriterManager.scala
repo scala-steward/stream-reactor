@@ -191,7 +191,7 @@ class HttpWriterManager(
   template:                   TemplateType,
   httpRequestSender:          HttpRequestSender,
   batchPolicy:                BatchPolicy,
-  val close:                  IO[Unit],
+  private val close:          IO[Unit],
   writersRef:                 Ref[IO, Map[Topic, HttpWriter]],
   writerCreationLock:         Semaphore[IO],
   deferred:                   Deferred[IO, Either[Throwable, Unit]],
@@ -259,7 +259,7 @@ class HttpWriterManager(
    * so their in-flight requests are cancelled before the shared HTTP client is released. Bounded by
    * a timeout so a stuck request cannot make shutdown hang indefinitely.
    */
-  def awaitConsumers: IO[Unit] =
+  private def awaitConsumers: IO[Unit] =
     consumerFibersRef.get
       .flatMap(fibers => fibers.traverse_(_.join.void))
       .timeoutTo(
@@ -268,12 +268,22 @@ class HttpWriterManager(
       )
 
   /**
-   * Closes the reporting controllers.
+   * Closes the reporting controllers. Must only run once the consumer fibers have stopped:
+   * `HttpWriter.reportResult` enqueues onto these controllers from an in-flight send, and those
+   * reports are dropped (and the offer can block on a queue nothing drains) if they are closed first.
    */
-  def closeReportingControllers(): Unit = {
-    errorReportingController.close()
-    successReportingController.close()
-  }
+  private def closeReportingControllers: IO[Unit] =
+    IO(errorReportingController.close()).guarantee(IO(successReportingController.close()))
+
+  /**
+   * Orderly teardown, to be run after the termination signal has been completed. Each stage is a
+   * finalizer of the previous one, so a failure or timeout part-way still releases everything:
+   * wait for the consumer fibers (their in-flight requests cancelled), only then stop the
+   * reporting controllers (so no in-flight send can enqueue into a closed reporter), and finally
+   * release the shared HTTP client.
+   */
+  def shutdown: IO[Unit] =
+    awaitConsumers.guarantee(closeReportingControllers).guarantee(close)
 
   /**
    * Gets or creates an HTTP writer for the given topic.
