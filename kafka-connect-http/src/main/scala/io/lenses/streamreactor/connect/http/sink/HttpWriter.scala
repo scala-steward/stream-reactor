@@ -314,7 +314,7 @@ class HttpWriter(
         val record = iterator.next()
         val result = acc.offer(record)
         if (result.fitsInBatch) {
-          if (result.triggerReached) next = flush(acc).as(false)
+          if (result.triggerReached) next = flushIfNonEmpty(acc).as(false)
           else if (result.greedyTriggerReached) greedy = true
         } else {
           // record does not fit the current batch: flush what we have, then place it in a fresh batch
@@ -338,7 +338,7 @@ class HttpWriter(
   private def reofferAfterFlush(acc: BatchAccumulator, record: RenderedRecord): IO[Boolean] =
     IO(acc.offer(record)).flatMap { result =>
       if (result.fitsInBatch) {
-        if (result.triggerReached) flush(acc).as(false) else IO.pure(result.greedyTriggerReached)
+        if (result.triggerReached) flushIfNonEmpty(acc).as(false) else IO.pure(result.greedyTriggerReached)
       } else {
         // even an empty batch rejects it (e.g. a single record over the size limit): send it alone
         flushSingle(acc, record).as(false)
