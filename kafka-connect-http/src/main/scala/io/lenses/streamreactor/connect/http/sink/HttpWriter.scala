@@ -306,6 +306,9 @@ class HttpWriter(
   private def offerAll(acc: BatchAccumulator, iterator: Iterator[RenderedRecord]): IO[Boolean] = {
     def step(): IO[Boolean] = IO.defer {
       var greedy = false
+      // `next` is a null sentinel: null means "no flush IO needed yet in this segment". `eq null` is a
+      // pure reference-identity check (no `.equals` dispatch), keeping the common "fits, no flush" record
+      // on the allocation-free path described above.
       var next: IO[Boolean] = null
       while (iterator.hasNext && (next eq null)) {
         val record = iterator.next()
