@@ -353,6 +353,26 @@ class HttpWriter(
   // in-flight request is still cancelled promptly at shutdown), while the result handling is masked
   // so a cancellation cannot land on the `attempt` bind and skip the permit release, stranding
   // permits for records that have already left the pipeline.
+  //
+  // Cancellation reaching the polled `sendBatch` is deliberate, and skipping the release there is
+  // correct rather than a leak. In production the only cancellation source is the
+  // `IO.race(consume(), deferred.get)` in `HttpWriterManager.startConsumer`, and `deferred` is
+  // completed only by `HttpSinkTask.stop()`, so it happens only at shutdown. `.attempt` does not
+  // catch cancellation (in CE3 it is a separate channel from errors), so the masked continuation --
+  // `releaseN` included -- never runs. The batch stays in the accumulator and the commit context is
+  // untouched, so those records have not left the pipeline and correctly keep holding their
+  // permits, and because offsets never advance Kafka redelivers them. Note this means the send was
+  // not *confirmed*, not that it did not happen: the request may already have reached the endpoint,
+  // so redelivery can duplicate it -- the usual at-least-once trade-off.
+  //
+  // Permits held this way cannot wedge a producer: `awaitCapacityAndEnqueue` bounds its wait with
+  // `maxQueueOfferTimeout` and fails with `RetriableException`, so exhausted capacity degrades to a
+  // Connect-level retry rather than a deadlock -- and at shutdown the semaphore is discarded with
+  // the writer anyway.
+  //
+  // A scoped `permit.use` / acquire-with-guaranteed-release does not fit: permits are acquired in
+  // `add` (producer, the Connect `put` thread) and released here on the consumer fiber, a hand-off
+  // across the queue and accumulator rather than a scoped resource.
   private def flush(acc: BatchAccumulator): IO[Unit] =
     acc.currentBatch match {
       case None => IO.unit
@@ -371,6 +391,7 @@ class HttpWriter(
         }
     }
 
+  // Cancellation and permit accounting behave exactly as described on `flush` above.
   private def flushSingle(acc: BatchAccumulator, record: RenderedRecord): IO[Unit] =
     IO(acc.logFlushSingle(record)) *> IO.uncancelable { poll =>
       poll(sendBatch(NonEmptySeq.of(record)).attempt).flatMap {

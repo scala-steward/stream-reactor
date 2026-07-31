@@ -396,6 +396,42 @@ class HttpWriterTest extends AsyncIOSpec with AsyncFunSuiteLike with Matchers wi
     )
   }
 
+  // Test C2: the case the reviewer raised on `flush`'s cancellation comment -- cancelling while the
+  // send itself is still in flight (rather than between send and release, as Test C does). The
+  // permits for that batch must stay held (they are not returned until a send is confirmed) and the
+  // commit context must stay unadvanced (so Kafka redelivers the records), matching the reasoning
+  // documented above `flush` in `HttpWriter.scala`.
+  test("cancelling while a send is still in flight leaves its permits held and offsets unadvanced") {
+    TestControl.executeEmbed(
+      for {
+        commitContextRef <- Ref.of[IO, HttpCommitContext](HttpCommitContext.default(sinkName))
+        offsetMapRef     <- Ref.of[IO, Map[TopicPartition, Offset]](Map.empty)
+        entered          <- Deferred[IO, Unit]
+        underlying       <- Semaphore[IO](2L)
+        writerAndQueue <- buildWriter(
+          BatchPolicy(logger, Count(2)),
+          maxQueueSize     = 2,
+          sender           = blockingSender(entered),
+          permits          = underlying.some,
+          commitContextRef = commitContextRef,
+          offsetMapRef     = offsetMapRef,
+        )
+        (writer, _)    = writerAndQueue
+        initialCtx    <- commitContextRef.get
+        consumerFiber <- writer.consume().start
+        _             <- writer.add(NonEmptySeq.of(record1, record2))
+        // both permits are held and the (never-completing) send has started
+        _         <- entered.get
+        _         <- consumerFiber.cancel
+        available <- underlying.available
+        finalCtx  <- commitContextRef.get
+      } yield {
+        available shouldBe 0L
+        finalCtx shouldBe initialCtx
+      },
+    )
+  }
+
   // Test D (below threshold): a flush failure that stays under the error threshold drops the batch
   // and must return its permits. No cancellation involved -- this pins exact permit accounting on the
   // error path (the semaphore has no upper bound, so an over-release would silently inflate capacity
