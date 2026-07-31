@@ -17,7 +17,8 @@ package io.lenses.streamreactor.common.batch
 
 import cats.data.NonEmptySeq
 import com.typesafe.scalalogging.LazyLogging
-import io.lenses.streamreactor.common.batch.OffsetMergeUtils.createCommitContextForEvaluation
+import io.lenses.streamreactor.connect.cloud.common.sink.commit.CommitContext
+import io.lenses.streamreactor.connect.cloud.common.sink.commit.ConditionCommitResult
 
 import scala.collection.immutable.Queue
 import scala.collection.mutable
@@ -26,14 +27,20 @@ object RecordsQueueBatcher extends LazyLogging {
 
   /**
    * Iterates through the queue until the records trigger a commit based on the commit policy.
-   * Uses `foldM` to fold over the queue and stop at the first record that triggers a commit.
-   * If the commit policy is met, it returns a `Left` with the batch of records and the updated commit context.
-   * If the commit policy is not met, it returns a `Right` with the batch of records and the updated commit context.
    *
-   * @param commitPolicy The commit policy.
+   * The policy is evaluated against a single reusable [[CommitContext]] whose `count`/`fileSize`
+   * are updated in place, so evaluating a batch of N records allocates nothing on the hot path
+   * (no per-record commit-context copy, no per-record offset-map update). The conditions read only
+   * `count`/`fileSize`/`lastModified` (never `committedOffsets`), so the per-partition max offsets
+   * are merged once, at the end, via `OffsetMergeUtils.createCommitContextForEvaluation` over the
+   * accepted batch. This is output-identical to threading the merged context through every record,
+   * because per-partition max offset merging is associative and commutative.
+   *
+   * @param batchPolicy The batch policy.
    * @param initialContext The initial commit context.
    * @param records The queue of records to be processed.
-   * @return Either a tuple of the batch of records and the updated commit context, or the same tuple if the commit policy is not met.
+   * @return A `NonEmptyBatchInfo` with the batch and updated commit context when the policy
+   *         triggers, otherwise an `EmptyBatchInfo`.
    */
   def takeBatch[B <: BatchRecord](
     batchPolicy:    BatchPolicy,
@@ -41,36 +48,74 @@ object RecordsQueueBatcher extends LazyLogging {
     records:        Queue[B],
   ): BatchInfo = {
 
-    val batch          = mutable.Buffer[B]()
-    var currentContext = initialContext
+    val batch     = mutable.Buffer[B]()
+    val queueSize = records.size
+
+    // Reused across the loop; local to this call, so no synchronisation is required.
+    val evalContext = new MutableCommitContext(initialContext.createdTimestamp, initialContext.lastFlushedTimestamp)
+    var count       = 0L
+    var fileSize    = 0L
 
     var greedyTriggerReached = false
     var triggerReached       = false
-    records.takeWhile {
-      record =>
-        val updatedRecords = batch.toSeq :+ record
-        val updatedContext = createCommitContextForEvaluation(updatedRecords, currentContext)
-        val addToBatch     = batchPolicy.shouldBatch(updatedContext)
-        triggerReached       = addToBatch.triggerReached
-        greedyTriggerReached = addToBatch.greedyTriggerReached
-        logger.debug(
-          s"Trigger Reached: $triggerReached, Greedy trigger Reached: $greedyTriggerReached, Fits in batch: ${addToBatch.fitsInBatch}",
-        )
 
-        if (addToBatch.fitsInBatch) {
-          batch.addOne(record)
-          currentContext = updatedContext
-        }
-        !triggerReached || (!triggerReached && greedyTriggerReached)
+    val iterator = records.iterator
+    var continue = true
+    while (continue && iterator.hasNext) {
+      val record = iterator.next()
+
+      evalContext.count    = count + 1L
+      evalContext.fileSize = fileSize + record.length.toLong
+
+      val addToBatch = batchPolicy.shouldBatch(evalContext)
+      triggerReached       = addToBatch.triggerReached
+      greedyTriggerReached = addToBatch.greedyTriggerReached
+      logger.debug(
+        s"Trigger Reached: $triggerReached, Greedy trigger Reached: $greedyTriggerReached, Fits in batch: ${addToBatch.fitsInBatch}",
+      )
+
+      if (addToBatch.fitsInBatch) {
+        batch.addOne(record)
+        count += 1L
+        fileSize += record.length.toLong
+      }
+
+      continue = !triggerReached
     }
 
-    if (triggerReached || (!triggerReached && greedyTriggerReached)) {
+    if (triggerReached || greedyTriggerReached) {
       NonEmptySeq.fromSeq(batch.toSeq)
-        .map(value => NonEmptyBatchInfo(value, currentContext, records.size))
-        .getOrElse(EmptyBatchInfo(records.size))
+        .map { value =>
+          // Log the once-per-batch explanation using the accepted count/fileSize (not evalContext's
+          // last candidate values), so the line matches the batch actually produced. This also covers
+          // greedy-only (interval) batches, which `shouldBatch` never logged.
+          evalContext.count    = count
+          evalContext.fileSize = fileSize
+          batchPolicy.logFlush(evalContext)
+          NonEmptyBatchInfo(value,
+                            OffsetMergeUtils.createCommitContextForEvaluation(value.toSeq, initialContext),
+                            queueSize,
+          )
+        }
+        .getOrElse(EmptyBatchInfo(queueSize))
     } else {
-      EmptyBatchInfo(records.size)
+      EmptyBatchInfo(queueSize)
     }
+  }
+
+  /**
+   * A minimal mutable [[CommitContext]] used only to feed `count`/`fileSize`/`lastModified` into
+   * the batch policy. `committedOffsets` and `generateLogLine` are never consulted by
+   * `BatchPolicy.shouldBatch`, so they are intentionally not modelled here.
+   */
+  private final class MutableCommitContext(
+    val createdTimestamp:     Long,
+    val lastFlushedTimestamp: Option[Long],
+  ) extends CommitContext {
+    var count:    Long = 0L
+    var fileSize: Long = 0L
+
+    override def generateLogLine(flushing: Boolean, result: Seq[ConditionCommitResult]): String = ""
   }
 
 }

@@ -43,11 +43,7 @@ import org.scalatest.matchers.should.Matchers
  * `_.size() > 0` throws on a null Long and surfaces a FileListError. Aligning S3 would be a
  * behaviour change and is out of scope for LC-318.
  */
-trait StorageInterfaceListFilteringBehaviour
-    extends AnyFlatSpecLike
-    with Matchers
-    with EitherValues
-    with OptionValues {
+trait StorageInterfaceListFilteringBehaviour extends AnyFlatSpecLike with Matchers with EitherValues with OptionValues {
 
   /** One object as it would appear in a raw (unfiltered) listing. */
   case class FilterFixtureObject(key: String, sizeBytes: Long)

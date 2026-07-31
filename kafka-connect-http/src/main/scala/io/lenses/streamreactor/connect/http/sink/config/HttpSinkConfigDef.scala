@@ -19,6 +19,7 @@ import io.lenses.streamreactor.connect.http.sink.client.oauth2.OAuth2Config
 import io.lenses.streamreactor.connect.reporting.config.ReporterConfig
 import org.apache.kafka.common.config.ConfigDef
 import org.apache.kafka.common.config.ConfigDef.Importance
+import org.apache.kafka.common.config.ConfigDef.Range
 import org.apache.kafka.common.config.ConfigDef.Type
 import org.http4s.Status.BadGateway
 import org.http4s.Status.GatewayTimeout
@@ -102,7 +103,7 @@ object HttpSinkConfigDef {
   val ErrorThresholdProp: String = "connect.http.error.threshold"
   val ErrorThresholdDoc: String =
     """
-      |The number of errors to tolerate before failing the sink.
+      |The number of consecutive failed flushes (per topic-partition, reset on the next successful flush) to tolerate before failing the sink. The sink fails on the next failure after this many.
       |""".stripMargin
   val ErrorThresholdDefault = 5
 
@@ -129,6 +130,7 @@ object HttpSinkConfigDef {
   val TimeIntervalDoc: String =
     """
       |The time interval in milliseconds to wait before sending the request.
+      |When both 'connect.http.batch.count' and 'connect.http.batch.size' are disabled (set to 0), the interval alone decides when to flush and imposes no upper bound on a batch; 'connect.http.max.queue.size' then becomes the effective batch ceiling.
       |""".stripMargin
 
   val AuthenticationTypeProp: String = "connect.http.authentication.type"
@@ -340,6 +342,7 @@ object HttpSinkConfigDef {
         MaxQueueSizeProp,
         Type.INT,
         MaxQueueSizeDefault,
+        Range.atLeast(1),
         Importance.HIGH,
         MaxQueueSizeDoc,
       )
@@ -347,6 +350,7 @@ object HttpSinkConfigDef {
         MaxQueueOfferTimeoutProp,
         Type.LONG,
         MaxQueueOfferTimeoutDefault,
+        Range.atLeast(0L),
         Importance.HIGH,
         MaxQueueOfferTimeoutDoc,
       )

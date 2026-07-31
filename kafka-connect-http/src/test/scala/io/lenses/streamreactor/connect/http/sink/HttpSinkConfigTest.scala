@@ -16,6 +16,8 @@
 package io.lenses.streamreactor.connect.http.sink
 import cyclops.control.Option.{ none => cynone }
 import cyclops.control.Option.{ some => cysome }
+import io.lenses.streamreactor.common.batch.Count
+import io.lenses.streamreactor.common.batch.HttpBatchPolicy
 import io.lenses.streamreactor.common.security.StoresInfo
 import io.lenses.streamreactor.connect.http.sink.client.HttpMethod.Put
 import io.lenses.streamreactor.connect.http.sink.client.BasicAuthentication
@@ -245,6 +247,69 @@ class HttpSinkConfigTest extends AnyFunSuiteLike with Matchers with EitherValues
     ).value
 
     httpSinkConfig.nullPayloadHandler should be(CustomNullPayloadHandler(customValue))
+  }
+
+  test("fails when max queue size is not positive") {
+    // The Range validator runs while the underlying Kafka AbstractConfig is parsed, so it surfaces
+    // as a thrown ConfigException rather than a Left.
+    val thrown = the[ConfigException] thrownBy HttpSinkConfig.from(
+      Map(
+        HttpSinkConfigDef.HttpMethodProp         -> "put",
+        HttpSinkConfigDef.HttpEndpointProp       -> "http://myaddress.example.com",
+        HttpSinkConfigDef.HttpRequestContentProp -> "<note>\n<to>Dave</to>\n<from>Jason</from>\n<body>Hooray for Kafka Connect!</body>\n</note>",
+        HttpSinkConfigDef.MaxQueueSizeProp       -> "0",
+        ERROR_REPORTING_ENABLED_PROP             -> "false",
+        SUCCESS_REPORTING_ENABLED_PROP           -> "false",
+      ),
+    )
+
+    thrown.getMessage should include(HttpSinkConfigDef.MaxQueueSizeProp)
+  }
+
+  test("fails when batch count exceeds max queue size") {
+    val result = HttpSinkConfig.from(
+      Map(
+        HttpSinkConfigDef.HttpMethodProp         -> "put",
+        HttpSinkConfigDef.HttpEndpointProp       -> "http://myaddress.example.com",
+        HttpSinkConfigDef.HttpRequestContentProp -> "<note>\n<to>Dave</to>\n<from>Jason</from>\n<body>Hooray for Kafka Connect!</body>\n</note>",
+        HttpSinkConfigDef.BatchCountProp         -> "10",
+        HttpSinkConfigDef.MaxQueueSizeProp       -> "5",
+        ERROR_REPORTING_ENABLED_PROP             -> "false",
+        SUCCESS_REPORTING_ENABLED_PROP           -> "false",
+      ),
+    )
+
+    result.left.value shouldBe a[IllegalArgumentException]
+    result.left.value.getMessage should include(HttpSinkConfigDef.BatchCountProp)
+    result.left.value.getMessage should include(HttpSinkConfigDef.MaxQueueSizeProp)
+  }
+
+  test("fails when the default batch count exceeds max queue size") {
+    val result = HttpSinkConfig.from(
+      Map(
+        HttpSinkConfigDef.HttpMethodProp         -> "put",
+        HttpSinkConfigDef.HttpEndpointProp       -> "http://myaddress.example.com",
+        HttpSinkConfigDef.HttpRequestContentProp -> "<note>\n<to>Dave</to>\n<from>Jason</from>\n<body>Hooray for Kafka Connect!</body>\n</note>",
+        HttpSinkConfigDef.BatchCountProp         -> "0",
+        HttpSinkConfigDef.MaxQueueSizeProp       -> "5",
+        ERROR_REPORTING_ENABLED_PROP             -> "false",
+        SUCCESS_REPORTING_ENABLED_PROP           -> "false",
+      ),
+    )
+
+    result.left.value shouldBe a[IllegalArgumentException]
+    result.left.value.getMessage should include("default batch record count")
+    result.left.value.getMessage should include(HttpSinkConfigDef.MaxQueueSizeProp)
+  }
+
+  test("BatchConfig.toBatchPolicy falls back to the default policy when nothing is configured") {
+    BatchConfig(None, None, None).toBatchPolicy should be theSameInstanceAs HttpBatchPolicy.Default
+  }
+
+  test("BatchConfig.toBatchPolicy uses the configured conditions when present") {
+    val policy = BatchConfig(Some(10L), None, None).toBatchPolicy
+    policy should not be theSameInstanceAs(HttpBatchPolicy.Default)
+    policy.conditions.collectFirst { case Count(c) => c } should be(Some(10L))
   }
 
   test("NullPayloadHandler should throw ConfigException for an invalid handler name") {

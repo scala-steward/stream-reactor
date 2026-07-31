@@ -23,57 +23,74 @@ import java.time.Duration
 import java.time.Instant
 
 trait BatchPolicyCondition {
-  def eval(context: CommitContext, debugEnabled: Boolean): BatchConditionCommitResult
+
+  /**
+   * Evaluates the condition against the commit context. This is on the per-record hot path, so it
+   * must not allocate log strings or `Instant`s: it returns only the decision flags.
+   */
+  def eval(context: CommitContext): BatchResult
+
+  /**
+   * Builds the human-readable log fragment for this condition. Called only when a flush is logged
+   * (at most once per flush), so it is free to allocate strings and `Instant`s.
+   */
+  def explain(context: CommitContext): String
 }
 
-case class BatchConditionCommitResult(batchResult: BatchResult, logLine: Option[String])
-
 case class Count(minCount: Long) extends BatchPolicyCondition {
-  override def eval(commitContext: CommitContext, debugEnabled: Boolean): BatchConditionCommitResult = {
-
+  override def eval(commitContext: CommitContext): BatchResult = {
     val continueWhen = commitContext.count <= minCount
     val triggerWhen  = commitContext.count >= minCount
-    val flushing     = if (triggerWhen) "*" else ""
+    BatchResult(continueWhen, triggerWhen, false)
+  }
 
-    val log = Option.when(debugEnabled) {
-      s"count$flushing: '${commitContext.count}/$minCount'"
-    }
-
-    BatchConditionCommitResult(BatchResult(continueWhen, triggerWhen, false), log)
+  override def explain(commitContext: CommitContext): String = {
+    val flushing = if (commitContext.count >= minCount) "*" else ""
+    s"count$flushing: '${commitContext.count}/$minCount'"
   }
 }
 
 case class FileSize(minFileSize: Long) extends BatchPolicyCondition with LazyLogging {
-  override def eval(context: CommitContext, debugEnabled: Boolean): BatchConditionCommitResult = {
+  override def eval(context: CommitContext): BatchResult = {
     val continueWhen = context.fileSize <= minFileSize
     val triggerWhen  = context.fileSize >= minFileSize
-    val logLine = Option.when(debugEnabled) {
-      val flushing = if (triggerWhen) "*" else ""
-      s"fileSize$flushing: '${context.fileSize}/$minFileSize'"
-    }
-    BatchConditionCommitResult(BatchResult(continueWhen, triggerWhen, false), logLine)
+    BatchResult(continueWhen, triggerWhen, false)
+  }
+
+  override def explain(context: CommitContext): String = {
+    val flushing = if (context.fileSize >= minFileSize) "*" else ""
+    s"fileSize$flushing: '${context.fileSize}/$minFileSize'"
   }
 }
 
 case class Interval(interval: Duration, clock: Clock) extends BatchPolicyCondition with LazyLogging {
 
-  override def eval(context: CommitContext, debugEnabled: Boolean): BatchConditionCommitResult = {
-    val nowInstant = clock.instant()
+  private val intervalMillis: Long = interval.toMillis
 
+  override def eval(context: CommitContext): BatchResult = {
+    // An elapsed interval is a flush *trigger*, never a capacity limit: a record's arrival can never
+    // be "too late to fit", so `fitsInBatch` is always true and only the greedy trigger reflects the
+    // elapsed deadline. Reporting `fitsInBatch = false` here would make an interval-only policy
+    // reject every record (see `BatchPolicy.shouldBatch`), collapsing time-based batching into one
+    // request per record.
+    // Compare epoch millis to avoid allocating three `Instant`s per record on the hot path; the
+    // pretty (Instant-based) log string is built only in `explain`, when a flush is logged.
+    val nowMillis       = clock.millis()
+    val nextFlushMillis = context.lastModified + intervalMillis
+    val triggerWhen     = nowMillis >= nextFlushMillis
+    BatchResult(fitsInBatch = true, triggerReached = false, greedyTriggerReached = triggerWhen)
+  }
+
+  override def explain(context: CommitContext): String = {
+    val nowMillis        = clock.millis()
+    val nextFlushMillis  = context.lastModified + intervalMillis
+    val flushing         = if (nowMillis >= nextFlushMillis) "*" else ""
     val lastWriteInstant = Instant.ofEpochMilli(context.lastModified)
-    val nextFlushTime    = lastWriteInstant.plus(interval)
-    val continueWhen     = nowInstant.isBefore(nextFlushTime) || nowInstant.equals(nextFlushTime)
-    val triggerWhen      = nowInstant.isAfter(nextFlushTime) || nowInstant.equals(nextFlushTime)
-
-    val logLine = Option.when(debugEnabled) {
-      val flushing      = if (triggerWhen) "*" else ""
-      val timeRemaining = nextFlushTime.getEpochSecond - nowInstant.getEpochSecond
-      s"interval$flushing: {frequency:${interval.toSeconds}s, in:${timeRemaining}s, lastFlush:${lastWriteInstant.toString.substring(0,
-                                                                                                                                    19,
-      )}, nextFlush:${nextFlushTime.toString.substring(0, 19)}}"
-    }
-    BatchConditionCommitResult(BatchResult(continueWhen, triggerReached = false, greedyTriggerReached = triggerWhen),
-                               logLine,
-    )
+    val nextFlushTime    = Instant.ofEpochMilli(nextFlushMillis)
+    val nowInstant       = Instant.ofEpochMilli(nowMillis)
+    val timeRemaining    = nextFlushTime.getEpochSecond - nowInstant.getEpochSecond
+    s"interval$flushing: {frequency:${interval.toSeconds}s, in:${timeRemaining}s, lastFlush:${lastWriteInstant.toString.substring(0,
+                                                                                                                                  19,
+    )}, nextFlush:${nextFlushTime.toString.substring(0, 19)}}"
   }
 }

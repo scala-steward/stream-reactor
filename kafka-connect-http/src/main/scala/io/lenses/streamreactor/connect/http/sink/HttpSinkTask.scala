@@ -41,7 +41,7 @@ import org.apache.kafka.connect.sink.SinkRecord
 import org.apache.kafka.connect.sink.SinkTask
 
 import java.util
-import scala.jdk.CollectionConverters.IterableHasAsScala
+import scala.jdk.CollectionConverters.CollectionHasAsScala
 import scala.jdk.CollectionConverters.MapHasAsJava
 import scala.jdk.CollectionConverters.MapHasAsScala
 
@@ -145,6 +145,15 @@ class HttpSinkTask extends SinkTask with LazyLogging with JarManifestProvided {
       }
   }
 
+  override def open(partitions: util.Collection[KafkaTopicPartition]): Unit = {
+    val writerManager =
+      maybeWriterManager.getOrElse(throw new IllegalStateException("No writer manager available in open"))
+    val assigned = partitions.asScala.map { tp =>
+      Topic(tp.topic()).withPartition(tp.partition())
+    }.toSet
+    writerManager.onPartitionsOpened(assigned).unsafeRunSync()
+  }
+
   override def preCommit(
     currentOffsets: util.Map[KafkaTopicPartition, OffsetAndMetadata],
   ): util.Map[KafkaTopicPartition, OffsetAndMetadata] = {
@@ -189,11 +198,14 @@ class HttpSinkTask extends SinkTask with LazyLogging with JarManifestProvided {
     (for {
       taskNumber <- taskNumberRef.get
       _          <- IO(MetricsRegistrar.unregisterMetricsMBean(sinkName, taskNumber))
+      // Signal termination first, then wait for the consumer fibers to finish (their in-flight
+      // requests cancelled) before releasing the shared HTTP client, so teardown does not race with
+      // an in-progress send.
+      _ <- deferred.complete(().asRight)
       _ <- maybeWriterManager.traverse { x =>
         x.closeReportingControllers()
-        x.close
+        x.awaitConsumers *> x.close
       }
-      _ <- deferred.complete(().asRight)
     } yield ()).unsafeRunSync()
 
 }

@@ -53,6 +53,13 @@ case class BatchConfig(
   timeInterval: Option[Long],
 ) {
 
+  /**
+   * Builds the effective batch policy. When nothing is configured (count/size/interval all unset or
+   * zero), it falls back to [[HttpBatchPolicy.Default]] rather than an empty policy. Centralising the
+   * fallback here means config validation and the writer see the same effective policy, so the
+   * default's `Count(50000)` cannot slip past the `max.queue.size` check (see
+   * `HttpSinkConfig.validateMaxQueueSize`).
+   */
   def toBatchPolicy: BatchPolicy = {
     val conditions: Seq[BatchPolicyCondition] = Seq(
       batchCount.map(Count),
@@ -60,7 +67,7 @@ case class BatchConfig(
       timeInterval.map(inter => Interval(Duration.ofSeconds(inter), Clock.systemDefaultZone())),
     ).flatten
 
-    BatchPolicy(conditions: _*)
+    if (conditions.isEmpty) HttpBatchPolicy.Default else BatchPolicy(conditions: _*)
   }
 }
 
@@ -221,7 +228,8 @@ object HttpSinkConfig {
         ),
       )
 
-      maxQueueSize = connectConfig.getInt(HttpSinkConfigDef.MaxQueueSizeProp)
+      maxQueueSize <-
+        validateMaxQueueSize(batch.toBatchPolicy, batch, connectConfig.getInt(HttpSinkConfigDef.MaxQueueSizeProp))
       maxQueueOfferTimeout = FiniteDuration(
         connectConfig.getLong(HttpSinkConfigDef.MaxQueueOfferTimeoutProp),
         scala.concurrent.duration.MILLISECONDS,
@@ -246,6 +254,41 @@ object HttpSinkConfig {
       maxQueueOfferTimeout,
     )
   }
+
+  /**
+   * A record's backpressure permit is held for its whole lifetime in the writer, including while it
+   * sits in the batch accumulator. If a count-based batch trigger required more records than the
+   * queue can admit, the accumulator could never reach the trigger while producers are blocked on
+   * permits, so the effective batch record count must not exceed `maxQueueSize`.
+   *
+   * The count is read from the effective [[BatchPolicy]] rather than the raw [[BatchConfig]], so the
+   * fallback `Count` from [[HttpBatchPolicy.Default]] (applied by `toBatchPolicy` when nothing is
+   * configured) is validated too. The error message names `connect.http.batch.count` only when the
+   * user actually set it; otherwise it explains the count came from the default policy and points at
+   * the batch/queue-size props to reconcile.
+   */
+  private def validateMaxQueueSize(
+    batchPolicy:  BatchPolicy,
+    batch:        BatchConfig,
+    maxQueueSize: Int,
+  ): Either[Throwable, Int] =
+    batchPolicy.conditions.collectFirst { case Count(minCount) => minCount } match {
+      case Some(count) if count > maxQueueSize.toLong =>
+        val source =
+          if (batch.batchCount.isDefined)
+            s"'${HttpSinkConfigDef.BatchCountProp}' ($count)"
+          else
+            s"the default batch record count ($count, applied because none of " +
+              s"'${HttpSinkConfigDef.BatchCountProp}'/'${HttpSinkConfigDef.BatchSizeProp}'/" +
+              s"'${HttpSinkConfigDef.TimeIntervalProp}' is set)"
+        Left(
+          new IllegalArgumentException(
+            s"$source must not be greater than '${HttpSinkConfigDef.MaxQueueSizeProp}' ($maxQueueSize). " +
+              s"Lower the batch record count or raise '${HttpSinkConfigDef.MaxQueueSizeProp}'.",
+          ),
+        )
+      case _ => Right(maxQueueSize)
+    }
 
   def extractEndpoint(endpoint: String): Either[Throwable, String] = {
     def isValidUrl(url: String): Boolean = Try(new URL(url)).isSuccess
