@@ -198,14 +198,11 @@ class HttpSinkTask extends SinkTask with LazyLogging with JarManifestProvided {
     (for {
       taskNumber <- taskNumberRef.get
       _          <- IO(MetricsRegistrar.unregisterMetricsMBean(sinkName, taskNumber))
-      // Signal termination first, then wait for the consumer fibers to finish (their in-flight
-      // requests cancelled) before releasing the shared HTTP client, so teardown does not race with
-      // an in-progress send.
+      // Signal termination, then let the manager own the teardown order (consumer fibers first,
+      // then reporting controllers, then the shared HTTP client) so it does not race with an
+      // in-progress send.
       _ <- deferred.complete(().asRight)
-      _ <- maybeWriterManager.traverse { x =>
-        x.closeReportingControllers()
-        x.awaitConsumers *> x.close
-      }
+      _ <- maybeWriterManager.traverse_(_.shutdown)
     } yield ()).unsafeRunSync()
 
 }
