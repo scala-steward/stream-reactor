@@ -80,19 +80,21 @@ check_connector "gcs-bad"
 check_connector "gcs-good"
 check_connector "gcs-rolling"
 
-info "[06-verify] waiting for objects to appear in GCS (up to ~60 s) ..."
+# Wait until counts meet the later assertion floors (not just "any object"),
+# otherwise a slow Connect/GCS can exit early and fail the bad >= 5 check.
+info "[06-verify] waiting for expected partition counts in GCS (up to ~120 s) ..."
 BAD_PREFIX="${GCS_PREFIX}/bad"
 GOOD_PREFIX="${GCS_PREFIX}/good"
 ROLLING_PREFIX="${GCS_PREFIX}/rolling"
-for i in {1..12}; do
+for i in {1..24}; do
   BAD_LIST=$(list_partition_dirs "${BAD_PREFIX}")
   GOOD_LIST=$(list_partition_dirs "${GOOD_PREFIX}")
   ROLLING_LIST=$(list_rolling_minute_buckets "${ROLLING_PREFIX}")
   BAD_COUNT=$(count_lines "${BAD_LIST}")
   GOOD_COUNT=$(count_lines "${GOOD_LIST}")
   ROLLING_COUNT=$(count_lines "${ROLLING_LIST}")
-  echo "    attempt ${i}/12 — bad dirs=${BAD_COUNT}, good dirs=${GOOD_COUNT}, rolling buckets=${ROLLING_COUNT}"
-  if [[ "${BAD_COUNT}" -ge 1 && "${GOOD_COUNT}" -ge 1 && "${ROLLING_COUNT}" -ge 1 ]]; then
+  echo "    attempt ${i}/24 — bad dirs=${BAD_COUNT}, good dirs=${GOOD_COUNT}, rolling buckets=${ROLLING_COUNT}"
+  if [[ "${BAD_COUNT}" -ge 5 && "${GOOD_COUNT}" -ge 2 && "${ROLLING_COUNT}" -ge 2 ]]; then
     break
   fi
   sleep 5

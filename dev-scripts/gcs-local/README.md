@@ -57,13 +57,16 @@ wipes those index dirs as a belt-and-braces measure.
 | JDK 17 | For building the GCS sink assembly |
 | sbt | Builds `kafka-connect-gcp-storage` |
 | `curl` | Downloads the SMT jar from GitHub Releases |
+| `jq` | Parses Connect REST status JSON during deploy/verify |
+| `sha256sum` or `shasum` | Verifies the SMT jar download |
 | `gcloud` or `gsutil` | Used by the verify script to list GCS |
 | Writable GCS bucket + SA JSON | `storage.objects.create` + `storage.objects.list` |
 
 The Lenses SMT jar is always downloaded from the published GitHub Release —
 never built from source. Default:
-[kafka-connect-smt v1.5.0](https://github.com/lensesio/kafka-connect-smt/releases/tag/v1.5.0).
-Override with `SMT_VERSION` or `SMT_RELEASE_URL` in `.env`.
+[kafka-connect-smt v1.5.0](https://github.com/lensesio/kafka-connect-smt/releases/tag/v1.5.0)
+(SHA-256 pinned in `scripts/01-build.sh`). Override with `SMT_VERSION` /
+`SMT_RELEASE_URL` and set `SMT_SHA256` to the jar's digest.
 
 ## Quick start
 

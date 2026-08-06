@@ -21,8 +21,23 @@ STAGED_CREDS="${SECRETS_DIR}/gcp-credentials.json"
 # SMT is always the published GitHub Release jar — never built from source.
 SMT_VERSION="${SMT_VERSION:-1.5.0}"
 SMT_RELEASE_URL="${SMT_RELEASE_URL:-https://github.com/lensesio/kafka-connect-smt/releases/download/v${SMT_VERSION}/kafka-connect-smt-${SMT_VERSION}.jar}"
+# Pin integrity for the default v1.5.0 jar. Override SMT_SHA256 when changing
+# SMT_VERSION / SMT_RELEASE_URL (required for non-default downloads).
+DEFAULT_SMT_SHA256="3a5f93e0d5bb84f7f715b593b1bbc523ecc84467c62110f6a17e6d68005006b5"
+SMT_SHA256="${SMT_SHA256:-}"
 
 info "[01-build] repo root: ${REPO_ROOT}"
+
+sha256_file() {
+  local f="$1"
+  if command -v sha256sum &>/dev/null; then
+    sha256sum "${f}" | awk '{print $1}'
+  elif command -v shasum &>/dev/null; then
+    shasum -a 256 "${f}" | awk '{print $1}'
+  else
+    die "Need sha256sum or shasum to verify the SMT jar download."
+  fi
+}
 
 # ── JDK 17 (needed for gcp-storage assembly) ──────────────────────────────────
 JAVA17_HOME=$(detect_java17 || true)
@@ -39,7 +54,9 @@ if [[ ! -f "${GCS_CREDENTIALS_FILE}" ]]; then
 fi
 mkdir -p "${SECRETS_DIR}"
 cp -f "${GCS_CREDENTIALS_FILE}" "${STAGED_CREDS}"
-chmod 600 "${STAGED_CREDS}"
+# 644 so Connect's appuser (UID 1000) can read the bind-mount on Linux Docker
+# when the host UID is not 1000. File stays under gitignored ./secrets/.
+chmod 644 "${STAGED_CREDS}"
 info "[01-build] staged credentials → ${STAGED_CREDS}"
 
 # ── GCS sink assembly ─────────────────────────────────────────────────────────
@@ -66,6 +83,16 @@ if [[ "${REBUILD:-0}" != "1" && -n "${EXISTING_SMT}" ]]; then
   info "[01-build] SMT jar already present: ${EXISTING_SMT}"
 else
   DEST="${SMT_PLUGIN_DIR}/kafka-connect-smt-${SMT_VERSION}.jar"
+  EXPECTED_SHA="${SMT_SHA256}"
+  if [[ -z "${EXPECTED_SHA}" ]]; then
+    if [[ "${SMT_VERSION}" == "1.5.0" && "${SMT_RELEASE_URL}" == *"kafka-connect-smt-1.5.0.jar" ]]; then
+      EXPECTED_SHA="${DEFAULT_SMT_SHA256}"
+    else
+      die "SMT_SHA256 is required when SMT_VERSION/SMT_RELEASE_URL is not the default v1.5.0.
+Set SMT_SHA256=<sha256 of the jar> in .env."
+    fi
+  fi
+
   info "[01-build] downloading SMT v${SMT_VERSION} from GitHub Releases ..."
   info "          ${SMT_RELEASE_URL}"
   rm -f "${SMT_PLUGIN_DIR}"/*.jar
@@ -83,6 +110,15 @@ Override with SMT_VERSION=... or SMT_RELEASE_URL=..."
     rm -f "${DEST}"
     die "Downloaded SMT jar looks empty/corrupt: ${DEST}"
   fi
+  ACTUAL_SHA=$(sha256_file "${DEST}")
+  if [[ "${ACTUAL_SHA}" != "${EXPECTED_SHA}" ]]; then
+    rm -f "${DEST}"
+    die "SMT jar SHA-256 mismatch:
+  expected: ${EXPECTED_SHA}
+  actual:   ${ACTUAL_SHA}
+  url:      ${SMT_RELEASE_URL}"
+  fi
+  info "[01-build] SMT jar SHA-256 OK (${ACTUAL_SHA})"
   info "[01-build] SMT jar ready: ${DEST}"
 fi
 
