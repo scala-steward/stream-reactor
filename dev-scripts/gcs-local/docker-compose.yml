@@ -1,0 +1,100 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # Kafka 4.1 in KRaft mode (single node acts as both broker and controller).
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:4.1.0
+    container_name: gcs-local-kafka
+    hostname: kafka
+    ports:
+      # Host 29092 avoids clashing with other local Kafka stacks on 9092
+      - "29092:9092"
+    environment:
+      # KRaft — combined broker+controller
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+
+      # Listeners
+      # EXTERNAL → host access on 9092
+      # INTERNAL → Connect → broker inside the Docker network on 19092
+      # CONTROLLER → KRaft controller on 9093 (not exposed to host)
+      KAFKA_LISTENERS: "EXTERNAL://0.0.0.0:9092,INTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "EXTERNAL://localhost:29092,INTERNAL://kafka:19092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # Single-node defaults
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_IN_SYNC_REPLICAS: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+      CLUSTER_ID: "local-gcs-repro-01"
+
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "kafka:19092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Kafka Connect 4.1 (Confluent CP 8.1.0 — Kafka 4.1 wire-compatible).
+  # Connector + SMT jars are mounted from ./connectors/.
+  # GCS service-account JSON is mounted from ./secrets/.
+  # ---------------------------------------------------------------------------
+  connect:
+    image: confluentinc/cp-kafka-connect-base:8.1.0
+    container_name: gcs-local-connect
+    hostname: connect
+    ports:
+      # Host 28083 avoids clashing with other local Connect stacks on 8083
+      - "28083:8083"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./connectors:/connectors:ro
+      - ./secrets:/etc/secrets:ro
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: "kafka:19092"
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: "gcs-local"
+
+      # Internal topics (RF=1 for single-node)
+      CONNECT_CONFIG_STORAGE_TOPIC: "connect-configs"
+      CONNECT_OFFSET_STORAGE_TOPIC: "connect-offsets"
+      CONNECT_STATUS_STORAGE_TOPIC: "connect-status"
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+
+      # Default converters (connector configs override per-topic)
+      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.storage.StringConverter"
+      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+
+      # Plugin path: /connectors holds gcp-storage/ (isolated connector plugin).
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/connectors"
+
+      # The Lenses SMT jar is ALSO put on the worker classpath. Kafka Connect's
+      # reflective plugin scanner cannot register SMTs that extend a package-private
+      # abstract base (InsertRollingFieldTimestampHeaders, InsertFieldTimestampHeaders,
+      # etc.), so referencing them as an isolated plugin fails with "class could not be
+      # found". On the base classpath they resolve via Class.forName. TimestampConverter
+      # works either way.
+      CLASSPATH: "/connectors/kafka-connect-smt/*"
+
+      CONNECT_REST_ADVERTISED_HOST_NAME: "connect"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s

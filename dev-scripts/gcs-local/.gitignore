@@ -1,0 +1,6 @@
+.env
+connectors/**/*.jar
+secrets/gcp-credentials.json
+secrets/*.json
+secrets/_smoke-sa.json
+*.rendered.json
