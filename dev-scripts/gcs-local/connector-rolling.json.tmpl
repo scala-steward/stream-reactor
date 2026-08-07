@@ -1,0 +1,28 @@
+{
+  "connector.class": "io.lenses.streamreactor.connect.gcp.storage.sink.GCPStorageSinkConnector",
+  "tasks.max": "1",
+  "topics": "${TOPIC}",
+
+  "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter.schemas.enable": "false",
+  "header.converter": "org.apache.kafka.connect.storage.StringConverter",
+
+  "consumer.override.auto.offset.reset": "earliest",
+
+  "transforms": "loadTs",
+  "transforms.loadTs.type": "io.lenses.connect.smt.header.InsertRollingFieldTimestampHeaders",
+  "transforms.loadTs.field": "_value.load_ts_digits",
+  "transforms.loadTs.format.from.pattern": "yyyyMMddHHmmssSSS",
+  "transforms.loadTs.rolling.window.type": "minutes",
+  "transforms.loadTs.rolling.window.size": "15",
+  "transforms.loadTs.timezone": "America/Los_Angeles",
+  "transforms.loadTs.header.prefix.name": "load_",
+
+  "connect.gcpstorage.kcql": "INSERT INTO ${GCS_BUCKET}:${GCS_PREFIX}/rolling SELECT * FROM ${TOPIC} PARTITIONBY _header.load_date, _header.load_hour, _header.load_minute STOREAS `JSON` PROPERTIES('flush.count'=1)",
+
+  "connect.gcpstorage.gcp.auth.mode": "file",
+  "connect.gcpstorage.gcp.file": "/etc/secrets/gcp-credentials.json",
+
+  "connect.gcpstorage.exactly.once.enable": "false"
+}
