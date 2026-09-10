@@ -84,8 +84,8 @@ class CommitModeSwitchTest
   private val tp            = Topic("orders").withPartition(0)
 
   private val keyField: PartitionField = ValuePartitionField(PartitionNamePath("k"))
-  private def pv(name: String): immutable.Map[PartitionField, String] = Map(keyField -> name)
-  private def keyOf(name: String): String = WriterManager.derivePartitionKey(pv(name)).get
+  private def pv(name:    String): immutable.Map[PartitionField, String] = Map(keyField -> name)
+  private def keyOf(name: String): String                                = WriterManager.derivePartitionKey(pv(name)).get
 
   private def masterPath = IndexManagerV2.generateLockFilePath(connectorTaskId, tp, directoryName)
   private def granularPath(key: String) =
@@ -103,7 +103,7 @@ class CommitModeSwitchTest
   private def writeIndex(path: String, idx: IndexFile): String =
     storage.writeBlobToFile(bucket, path, NoOverwriteExistingObject(idx)).value.eTag
 
-  private def eTagOf(path: String): String = storage.snapshot(bucket)(path).eTag
+  private def eTagOf(path:   String): String = storage.snapshot(bucket)(path).eTag
   private def offsetOf(path: String): Option[Offset] =
     storage.getBlobAsObject[IndexFile](bucket, path).value.wrappedObject.committedOffset
 
@@ -146,11 +146,11 @@ class CommitModeSwitchTest
   }
 
   private def buildWriterManager(
-    im:         IndexManagerV2,
-    metrics:    CloudSinkMetrics,
-    values:     immutable.Map[PartitionField, String],
-    policy:     CommitPolicy,
-    st:         InMemoryStorageInterface = storage,
+    im:      IndexManagerV2,
+    metrics: CloudSinkMetrics,
+    values:  immutable.Map[PartitionField, String],
+    policy:  CommitPolicy,
+    st:      InMemoryStorageInterface = storage,
   ): WriterManager[FakeFileMetadata] = {
     val keyNamer = mock[KeyNamer]
     when(keyNamer.processPartitionValues(any[MessageDetail], any[TopicPartition]))
@@ -170,7 +170,9 @@ class CommitModeSwitchTest
         when(okb.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenAnswer {
           (first: Offset, _: Offset, _: Long, _: Long, _: Long) =>
             val seg = WriterManager.derivePartitionKey(values2).getOrElse("nokey")
-            CloudLocation(bucket, path = Some(s"data/${tp.topic.value}/${tp.partition}/$seg-${first.value}.json")).asRight
+            CloudLocation(bucket,
+                          path = Some(s"data/${tp.topic.value}/${tp.partition}/$seg-${first.value}.json"),
+            ).asRight
         }
         okb
       },
@@ -198,10 +200,12 @@ class CommitModeSwitchTest
 
   // ── T7.1 ────────────────────────────────────────────────────────────────────────────
 
-  test("[Z] T7.1 the first batch open GETs and eTag-bumps every legacy lock, leaving marker and tmp orphans untouched") {
+  test(
+    "[Z] T7.1 the first batch open GETs and eTag-bumps every legacy lock, leaving marker and tmp orphans untouched",
+  ) {
     seedMaster(99)
-    val e1     = writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(120)), None))
-    val e2     = writeIndex(granularPath(keyOf("B")), IndexFile("prev", Some(Offset(140)), None))
+    val e1 = writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(120)), None))
+    val e2 = writeIndex(granularPath(keyOf("B")), IndexFile("prev", Some(Offset(140)), None))
     val marker = storage.writeBlobToFile(
       bucket,
       sweepMarkerPath,
@@ -251,22 +255,29 @@ class CommitModeSwitchTest
 
   // ── T7.3 ────────────────────────────────────────────────────────────────────────────
 
-  test("[ND] T7.3 a legacy lock with a pending Copy/Delete chain is resolved at open; the floor is its pending offset") {
+  test(
+    "[ND] T7.3 a legacy lock with a pending Copy/Delete chain is resolved at open; the floor is its pending offset",
+  ) {
     seedMaster(99)
-    val temp  = s".temp-upload/legacy/${tp.topic}/0/uuid/data/orders/0/legacy-A.json"
+    val temp   = s".temp-upload/legacy/${tp.topic}/0/uuid/data/orders/0/legacy-A.json"
     val final_ = "data/orders/0/legacy-A.json"
     // Seed the temp object the pending Copy will move.
-    storage.writeStringToFile(bucket, temp, io.lenses.streamreactor.connect.cloud.common.model.UploadableString("legacy payload")).value
+    storage.writeStringToFile(bucket,
+                              temp,
+                              io.lenses.streamreactor.connect.cloud.common.model.UploadableString("legacy payload"),
+    ).value
     val tempETag = storage.snapshot(bucket)(temp).eTag
     writeIndex(
       granularPath(keyOf("A")),
       IndexFile(
         "prev",
         Some(Offset(100)),
-        Some(PendingState(
-          Offset(120),
-          NonEmptyList.of(CopyOperation(bucket, temp, final_, tempETag), DeleteOperation(bucket, temp, tempETag)),
-        )),
+        Some(
+          PendingState(
+            Offset(120),
+            NonEmptyList.of(CopyOperation(bucket, temp, final_, tempETag), DeleteOperation(bucket, temp, tempETag)),
+          ),
+        ),
       ),
     )
 
@@ -286,7 +297,9 @@ class CommitModeSwitchTest
 
   // ── T7.4 ────────────────────────────────────────────────────────────────────────────
 
-  test("[NL] T7.4 a legacy pending chain whose upload never happened is dead-worker cleared; the floor is its committed offset") {
+  test(
+    "[NL] T7.4 a legacy pending chain whose upload never happened is dead-worker cleared; the floor is its committed offset",
+  ) {
     seedMaster(99)
     val missing = new File("/nonexistent/switch-test/legacy-staging.tmp")
     val temp    = ".temp-upload/legacy/orders/0/uuid/data/orders/0/legacy-A.json"
@@ -295,14 +308,16 @@ class CommitModeSwitchTest
       IndexFile(
         "prev",
         Some(Offset(110)),
-        Some(PendingState(
-          Offset(130),
-          NonEmptyList.of(
-            UploadOperation(bucket, missing, temp),
-            CopyOperation(bucket, temp, "data/orders/0/legacy-A.json", "x"),
-            DeleteOperation(bucket, temp, "x"),
+        Some(
+          PendingState(
+            Offset(130),
+            NonEmptyList.of(
+              UploadOperation(bucket, missing, temp),
+              CopyOperation(bucket, temp, "data/orders/0/legacy-A.json", "x"),
+              DeleteOperation(bucket, temp, "x"),
+            ),
           ),
-        )),
+        ),
       ),
     )
 
@@ -341,7 +356,10 @@ class CommitModeSwitchTest
       b:   String,
       p:   String,
       obj: ObjectProtection[O],
-    )(implicit enc: Encoder[O]): Either[UploadError, ObjectWithETag[O]] =
+    )(
+      implicit
+      enc: Encoder[O],
+    ): Either[UploadError, ObjectWithETag[O]] =
       obj match {
         case _: ObjectWithETag[O] if p == lockPath && hits.getAndIncrement() < raceTimes =>
           // A zombie committed a higher offset with a fresh eTag just before our bump: overwrite
@@ -378,7 +396,10 @@ class CommitModeSwitchTest
 
     // Never wins: three consecutive mismatches exhaust MaxLegacyBumpAttempts and fail open().
     locally {
-      val st = new RaceOnBumpStorage(granularPath(keyOf("A")), raceOffset = 150, raceTimes = IndexManagerV2.MaxLegacyBumpAttempts)
+      val st = new RaceOnBumpStorage(granularPath(keyOf("A")),
+                                     raceOffset = 150,
+                                     raceTimes  = IndexManagerV2.MaxLegacyBumpAttempts,
+      )
       storage = st
       seedMaster(99)
       writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(140)), None))
@@ -396,7 +417,13 @@ class CommitModeSwitchTest
 
     val gets = new AtomicInteger(0)
     val counting = new InMemoryStorageInterface() {
-      override def getBlobAsObject[O](b: String, p: String)(implicit d: io.circe.Decoder[O]): Either[io.lenses.streamreactor.connect.cloud.common.storage.FileLoadError, ObjectWithETag[O]] = {
+      override def getBlobAsObject[O](
+        b: String,
+        p: String,
+      )(
+        implicit
+        d: io.circe.Decoder[O],
+      ): Either[io.lenses.streamreactor.connect.cloud.common.storage.FileLoadError, ObjectWithETag[O]] = {
         if (p == granularPath(keyOf("A"))) gets.incrementAndGet()
         super.getBlobAsObject(b, p)
       }
@@ -418,7 +445,7 @@ class CommitModeSwitchTest
     wmB.write(tp.withOffset(Offset(200)), message(200)).value
 
     // Record 140 for A is skipped from the TP-level floor without another GET of A's lock.
-    val wmA2 = buildWriterManager(im, metrics, pv("A"), new TogglePolicy().policy, counting)
+    val wmA2   = buildWriterManager(im, metrics, pv("A"), new TogglePolicy().policy, counting)
     val before = gets.get()
     wmA2.write(tp.withOffset(Offset(140)), message(140)).value
     gets.get() shouldBe before
@@ -459,7 +486,9 @@ class CommitModeSwitchTest
 
   // ── T7.8 ────────────────────────────────────────────────────────────────────────────
 
-  test("[ND] T7.8 once the batch watermark reaches maxLegacy the legacy locks and marker are purged; later floors need no GET") {
+  test(
+    "[ND] T7.8 once the batch watermark reaches maxLegacy the legacy locks and marker are purged; later floors need no GET",
+  ) {
     seedMaster(99)
     writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(150)), None))
     storage.writeBlobToFile(bucket, sweepMarkerPath, NoOverwriteExistingObject(IndexManagerV2.SweepMarker(1L, 2L)))(
@@ -468,7 +497,13 @@ class CommitModeSwitchTest
 
     val gets = new AtomicInteger(0)
     val counting = new InMemoryStorageInterface() {
-      override def getBlobAsObject[O](b: String, p: String)(implicit d: io.circe.Decoder[O]): Either[io.lenses.streamreactor.connect.cloud.common.storage.FileLoadError, ObjectWithETag[O]] = {
+      override def getBlobAsObject[O](
+        b: String,
+        p: String,
+      )(
+        implicit
+        d: io.circe.Decoder[O],
+      ): Either[io.lenses.streamreactor.connect.cloud.common.storage.FileLoadError, ObjectWithETag[O]] = {
         if (p.endsWith(".lock") && !p.endsWith("0.lock")) gets.incrementAndGet()
         super.getBlobAsObject(b, p)
       }
@@ -606,12 +641,17 @@ class CommitModeSwitchTest
 
   // ── T7.12 ───────────────────────────────────────────────────────────────────────────
 
-  test("[Z] T7.12 zombie-first: the new owner resolves a chain a zombie already completed; one object, floor at its offset") {
+  test(
+    "[Z] T7.12 zombie-first: the new owner resolves a chain a zombie already completed; one object, floor at its offset",
+  ) {
     seedMaster(99)
     // The zombie already performed its copy and recorded a Delete-only pending state.
     val temp   = ".temp-upload/legacy/orders/0/uuid/data/orders/0/z.json"
     val final_ = "data/orders/0/z.json"
-    storage.writeStringToFile(bucket, final_, io.lenses.streamreactor.connect.cloud.common.model.UploadableString("zombie payload")).value
+    storage.writeStringToFile(bucket,
+                              final_,
+                              io.lenses.streamreactor.connect.cloud.common.model.UploadableString("zombie payload"),
+    ).value
     writeIndex(
       granularPath(keyOf("A")),
       IndexFile(
@@ -633,5 +673,101 @@ class CommitModeSwitchTest
     (100L to 140L).foreach(o => wm.write(tp.withOffset(Offset(o)), message(o)).value)
     metrics.getDuplicateRecordsSkippedTotal shouldBe 41L
     wm.close(); owner.close()
+  }
+
+  // ── Cycle 8: batch -> granular rollback ─────────────────────────────────────────────
+
+  test("[ND] T8.3 rollback: a stale legacy lock below the master floor cannot re-write a committed record") {
+    // Batch mode committed W = 250 and left a stale legacy K.lock = 200 (crash before purge).
+    seedMasterAt250()
+    writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(200)), None))
+
+    val im = buildIndexManager(CommitMode.Granular)
+    im.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(250)))
+    val metrics = new CloudSinkMetrics()
+    val wm      = buildWriterManager(im, metrics, pv("A"), new TogglePolicy().policy)
+
+    // The granular fallback floors at max(K.lock=200, master=250) = 250 (Cycle 8), so 250 is
+    // skipped and 251 written — the `orElse` behaviour would have re-written 201..250.
+    wm.write(tp.withOffset(Offset(250)), message(250)).value
+    metrics.getDuplicateRecordsSkippedTotal shouldBe 1L
+    wm.write(tp.withOffset(Offset(251)), message(251)).value
+    metrics.getRecordsWrittenTotal shouldBe 1L
+
+    wm.close(); im.close()
+  }
+
+  test("[NL] T8.4 rollback with a pending batch chain: granular open completes the copies and skips <= P") {
+    // Master carries a batch PendingState of two copies; granular-mode open must drive it to
+    // completion (Copy returns no eTag so updateEtag is a no-op; the last Copy sets committed = P).
+    val tempA = ".temp-upload/switch-test/orders/0/uuid/data/orders/0/roll-a.json"
+    val tempB = ".temp-upload/switch-test/orders/0/uuid/data/orders/0/roll-b.json"
+    storage.writeStringToFile(bucket,
+                              tempA,
+                              io.lenses.streamreactor.connect.cloud.common.model.UploadableString("a"),
+    ).value
+    storage.writeStringToFile(bucket,
+                              tempB,
+                              io.lenses.streamreactor.connect.cloud.common.model.UploadableString("b"),
+    ).value
+    val eA = storage.snapshot(bucket)(tempA).eTag
+    val eB = storage.snapshot(bucket)(tempB).eTag
+    writeIndex(
+      masterPath,
+      IndexFile(
+        "prev",
+        Some(Offset(99)),
+        Some(
+          PendingState(
+            Offset(250),
+            NonEmptyList.of(
+              CopyOperation(bucket, tempA, "data/orders/0/roll-a.json", eA),
+              CopyOperation(bucket, tempB, "data/orders/0/roll-b.json", eB),
+            ),
+          ),
+        ),
+      ),
+    )
+
+    val im = buildIndexManager(CommitMode.Granular)
+    im.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(250)))
+    storage.keysUnder(bucket, "data/orders/0/roll-a") should have size 1
+    storage.keysUnder(bucket, "data/orders/0/roll-b") should have size 1
+    storage.getBlobAsObject[IndexFile](bucket, masterPath).value.wrappedObject.pendingState shouldBe None
+
+    val metrics = new CloudSinkMetrics()
+    val wm      = buildWriterManager(im, metrics, pv("A"), new TogglePolicy().policy)
+    wm.write(tp.withOffset(Offset(250)), message(250)).value
+    metrics.getDuplicateRecordsSkippedTotal shouldBe 1L
+    wm.write(tp.withOffset(Offset(251)), message(251)).value
+    metrics.getRecordsWrittenTotal shouldBe 1L
+    wm.close(); im.close()
+  }
+
+  test("[B] T8.5 rollback before any batch commit is behaviourally identical to pre-switch granular") {
+    // W == M and the legacy locks are intact: each key floors at its own granular lock exactly as
+    // it did before the switch. Each key runs on its own storage so a close()-time master-lock
+    // force-write from one cannot raise the other's floor (a harness concern, not a mode concern).
+    def granularKeyScenario(keyName: String, lockOffset: Long): (Long, Long) = {
+      val st = new InMemoryStorageInterface()
+      storage = st
+      seedMaster(99)
+      writeIndex(granularPath(keyOf(keyName)), IndexFile("prev", Some(Offset(lockOffset)), None))
+      val im = buildIndexManager(CommitMode.Granular, st)
+      im.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(99)))
+      val m  = new CloudSinkMetrics()
+      val wm = buildWriterManager(im, m, pv(keyName), new TogglePolicy().policy, st)
+      wm.write(tp.withOffset(Offset(lockOffset)), message(lockOffset)).value
+      wm.write(tp.withOffset(Offset(lockOffset + 1)), message(lockOffset + 1)).value
+      wm.close(); im.close()
+      (m.getDuplicateRecordsSkippedTotal, m.getRecordsWrittenTotal)
+    }
+
+    granularKeyScenario("A", 150) shouldBe ((1L, 1L))
+    granularKeyScenario("B", 120) shouldBe ((1L, 1L))
+  }
+
+  private def seedMasterAt250(): Unit = {
+    val _ = writeIndex(masterPath, IndexFile("prev-owner", Some(Offset(250)), None))
   }
 }

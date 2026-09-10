@@ -469,7 +469,16 @@ class WriterManager[SM <: FileMetadata](
             // produces None.orElse(None) = None — no false skip of offset 0.
             indexManager.getSeekedOffsetForPartitionKey(topicPartition, pk).map {
               granularOffset =>
-                granularOffset.orElse(indexManager.getSeekedOffsetForTopicPartition(topicPartition))
+                // max, not orElse: a granular lock K below the master floor M would otherwise let a
+                // replayed record in (M, K.lock]... wrong direction — K.lock < M means K has no
+                // records in (K.lock, M], because any buffered one would have pinned globalSafeOffset
+                // <= firstBuffered_K <= M. So max(K.lock, M) never skips an uncommitted record and
+                // fixes the duplication when a lock is GC'd below the master floor. See Cycle 8.
+                val master = indexManager.getSeekedOffsetForTopicPartition(topicPartition)
+                (granularOffset.toList ++ master.toList) match {
+                  case Nil  => None
+                  case list => Some(list.maxBy(_.value))
+                }
             }
           case None =>
             indexManager.getSeekedOffsetForTopicPartition(topicPartition).asRight[SinkError]
