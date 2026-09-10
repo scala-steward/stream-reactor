@@ -35,7 +35,8 @@ class S3ConfigSettingsTest extends AnyFlatSpec with Matchers with LazyLogging {
     val configKeys =
       S3SinkConfigDef.config.configKeys().keySet().asScala ++ S3SourceConfigDef.config.configKeys().keySet().asScala
 
-    configKeys.size shouldBe 76
+    // +1 for connect.s3.exactly.once.commit.mode (T1.4)
+    configKeys.size shouldBe 77
     configKeys.foreach {
       k => k.toLowerCase should be(k)
     }

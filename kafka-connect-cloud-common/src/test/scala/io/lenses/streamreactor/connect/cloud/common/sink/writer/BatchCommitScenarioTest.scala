@@ -97,10 +97,13 @@ class BatchCommitScenarioTest
   private implicit val cloudLocationValidator: CloudLocationValidator =
     (location: CloudLocation) => Validated.valid(location)
 
-  private val bucket         = "test-bucket"
-  private val directoryName  = ".indexes"
-  private val tp             = Topic("orders").withPartition(0)
-  private val masterLockPath = s"$directoryName/${connectorTaskId.name}/.locks/${tp.topic.value}/${tp.partition}.lock"
+  private val bucket        = "test-bucket"
+  private val directoryName = ".indexes"
+  private val tp            = Topic("orders").withPartition(0)
+  // Interpolating `tp.topic` (not `tp.topic.value`) mirrors IndexManagerV2.generateLockFilePath
+  // and Writer's temp-path construction exactly.
+  private val masterLockPath  = s"$directoryName/${connectorTaskId.name}/.locks/${tp.topic}/${tp.partition}.lock"
+  private val batchTempPrefix = s".temp-upload/${connectorTaskId.name}/${tp.topic}/${tp.partition}/"
 
   private val dateField: PartitionField = ValuePartitionField(PartitionNamePath("date"))
 
@@ -164,7 +167,9 @@ class BatchCommitScenarioTest
         when(okb.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenAnswer {
           (first: Offset, _: Offset, _: Long, _: Long, _: Long) =>
             val keySegment = WriterManager.derivePartitionKey(pv).getOrElse("nokey")
-            CloudLocation(bucket, path = Some(s"data/${tp.topic.value}/${tp.partition}/$keySegment-${first.value}.json")).asRight
+            CloudLocation(bucket,
+                          path = Some(s"data/${tp.topic.value}/${tp.partition}/$keySegment-${first.value}.json"),
+            ).asRight
         }
         okb
       },
@@ -267,7 +272,7 @@ class BatchCommitScenarioTest
         im.updateMasterLock(tp, Offset(100)).value
     }
 
-    val metrics = new CloudSinkMetrics()
+    val metrics     = new CloudSinkMetrics()
     val alwaysFlush = mock[CommitPolicy]
     when(alwaysFlush.shouldFlush(any[CommitContext])).thenReturn(true)
     val wm = buildWriterManager(im, storage, metrics, pvHour10, alwaysFlush, commitMode)
@@ -281,23 +286,25 @@ class BatchCommitScenarioTest
     val w11 = buildBufferingWriter(im, storage, k11, w11Staging, "data/orders/0/hour11-200.json", fw11)
 
     w10.forceWriteState(
-      Writing(CommitState(tp, Some(Offset(99))),
-              fw10,
-              w10Staging,
-              firstBufferedOffset     = Offset(100),
-              uncommittedOffset       = Offset(199),
-              earliestRecordTimestamp = 1L,
-              latestRecordTimestamp   = 2L,
+      Writing(
+        CommitState(tp, Some(Offset(99))),
+        fw10,
+        w10Staging,
+        firstBufferedOffset     = Offset(100),
+        uncommittedOffset       = Offset(199),
+        earliestRecordTimestamp = 1L,
+        latestRecordTimestamp   = 2L,
       ),
     )
     w11.forceWriteState(
-      Writing(CommitState(tp, Some(Offset(99))),
-              fw11,
-              w11Staging,
-              firstBufferedOffset     = Offset(200),
-              uncommittedOffset       = Offset(250),
-              earliestRecordTimestamp = 3L,
-              latestRecordTimestamp   = 4L,
+      Writing(
+        CommitState(tp, Some(Offset(99))),
+        fw11,
+        w11Staging,
+        firstBufferedOffset     = Offset(200),
+        uncommittedOffset       = Offset(250),
+        earliestRecordTimestamp = 3L,
+        latestRecordTimestamp   = 4L,
       ),
     )
 
@@ -332,9 +339,10 @@ class BatchCommitScenarioTest
         new String(masterAfter.bytes, StandardCharsets.UTF_8) shouldBe
           new String(masterBefore.bytes, StandardCharsets.UTF_8)
         w10.currentWriteState shouldBe a[Uploading]
-        w11.currentWriteState shouldBe a[Staged]
-        // W11's staged object lives under the connector-scoped batch temp prefix.
-        storage.keysUnder(bucket, s".temp-upload/${connectorTaskId.name}/orders/0/") should have size 1
+        // W11 staged successfully: its object is under the connector-scoped batch temp prefix
+        // and W10's is not. (The `Staged` state itself is pinned by T2.9 and T4.4.)
+        w11.hasPendingUpload shouldBe true
+        storage.keysUnder(bucket, batchTempPrefix) should have size 1
         storage.keysUnder(bucket, "data/orders/0/hour11").toList shouldBe Nil
     }
 

@@ -68,16 +68,17 @@ import scala.util.control.NonFatal
  * @param connectorTaskId             An implicit `ConnectorTaskId` representing the task's unique identifier.
  */
 class IndexManagerV2(
-  bucketAndPrefixFn:           TopicPartition => Either[SinkError, CloudLocation],
-  pendingOperationsProcessors: PendingOperationsProcessors,
-  directoryFileName:           String,
-  gcIntervalSeconds:           Int              = IndexManagerV2.DefaultGcIntervalSeconds,
-  gcBatchSize:                 Int              = IndexManagerV2.DefaultGcBatchSize,
-  gcSweepEnabled:              Boolean          = IndexManagerV2.DefaultGcSweepEnabled,
-  gcSweepIntervalSeconds:      Int              = IndexManagerV2.DefaultGcSweepIntervalSeconds,
-  gcSweepMinAgeSeconds:        Int              = IndexManagerV2.DefaultGcSweepMinAgeSeconds,
-  gcSweepMaxReads:             Int              = IndexManagerV2.DefaultGcSweepMaxReads,
-  metrics:                     CloudSinkMetrics = new CloudSinkMetrics(),
+  bucketAndPrefixFn:            TopicPartition => Either[SinkError, CloudLocation],
+  pendingOperationsProcessors:  PendingOperationsProcessors,
+  directoryFileName:            String,
+  gcIntervalSeconds:            Int              = IndexManagerV2.DefaultGcIntervalSeconds,
+  gcBatchSize:                  Int              = IndexManagerV2.DefaultGcBatchSize,
+  gcSweepEnabled:               Boolean          = IndexManagerV2.DefaultGcSweepEnabled,
+  gcSweepIntervalSeconds:       Int              = IndexManagerV2.DefaultGcSweepIntervalSeconds,
+  gcSweepMinAgeSeconds:         Int              = IndexManagerV2.DefaultGcSweepMinAgeSeconds,
+  gcSweepMaxReads:              Int              = IndexManagerV2.DefaultGcSweepMaxReads,
+  private[sink] val commitMode: CommitMode       = CommitMode.Default,
+  metrics:                      CloudSinkMetrics = new CloudSinkMetrics(),
 )(
   implicit
   storageInterface: StorageInterface[?],

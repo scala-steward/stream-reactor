@@ -31,6 +31,7 @@ import io.lenses.streamreactor.connect.cloud.common.sink.config.PartitionField
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.KeyNamer
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
 import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.CommitMode
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManagerV2
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.NoIndexManager
@@ -146,9 +147,14 @@ class WriterManagerCreator[MD <: FileMetadata, SC <: CloudSinkConfig[_]] extends
         io.gcSweepIntervalSeconds,
         io.gcSweepMinAgeSeconds,
         io.gcSweepMaxReads,
+        io.commitMode,
         metrics,
       ),
     ).getOrElse(new NoIndexManager())
+
+    // With indexing disabled there is no lock to CAS, so the mode is irrelevant; Granular keeps
+    // the pre-existing code path.
+    val commitMode: CommitMode = config.indexOptions.map(_.commitMode).getOrElse(CommitMode.Granular)
 
     try {
       val transformers = TopicsTransformers.from(config.bucketOptions)
@@ -165,6 +171,7 @@ class WriterManagerCreator[MD <: FileMetadata, SC <: CloudSinkConfig[_]] extends
         config.schemaChangeDetector,
         config.skipNullValues,
         pendingOperationsProcessors,
+        commitMode,
         metrics,
       )
       (indexManager, writerManager)

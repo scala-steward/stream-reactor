@@ -34,6 +34,7 @@ import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetric
 import io.lenses.streamreactor.connect.cloud.common.sink.metrics.ForcedWriteReason
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.KeyNamer
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.CommitMode
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingOperationsProcessors
 import io.lenses.streamreactor.connect.cloud.common.storage.FileMetadata
@@ -91,18 +92,19 @@ private[writer] object ForceWriteOutcome {
  * sinks, since file handles cannot be safely shared without considerable overhead.
  */
 class WriterManager[SM <: FileMetadata](
-  commitPolicyFn:              TopicPartition => Either[SinkError, CommitPolicy],
-  bucketAndPrefixFn:           TopicPartition => Either[SinkError, CloudLocation],
-  keyNamerFn:                  TopicPartition => Either[SinkError, KeyNamer],
-  stagingFilenameFn:           (TopicPartition, Map[PartitionField, String]) => Either[SinkError, File],
-  objKeyBuilderFn:             (TopicPartition, Map[PartitionField, String]) => ObjectKeyBuilder,
-  formatWriterFn:              (TopicPartition, File) => Either[SinkError, FormatWriter],
-  indexManager:                IndexManager,
-  transformerF:                MessageDetail => Either[RuntimeException, MessageDetail],
-  schemaChangeDetector:        SchemaChangeDetector,
-  skipNullValues:              Boolean,
-  pendingOperationsProcessors: PendingOperationsProcessors,
-  metrics:                     CloudSinkMetrics = new CloudSinkMetrics(),
+  commitPolicyFn:               TopicPartition => Either[SinkError, CommitPolicy],
+  bucketAndPrefixFn:            TopicPartition => Either[SinkError, CloudLocation],
+  keyNamerFn:                   TopicPartition => Either[SinkError, KeyNamer],
+  stagingFilenameFn:            (TopicPartition, Map[PartitionField, String]) => Either[SinkError, File],
+  objKeyBuilderFn:              (TopicPartition, Map[PartitionField, String]) => ObjectKeyBuilder,
+  formatWriterFn:               (TopicPartition, File) => Either[SinkError, FormatWriter],
+  indexManager:                 IndexManager,
+  transformerF:                 MessageDetail => Either[RuntimeException, MessageDetail],
+  schemaChangeDetector:         SchemaChangeDetector,
+  skipNullValues:               Boolean,
+  pendingOperationsProcessors:  PendingOperationsProcessors,
+  private[sink] val commitMode: CommitMode       = CommitMode.Default,
+  metrics:                      CloudSinkMetrics = new CloudSinkMetrics(),
 )(
   implicit
   connectorTaskId: ConnectorTaskId,

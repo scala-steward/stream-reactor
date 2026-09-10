@@ -13,26 +13,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.lenses.streamreactor.connect.gcp.storage.config
+package io.lenses.streamreactor.connect.datalake.config
 
 import com.typesafe.scalalogging.LazyLogging
-import io.lenses.streamreactor.connect.gcp.storage.sink.config.GCPStorageSinkConfigDef
+import io.lenses.streamreactor.connect.datalake.sink.config.DatalakeSinkConfigDef
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import scala.jdk.CollectionConverters.CollectionHasAsScala
 
-class GCPConfigSettingsTest extends AnyFlatSpec with Matchers with LazyLogging {
+class DatalakeConfigSettingsTest extends AnyFlatSpec with Matchers with LazyLogging {
 
-  "GCPConfigSettings" should "ensure all sink keys are lower case" in {
+  "DatalakeConfigSettings" should "ensure all sink keys are lower case" in {
+    val configKeys = DatalakeSinkConfigDef.config.configKeys().keySet().asScala
+    configKeys.foreach(k => k.toLowerCase should be(k))
+  }
 
-    val configKeys =
-      GCPStorageSinkConfigDef.config.configKeys().keySet().asScala
-
-    // +1 for connect.gcpstorage.exactly.once.commit.mode (T1.4)
-    configKeys.size shouldBe 41
-    configKeys.foreach {
-      k => k.toLowerCase should be(k)
-    }
+  it should "expose the partition-batch commit mode key (T1.4)" in {
+    val configKeys = DatalakeSinkConfigDef.config.configKeys().keySet().asScala
+    configKeys should contain(s"${AzureConfigSettings.CONNECTOR_PREFIX}.exactly.once.commit.mode")
   }
 }

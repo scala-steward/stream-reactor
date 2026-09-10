@@ -15,6 +15,7 @@
  */
 package io.lenses.streamreactor.connect.cloud.common.sink.config
 
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.CommitMode
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManagerV2
 
 case class IndexOptions(
@@ -26,4 +27,6 @@ case class IndexOptions(
   gcSweepIntervalSeconds: Int     = IndexManagerV2.DefaultGcSweepIntervalSeconds,
   gcSweepMinAgeSeconds:   Int     = IndexManagerV2.DefaultGcSweepMinAgeSeconds,
   gcSweepMaxReads:        Int     = IndexManagerV2.DefaultGcSweepMaxReads,
+  // Appended last so existing positional call sites keep compiling.
+  commitMode: CommitMode = CommitMode.Granular,
 )

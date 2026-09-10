@@ -18,10 +18,12 @@ package io.lenses.streamreactor.connect.cloud.common.config
 import io.lenses.streamreactor.common.config.base.traits.BaseSettings
 import io.lenses.streamreactor.common.config.base.traits.WithConnectorPrefix
 import io.lenses.streamreactor.connect.cloud.common.sink.config.IndexOptions
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.CommitMode
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManagerV2
 import org.apache.kafka.common.config.ConfigDef
 import org.apache.kafka.common.config.ConfigDef.Importance
 import org.apache.kafka.common.config.ConfigDef.Type
+import org.apache.kafka.common.config.ConfigException
 
 trait IndexConfigKeys extends WithConnectorPrefix {
 
@@ -39,6 +41,16 @@ trait IndexConfigKeys extends WithConnectorPrefix {
   private val ENABLE_EXACTLY_ONCE_DOC =
     s"Exactly once is enabled by default.  It works by keeping an .indexes directory at the root of your bucket with subdirectories for indexes.  Exactly once support can be disabled and the default offset tracking from kafka can be used instead by setting this to false."
   private val ENABLE_EXACTLY_ONCE_DEFAULT = true
+
+  val EXACTLY_ONCE_COMMIT_MODE = s"$connectorPrefix.exactly.once.commit.mode"
+  private val EXACTLY_ONCE_COMMIT_MODE_DOC =
+    s"How writers for one Kafka topic-partition are committed when exactly once is enabled. " +
+      s"'${CommitMode.GranularName}' (default) commits each PARTITIONBY writer independently against its own " +
+      s"granular lock, which requires the PARTITIONBY keys to be a deterministic function of the record. " +
+      s"'${CommitMode.BatchName}' commits all writers on a Kafka partition together through a single lock " +
+      s"compare-and-swap and does not require deterministic PARTITIONBY keys; it writes one file per open " +
+      s"writer per flush. Switching modes requires the connector to be stopped first."
+  private val EXACTLY_ONCE_COMMIT_MODE_DEFAULT = CommitMode.GranularName
 
   val GC_INTERVAL_SECONDS = s"$connectorPrefix.indexes.gc.interval.seconds"
   private val GC_INTERVAL_SECONDS_DOC =
@@ -114,6 +126,18 @@ trait IndexConfigKeys extends WithConnectorPrefix {
         3,
         ConfigDef.Width.NONE,
         ENABLE_EXACTLY_ONCE,
+      )
+      .define(
+        EXACTLY_ONCE_COMMIT_MODE,
+        Type.STRING,
+        EXACTLY_ONCE_COMMIT_MODE_DEFAULT,
+        ConfigDef.ValidString.in(CommitMode.GranularName, CommitMode.BatchName),
+        Importance.LOW,
+        EXACTLY_ONCE_COMMIT_MODE_DOC,
+        "Sink Seek",
+        4,
+        ConfigDef.Width.MEDIUM,
+        EXACTLY_ONCE_COMMIT_MODE,
       )
       .define(
         GC_INTERVAL_SECONDS,
@@ -199,6 +223,14 @@ trait IndexSettings extends BaseSettings with IndexConfigKeys {
         getInt(GC_SWEEP_INTERVAL_SECONDS),
         getInt(GC_SWEEP_MIN_AGE_SECONDS),
         getInt(GC_SWEEP_MAX_READS),
+        commitMode,
       ),
     )
+
+  private def commitMode: CommitMode = {
+    val raw = getString(EXACTLY_ONCE_COMMIT_MODE)
+    // ConfigDef.ValidString already rejects anything outside the enum, so this only fires for
+    // callers that bypass ConfigDef validation entirely.
+    CommitMode.fromString(raw).fold(msg => throw new ConfigException(EXACTLY_ONCE_COMMIT_MODE, raw, msg), identity)
+  }
 }

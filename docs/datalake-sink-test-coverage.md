@@ -288,6 +288,21 @@ The matrix below uses three verdicts: `covered` (one or more dedicated tests pin
 | [`WriterManagerOffsetInvariantsScenarioTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/WriterManagerOffsetInvariantsScenarioTest.scala) | `globalSafeOffset` never regresses across eviction, rebalance, retry, and multi-TP interleaving |
 | [`GranularLockScenarioTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/GranularLockScenarioTest.scala) | Full lifecycle with real `IndexManagerV2` + `InMemoryStorageInterface`: crash recovery, migration from V1, master-lock fallback, active-partition-key GC protection, HWM semantics |
 
+### Stage 5b — Partition-batch commit mode (`commit.mode=batch`)
+
+Tests for the opt-in batch commit mode, in which every open writer on a Kafka topic-partition is
+committed together through a single master-lock CAS and deduplication uses a topic-partition-level
+floor. Each row names the invariant it protects: **[NL]** no data loss, **[ND]** no duplication,
+**[Z]** no zombie regression, **[B]** baseline / behaviour pin.
+
+| Test file | What is verified |
+|---|---|
+| [`BatchCommitScenarioTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/BatchCommitScenarioTest.scala) | End-to-end acceptance for the partial-commit + in-window-restart scenario, parameterised on `CommitMode`. **T0.1 [B]** granular: a same-hour wall-clock key silently drops the re-delivered 100..199 (pins today's loss). **T0.2 [B]** granular: a post-boundary restart re-writes the already-committed 200..250 (pins today's duplication). **T0.3 [B]** granular: a deterministic key loses and duplicates nothing. **T0.4 [NL]** batch: the same-hour wall-clock restart writes 100..199 exactly once and leaves exactly one object under `data/`. **T0.5 [ND]** batch: after a durable batch commit a post-boundary restart with a brand-new key skips all 51 of 200..250 and writes 251. **T0.6 [B]** batch: a deterministic key gives the same guarantee as T0.3. T0.1–T0.3 are the tripwire for granular behaviour being unchanged. |
+| [`CommitModeTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/CommitModeTest.scala) | **T1.1 [B]** `CommitMode.fromString` accepts `granular`/`batch` case-insensitively and rejects anything else with a message naming both valid values; the default mode is `Granular`. |
+| [`IndexSettingsTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/config/IndexSettingsTest.scala) | **T1.2 [B]** an absent `connect.<prefix>.exactly.once.commit.mode` yields `Granular`; `batch` yields `Batch`; any other value is rejected by `ConfigDef` validation with a `ConfigException`. |
+| [`WriterManagerCreatorTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/WriterManagerCreatorTest.scala) | **T1.3 [B]** `IndexOptions.commitMode` is threaded into both the constructed `WriterManager` and the constructed `IndexManagerV2`, defaulting to `Granular`. |
+| [`S3ConfigSettingsTest`](../kafka-connect-aws-s3/src/test/scala/io/lenses/streamreactor/connect/aws/s3/config/S3ConfigSettingsTest.scala), [`GCPConfigSettingsTest`](../kafka-connect-gcp-storage/src/test/scala/io/lenses/streamreactor/connect/gcp/storage/config/GCPConfigSettingsTest.scala), [`DatalakeConfigSettingsTest`](../kafka-connect-azure-datalake/src/test/scala/io/lenses/streamreactor/connect/datalake/config/DatalakeConfigSettingsTest.scala) | **T1.4 [B]** each provider's sink `ConfigDef` gains exactly one key for the new commit mode and every key stays lower case. |
+
 ### Stage 6 — Sink-task orchestration (CloudSinkTask)
 
 | Test file | What is verified |
