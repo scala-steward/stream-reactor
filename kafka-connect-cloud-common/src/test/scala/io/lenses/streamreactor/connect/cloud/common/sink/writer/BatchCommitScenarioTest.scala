@@ -161,7 +161,9 @@ class BatchCommitScenarioTest
       commitPolicyFn    = _ => commitPolicy.asRight,
       bucketAndPrefixFn = bucketAndPrefix,
       keyNamerFn        = _ => keyNamer.asRight,
-      stagingFilenameFn = (_, _) => Files.createTempFile("staging-", ".tmp").toFile.asRight,
+      // The FormatWriter is a mock, so it never puts bytes on disk. Seed the staging file so it
+      // passes `UploadableFile.validate`'s zero-byte guard, exactly as a real writer's would.
+      stagingFilenameFn = (_, _) => tempFileWith("staged payload").asRight,
       objKeyBuilderFn = (_, pv) => {
         val okb = mock[ObjectKeyBuilder]
         when(okb.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenAnswer {
@@ -370,9 +372,10 @@ class BatchCommitScenarioTest
     pv:         immutable.Map[PartitionField, String],
     offsets:    Seq[Long],
     flushAtEnd: Boolean,
+    expectSeek: Long = 99L,
   ): (CloudSinkMetrics, IndexManagerV2, WriterManager[FakeFileMetadata]) = {
     val im = buildIndexManager(storage, commitMode)
-    im.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(99)))
+    im.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(expectSeek)))
 
     val metrics = new CloudSinkMetrics()
     val policy  = new TogglePolicy
@@ -511,8 +514,9 @@ class BatchCommitScenarioTest
     wm10.close()
     im10.close()
 
+    // The first batch committed at 199, so this restart seeks there rather than to the seed floor.
     val (metrics11, im11, wm11) =
-      restartAndDeliver(storage, CommitMode.Batch, pvHour11, 200L to 250L, flushAtEnd = true)
+      restartAndDeliver(storage, CommitMode.Batch, pvHour11, 200L to 250L, flushAtEnd = true, expectSeek = 199L)
     metrics11.getDuplicateRecordsSkippedTotal shouldBe 0L
     metrics11.getRecordsWrittenTotal shouldBe 51L
     storage.keysUnder(bucket, "data/").size shouldBe afterFirst + 1

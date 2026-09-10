@@ -124,7 +124,8 @@ class WriterManager[SM <: FileMetadata](
       tpIndex.get(tp).fold(Iterator.empty[(MapKey, Writer[SM])])(_.iterator)
   }
 
-  private val writerCommitManager = new WriterCommitManager[SM](writerSource)
+  private val writerCommitManager =
+    new WriterCommitManager[SM](writerSource, indexManager, pendingOperationsProcessors, commitMode, metrics)
 
   // Highest globalSafeOffset ever reported to Kafka Connect per TP. Prevents regression on
   // idle-writer eviction. See docs/datalake-exactly-once-partitionby.md ("globalSafeOffset regression").

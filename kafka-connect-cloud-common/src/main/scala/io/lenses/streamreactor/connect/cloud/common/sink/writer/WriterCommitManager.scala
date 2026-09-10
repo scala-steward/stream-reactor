@@ -15,10 +15,21 @@
  */
 package io.lenses.streamreactor.connect.cloud.common.sink.writer
 
+import cats.data.NonEmptyList
+import cats.implicits._
+import com.typesafe.scalalogging.StrictLogging
+import io.lenses.streamreactor.connect.cloud.common.config.ConnectorTaskId
 import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
 import io.lenses.streamreactor.connect.cloud.common.sink.BatchCloudSinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
+import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.CommitMode
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingOperationsProcessors
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState
 import io.lenses.streamreactor.connect.cloud.common.storage.FileMetadata
+
+import java.util.UUID
 
 /**
  * Abstraction over the writer map that lets [[WriterCommitManager]] iterate writers without
@@ -65,8 +76,15 @@ private[writer] trait WriterSource[SM <: FileMetadata] {
  * @tparam SM Type parameter for file metadata.
  */
 class WriterCommitManager[SM <: FileMetadata](
-  source: WriterSource[SM],
-) {
+  source:                      WriterSource[SM],
+  indexManager:                IndexManager,
+  pendingOperationsProcessors: PendingOperationsProcessors,
+  commitMode:                  CommitMode       = CommitMode.Default,
+  metrics:                     CloudSinkMetrics = new CloudSinkMetrics(),
+)(
+  implicit
+  connectorTaskId: ConnectorTaskId,
+) extends StrictLogging {
 
   /**
    * Commits writers that have pending uploads (state == `Uploading`).
@@ -75,9 +93,17 @@ class WriterCommitManager[SM <: FileMetadata](
    * writers on the same `TopicPartition` are left open — they will commit when their own
    * flush trigger fires. Every Uploading writer still retries on every call, so there is
    * no starvation.
+   *
+   * In batch mode this instead re-drives `commitBatch` for every topic-partition that has a
+   * writer mid-commit; the batch by construction includes that partition's `Writing` siblings.
    */
   def commitPending(): Either[SinkError, Unit] =
-    commitFromIterator(source.iterator.filter { case (_, w) => w.hasPendingUpload })
+    commitMode match {
+      case CommitMode.Granular =>
+        commitFromIterator(source.iterator.filter { case (_, w) => w.hasPendingUpload })
+      case CommitMode.Batch =>
+        commitBatches(topicPartitionsWhere(_.hasPendingUpload))
+    }
 
   /**
    * Commits every writer for `topicPartition`, irrespective of state or flush threshold.
@@ -87,14 +113,20 @@ class WriterCommitManager[SM <: FileMetadata](
    * the format boundary is consistent. Do NOT replace this with a selective filter.
    */
   def commitForTopicPartition(topicPartition: TopicPartition): Either[BatchCloudSinkError, Unit] =
-    commitFromIterator(source.iteratorForTopicPartition(topicPartition))
+    commitMode match {
+      case CommitMode.Granular => commitFromIterator(source.iteratorForTopicPartition(topicPartition))
+      case CommitMode.Batch    => commitBatches(Set(topicPartition))
+    }
 
   /**
    * Commits writers that should be flushed, across all topic-partitions. Selective:
    * non-flushable siblings keep buffering.
    */
   def commitFlushableWriters(): Either[BatchCloudSinkError, Unit] =
-    commitFromIterator(source.iterator.filter { case (_, w) => w.shouldFlush })
+    commitMode match {
+      case CommitMode.Granular => commitFromIterator(source.iterator.filter { case (_, w) => w.shouldFlush })
+      case CommitMode.Batch    => commitBatches(topicPartitionsWhere(w => w.shouldFlush || w.hasPendingUpload))
+    }
 
   /**
    * Commits writers that should be flushed for a specific topic partition. Selective:
@@ -104,9 +136,104 @@ class WriterCommitManager[SM <: FileMetadata](
    * no full-map scan or snapshot allocation occurs.
    */
   def commitFlushableWritersForTopicPartition(topicPartition: TopicPartition): Either[BatchCloudSinkError, Unit] =
-    commitFromIterator(
-      source.iteratorForTopicPartition(topicPartition).filter { case (_, w) => w.shouldFlush },
-    )
+    commitMode match {
+      case CommitMode.Granular =>
+        commitFromIterator(
+          source.iteratorForTopicPartition(topicPartition).filter { case (_, w) => w.shouldFlush },
+        )
+      case CommitMode.Batch =>
+        val trigger =
+          source.iteratorForTopicPartition(topicPartition).exists { case (_, w) => w.shouldFlush || w.hasPendingUpload }
+        if (trigger) commitBatches(Set(topicPartition)) else ().asRight
+    }
+
+  private def topicPartitionsWhere(p: Writer[SM] => Boolean): Set[TopicPartition] =
+    source.iterator.collect { case (key, w) if p(w) => key.topicPartition }.toSet
+
+  private def commitBatches(topicPartitions: Set[TopicPartition]): Either[BatchCloudSinkError, Unit] = {
+    // Flatten: `BatchCloudSinkError.apply` only recognises Fatal / NonFatal leaves, so nesting one
+    // batch error inside another would silently discard every constituent error and produce an
+    // empty batch that `handleErrors` reads as "nothing went wrong".
+    val errors = topicPartitions.toList.flatMap(tp => commitBatch(tp).left.toOption).flatMap {
+      case b: BatchCloudSinkError => b.fatal.toList ++ b.nonFatal.toList
+      case other => List(other)
+    }
+    Either.cond(errors.isEmpty, (), BatchCloudSinkError(errors.toSet))
+  }
+
+  /**
+   * Commits every non-idle writer on `topicPartition` as one unit.
+   *
+   * The protocol, and why each step is where it is:
+   *
+   *  1. Stage all writers. Uploads happen before anything durable is recorded, so a failure here
+   *     leaves no trace beyond orphan temps and every writer keeps its state and staging file.
+   *     Results are collected rather than short-circuited: staging is idempotent, so doing the
+   *     work now minimises what a retry has to redo.
+   *  2. CAS a single `PendingState(P, [Copy x N])` onto the master lock. This is the commit point;
+   *     it is also the fence, because the write is conditional on the master eTag.
+   *  3. Drive the chain. Each copy that succeeds rewrites the lock with the remaining ops, so a
+   *     crash anywhere is resumable by `IndexManagerV2.open`.
+   *  4. Finalise the writers and delete the temps best-effort.
+   *
+   * The chain deliberately contains only `CopyOperation`s. An `UploadOperation` would make
+   * `updateEtag` overwrite every per-file eTag with the last upload's, and a `DeleteOperation`
+   * would put a delete mid-chain where a failure is Fatal and would block rollback recovery.
+   */
+  private[writer] def commitBatch(topicPartition: TopicPartition): Either[SinkError, Unit] = {
+    val writers = source.iteratorForTopicPartition(topicPartition).map(_._2).filterNot(_.isIdle).toList
+    if (writers.isEmpty) ().asRight
+    else {
+      val batchUuid   = UUID.randomUUID().toString
+      val results     = writers.map(_.stage(batchUuid))
+      val stageErrors = results.collect { case Left(err) => err }.toSet
+      if (stageErrors.nonEmpty) {
+        metrics.incrementBatchCommitFailures()
+        BatchCloudSinkError(stageErrors).asLeft
+      } else {
+        val staged = results.collect { case Right(Some(s)) => s }
+        if (staged.isEmpty) ().asRight
+        else {
+          val pendingOffset = staged.map(_.uncommittedOffset).max
+          // Always the durable master floor, never a writer's own committedOffset: a writer that
+          // has been idle since an earlier episode can carry a stale value.
+          val committed = indexManager.getSeekedOffsetForTopicPartition(topicPartition)
+          val pending   = PendingState(pendingOffset, NonEmptyList.fromListUnsafe(staged.map(_.copyOp)))
+
+          indexManager.update(topicPartition, committed, pending.some) match {
+            case Left(err) =>
+              // Fatal (eTag mismatch or storage failure). Temps and staging files stay put: the
+              // restart replays from `committed` and the temps become sweep candidates.
+              metrics.incrementBatchCommitFailures()
+              logger.error(
+                s"[${connectorTaskId.show}] Batch commit CAS failed for $topicPartition at " +
+                  s"pendingOffset=${pendingOffset.value}: ${err.message()}",
+              )
+              err.asLeft
+            case Right(_) =>
+              pendingOperationsProcessors.processPendingOperations(
+                topicPartition,
+                committed,
+                pending,
+                indexManager.update,
+                escalateOnCancel = true,
+                partitionKey     = None,
+                stagingFile      = None,
+              ).map { _ =>
+                staged.foreach(_ => ())
+                writers.foreach(_.finalizeCommit(pendingOffset))
+                metrics.incrementBatchCommits()
+                metrics.addBatchCommitFiles(staged.size.toLong)
+                pendingOperationsProcessors.deleteTempsBestEffort(staged.map(_.deleteOp))
+              }.leftMap { err =>
+                metrics.incrementBatchCommitFailures()
+                err
+              }
+          }
+        }
+      }
+    }
+  }
 
   /**
    * Drives commits for every entry in `iter`, collects errors, and returns a single

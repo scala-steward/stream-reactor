@@ -366,6 +366,24 @@ trait CloudSinkMetricsMBean {
    */
   def getRebalanceClosesTotal: Long
 
+  /**
+   * `commit.mode=batch` only: cumulative partition-batch commits that reached the master-lock CAS
+   * and completed their copy chain.
+   */
+  def getBatchCommitsTotal: Long
+
+  /**
+   * `commit.mode=batch` only: cumulative files moved to a final path by a successful batch commit.
+   * Divided by [[getBatchCommitsTotal]] this is the average batch width (writers per Kafka partition).
+   */
+  def getBatchCommitFilesTotal: Long
+
+  /**
+   * `commit.mode=batch` only: cumulative batch commits that failed anywhere between staging and the
+   * end of the copy chain. A sustained non-zero rate means batches are not making progress.
+   */
+  def getBatchCommitFailuresTotal: Long
+
   // =========================================================================
   // F. Current state gauges
   // =========================================================================
@@ -467,6 +485,9 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   private val duplicateRecordsSkippedTotal = new LongAdder()
   private val seekOnOpenAppliedTotal       = new LongAdder()
   private val rebalanceClosesTotal         = new LongAdder()
+  private val batchCommitsTotal            = new LongAdder()
+  private val batchCommitFilesTotal        = new LongAdder()
+  private val batchCommitFailuresTotal     = new LongAdder()
 
   // --- F. Current state gauges ---
 
@@ -560,6 +581,9 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   override def getDuplicateRecordsSkippedTotal: Long = duplicateRecordsSkippedTotal.sum()
   override def getSeekOnOpenAppliedTotal:       Long = seekOnOpenAppliedTotal.sum()
   override def getRebalanceClosesTotal:         Long = rebalanceClosesTotal.sum()
+  override def getBatchCommitsTotal:            Long = batchCommitsTotal.sum()
+  override def getBatchCommitFilesTotal:        Long = batchCommitFilesTotal.sum()
+  override def getBatchCommitFailuresTotal:     Long = batchCommitFailuresTotal.sum()
 
   // F. Current state gauges
   override def getInFlightUploads: Int = inFlightUploads.get()
@@ -661,6 +685,10 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   def incrementDuplicateRecordsSkippedTotal(): Unit = duplicateRecordsSkippedTotal.increment()
   def incrementSeekOnOpenAppliedTotal():       Unit = seekOnOpenAppliedTotal.increment()
   def incrementRebalanceClosesTotal():         Unit = rebalanceClosesTotal.increment()
+
+  def incrementBatchCommits():        Unit = batchCommitsTotal.increment()
+  def incrementBatchCommitFailures(): Unit = batchCommitFailuresTotal.increment()
+  def addBatchCommitFiles(count: Long): Unit = batchCommitFilesTotal.add(count)
 
   // F. State gauge mutators
   def incrementInFlightUploads(): Unit = { val _ = inFlightUploads.incrementAndGet() }

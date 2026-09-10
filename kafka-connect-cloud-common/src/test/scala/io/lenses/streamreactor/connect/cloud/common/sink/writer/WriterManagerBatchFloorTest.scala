@@ -84,8 +84,8 @@ class WriterManagerBatchFloorTest
   private val pvB = pv("B")
   private val pvC = pv("C")
 
-  private var storage: InMemoryStorageInterface = _
-  private var indexManager: IndexManagerV2      = _
+  private var storage:      InMemoryStorageInterface = _
+  private var indexManager: IndexManagerV2           = _
 
   private def bucketAndPrefix(topicPartition: TopicPartition): Either[SinkError, CloudLocation] =
     CloudLocation(bucket, Some(s"data/${topicPartition.topic.value}/${topicPartition.partition}/")).asRight
@@ -118,7 +118,7 @@ class WriterManagerBatchFloorTest
   }
 
   override def beforeEach(): Unit = {
-    storage = new InMemoryStorageInterface()
+    storage      = new InMemoryStorageInterface()
     indexManager = buildIndexManager(CommitMode.Batch)
   }
 
@@ -302,7 +302,7 @@ class WriterManagerBatchFloorTest
 
   test("[B] T3.6 granular mode is unchanged: the same rotation still re-buffers the already-held offsets") {
     indexManager.close()
-    storage = new InMemoryStorageInterface()
+    storage      = new InMemoryStorageInterface()
     indexManager = buildIndexManager(CommitMode.Granular)
 
     val metrics = new CloudSinkMetrics()
