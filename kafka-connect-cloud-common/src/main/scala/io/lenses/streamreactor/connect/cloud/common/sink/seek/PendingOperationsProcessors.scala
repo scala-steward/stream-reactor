@@ -85,6 +85,98 @@ class PendingOperationsProcessors(
     }
 
   /**
+   * Uploads a single staging file to a temp path without recording anything durable.
+   *
+   * This is the `stage()` half of a partition-batch commit: it runs strictly before the master-lock
+   * CAS, so there is no `PendingState` to clear and no `fnIndexUpdate` to call. Error
+   * classification is identical to the `Upload` arm of [[processPendingOperations]]:
+   *
+   *  - `NonExistingFileError` -> `FatalCloudSinkError` carrying [[buildOperatorMessage]], because a
+   *    task-private staging file disappearing means buffered records would be silently lost.
+   *  - any other `UploadError` -> `NonFatalCloudSinkError`, so the staging file survives and
+   *    `recommitPending` can retry.
+   *
+   * @return the temp object's eTag on success.
+   */
+  def uploadOnly(
+    topicPartition: TopicPartition,
+    op:             UploadOperation,
+    partitionKey:   Option[String],
+    stagingFile:    Option[File],
+  ): Either[SinkError, String] =
+    storageInterface.uploadFile(UploadableFile(op.source), op.bucket, op.destination) match {
+      case Right(eTag) => eTag.asRight
+      case Left(NonExistingFileError(missing)) =>
+        val message = buildOperatorMessage(topicPartition, missing, partitionKey, stagingFile)
+        logger.error(message)
+        // UploadError is not a Throwable, so carry the missing path on an IllegalStateException.
+        new FatalCloudSinkError(message, new IllegalStateException(missing.getPath).some, topicPartition).asLeft
+      case Left(uploadErr) =>
+        metrics.incrementPendingOperationRetriesTotal()
+        logger.warn(
+          s"[${connectorTaskId.show}] Transient stage upload failure for $topicPartition; " +
+            s"deferring to recommitPending: ${uploadErr.message()}",
+          uploadErr.toExceptionOption.orNull,
+        )
+        NonFatalCloudSinkError(uploadErr.message(), uploadErr.toExceptionOption).asLeft
+    }
+
+  /**
+   * Deletes batch temp objects after their copies have already reached their final paths.
+   *
+   * Purely hygiene: the commit point has passed, so a failure here must never be surfaced as an
+   * error. Undeleted temps are picked up later by the orphan sweep.
+   */
+  def deleteTempsBestEffort(ops: List[DeleteOperation]): Unit =
+    ops.groupBy(_.bucket).foreach {
+      case (bucket, bucketOps) =>
+        storageInterface.deleteFiles(bucket, bucketOps.map(_.source)) match {
+          case Left(err) =>
+            logger.warn(
+              s"[${connectorTaskId.show}] Best-effort delete of ${bucketOps.size} batch temp object(s) in " +
+                s"bucket=$bucket failed: ${err.message()}. They become orphan-sweep candidates.",
+            )
+          case Right(_) =>
+        }
+    }
+
+  /**
+   * Builds the operator-facing message used for both the ERROR log and the `FatalCloudSinkError`
+   * raised when a task-private staging file disappears mid-commit. Shared by the live-commit
+   * cancellation path and by [[uploadOnly]].
+   */
+  private[seek] def buildOperatorMessage(
+    tp:           TopicPartition,
+    missing:      File,
+    partitionKey: Option[String],
+    stagingFile:  Option[File],
+    pending:      Option[PendingState] = None,
+  ): String = {
+    val pkStr       = partitionKey.getOrElse("<none>")
+    val stagingPath = stagingFile.map(_.getAbsolutePath).getOrElse(missing.getPath)
+    val parentExistsStr =
+      stagingFile.flatMap(f => Option(f.getParentFile)).map(_.exists().toString).getOrElse("<unknown>")
+    val pendingStr = pending
+      .map(p =>
+        s"pendingOffset=${p.pendingOffset.value}, ops=[${p.pendingOperations.toList.map(opSummary).mkString(" -> ")}]",
+      )
+      .getOrElse("pendingOffset=<pre-CAS stage>, ops=[]")
+    s"[${connectorTaskId.show}] Local staging file disappeared mid-commit for ${tp.topic.value}-${tp.partition} " +
+      s"(partitionKey=$pkStr, staging=$stagingPath, parentExists=$parentExistsStr, $pendingStr). " +
+      s"Refusing to silently lose buffered records. Failing the task so Connect can restart it; on restart, " +
+      s"IndexManagerV2.open will seek the consumer back from the master lock and Kafka will re-deliver " +
+      s"the records. Likely cause: tmpwatch/tmpreaper, container RuntimeDirectory clean-up, or manual " +
+      s"deletion of the task's staging directory. Configure the staging directory on durable, task-private " +
+      s"storage that is not subject to background clean-up."
+  }
+
+  private def opSummary(op: FileOperation): String = op match {
+    case UploadOperation(bucket, _, dest)    => s"Upload(bucket=$bucket, dest=$dest)"
+    case CopyOperation(bucket, src, dest, _) => s"Copy(bucket=$bucket, src=$src, dest=$dest)"
+    case DeleteOperation(bucket, src, _)     => s"Delete(bucket=$bucket, src=$src)"
+  }
+
+  /**
    * Processes a list of pending file operations for a specific topic partition.
    *
    * Each operation checks the eTag of the file to ensure that it has not been modified
@@ -248,7 +340,7 @@ class PendingOperationsProcessors(
       pending:     PendingState,
       fnIndexUpdt: (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]],
     ): Either[SinkError, Option[Offset]] = {
-      val message = buildOperatorMessage(tp, missing, pending)
+      val message = buildOperatorMessage(tp, missing, partitionKey, stagingFile, Some(pending))
       logger.error(message)
       val _ = fnIndexUpdt(tp, committedOffset, Option.empty)
         .leftMap(err =>
@@ -260,33 +352,6 @@ class PendingOperationsProcessors(
       // Use IllegalStateException to carry the missing path; UploadError is not a Throwable.
       val cause = new IllegalStateException(missing.getPath)
       new FatalCloudSinkError(message, cause.some, tp).asLeft
-    }
-
-    /** Builds the operator-facing message used both for the ERROR log and the FatalCloudSinkError. */
-    def buildOperatorMessage(
-      tp:      TopicPartition,
-      missing: File,
-      pending: PendingState,
-    ): String = {
-      val pkStr       = partitionKey.getOrElse("<none>")
-      val stagingPath = stagingFile.map(_.getAbsolutePath).getOrElse(missing.getPath)
-      val parentExistsStr =
-        stagingFile.flatMap(f => Option(f.getParentFile)).map(_.exists().toString).getOrElse("<unknown>")
-      val opsSummary = pending.pendingOperations.toList.map(opSummary).mkString(" -> ")
-      s"[${connectorTaskId.show}] Local staging file disappeared mid-commit for ${tp.topic.value}-${tp.partition} " +
-        s"(partitionKey=$pkStr, staging=$stagingPath, parentExists=$parentExistsStr, " +
-        s"pendingOffset=${pending.pendingOffset.value}, ops=[$opsSummary]). " +
-        s"Refusing to silently lose buffered records. Failing the task so Connect can restart it; on restart, " +
-        s"IndexManagerV2.open will seek the consumer back from the master lock and Kafka will re-deliver " +
-        s"the records. Likely cause: tmpwatch/tmpreaper, container RuntimeDirectory clean-up, or manual " +
-        s"deletion of the task's staging directory. Configure the staging directory on durable, task-private " +
-        s"storage that is not subject to background clean-up."
-    }
-
-    def opSummary(op: FileOperation): String = op match {
-      case UploadOperation(bucket, _, dest)    => s"Upload(bucket=$bucket, dest=$dest)"
-      case CopyOperation(bucket, src, dest, _) => s"Copy(bucket=$bucket, src=$src, dest=$dest)"
-      case DeleteOperation(bucket, src, _)     => s"Delete(bucket=$bucket, src=$src)"
     }
 
     logger.trace(

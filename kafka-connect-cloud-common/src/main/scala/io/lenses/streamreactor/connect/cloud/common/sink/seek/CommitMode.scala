@@ -34,7 +34,7 @@ sealed trait CommitMode
 object CommitMode {
 
   case object Granular extends CommitMode
-  case object Batch extends CommitMode
+  case object Batch    extends CommitMode
 
   val GranularName: String = "granular"
   val BatchName:    String = "batch"

@@ -18,6 +18,8 @@ package io.lenses.streamreactor.connect.cloud.common.sink.writer
 import com.typesafe.scalalogging.LazyLogging
 import io.lenses.streamreactor.connect.cloud.common.formats.writer.FormatWriter
 import io.lenses.streamreactor.connect.cloud.common.model.Offset
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.CopyOperation
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.DeleteOperation
 import org.apache.kafka.connect.data.Schema
 
 import java.io.File
@@ -104,4 +106,67 @@ case class Uploading(
     NoWriter(commitState.copy(committedOffset = newOffset.orElse(commitState.committedOffset)))
   }
 
+  /**
+   * Records the outcome of a successful `stage()`: the bytes are durable at `tempPath` with
+   * `tempETag`, and `finalPath` is the destination the later `CopyOperation` must use. Computing
+   * the object key once, here, is what makes the copy recorded in the master lock's `PendingState`
+   * independent of anything the writer does afterwards.
+   */
+  def toStaged(bucket: String, tempPath: String, tempETag: String, finalPath: String): Staged = {
+    logger.debug("state transition: Uploading => Staged")
+    Staged(
+      commitState,
+      file,
+      firstBufferedOffset,
+      uncommittedOffset,
+      earliestRecordTimestamp,
+      latestRecordTimestamp,
+      recordCount,
+      bucket,
+      tempPath,
+      tempETag,
+      finalPath,
+    )
+  }
+
+}
+
+/**
+ * A writer whose bytes are already durable at a connector-scoped temp path and which is waiting
+ * for the partition-batch master-lock CAS to move them to `finalPath`.
+ *
+ * Only reachable in `CommitMode.Batch`. The local staging file is deliberately retained until
+ * `finalizeCommit`, so a failure anywhere before the CAS can be retried without re-formatting.
+ */
+case class Staged(
+  commitState:             CommitState,
+  file:                    File,
+  firstBufferedOffset:     Offset,
+  uncommittedOffset:       Offset,
+  earliestRecordTimestamp: Long,
+  latestRecordTimestamp:   Long,
+  recordCount:             Long,
+  bucket:                  String,
+  tempPath:                String,
+  tempETag:                String,
+  finalPath:               String,
+) extends WriteState(commitState)
+    with LazyLogging {
+
+  def copyOp: CopyOperation = CopyOperation(bucket, tempPath, finalPath, tempETag)
+
+  def deleteOp: DeleteOperation = DeleteOperation(bucket, tempPath, tempETag)
+
+  /**
+   * The batch offset `newOffset` is the max `uncommittedOffset` across the batch, so it is normally
+   * >= this writer's own committed offset. The `max` keeps the transition monotone even if a writer
+   * carried a higher committed offset into the batch (for example after a rollback re-seed).
+   */
+  def toNoWriter(newOffset: Offset): NoWriter = {
+    logger.debug("state transition: Staged => NoWriter")
+    val committed = commitState.committedOffset.fold(newOffset)(existing =>
+      if (existing.value >= newOffset.value) existing else newOffset,
+    )
+    NoWriter(commitState.copy(committedOffset = Some(committed)))
+  }
 }
