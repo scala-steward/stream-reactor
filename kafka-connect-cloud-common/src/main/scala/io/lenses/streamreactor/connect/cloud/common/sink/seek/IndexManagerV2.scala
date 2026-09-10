@@ -329,9 +329,66 @@ class IndexManagerV2(
       _ <-
         if (commitMode == CommitMode.Batch) snapshotLegacyLocks(topicPartition, bucketAndPrefix)
         else ().asRight[SinkError]
+      // Batch mode only, strictly after legacy resolution: reap orphaned batch temp objects (§2.7).
+      // Best-effort — never fails open.
+      _ = if (commitMode == CommitMode.Batch) sweepBatchTemps(topicPartition, bucketAndPrefix)
     } yield offset
 
   }
+
+  /**
+   * Deletes orphaned batch temp objects under this task's connector-scoped prefix
+   * `.temp-upload/<connector>/<topic>/<partition>/`. An orphan is any object older than
+   * `gcSweepMinAgeSeconds` that is not the source of a `CopyOperation` still referenced by the
+   * master lock's `PendingState` (which is `None` after a successful open; the exclusion is
+   * defensive). Never touches paths outside the prefix — granular temps live under
+   * `.temp-upload/<topic>/<partition>/` and other connectors under their own name. Failures are
+   * logged, never fatal.
+   */
+  private def sweepBatchTemps(topicPartition: TopicPartition, bucketAndPrefix: CloudLocation): Unit =
+    try {
+      val prefix       = s".temp-upload/${connectorTaskId.name}/${topicPartition.topic}/${topicPartition.partition}/"
+      val ageThreshold = Instant.now().minusSeconds(gcSweepMinAgeSeconds.toLong)
+      // Defensive exclusion: any Copy source still recorded in the master lock's PendingState.
+      val masterPath = generateLockFilePath(connectorTaskId, topicPartition, directoryFileName)
+      val referenced: Set[String] =
+        tryOpen(bucketAndPrefix.bucket, masterPath).toOption
+          .flatMap(_.wrappedObject.pendingState)
+          .toList
+          .flatMap(_.pendingOperations.toList)
+          .collect { case c: CopyOperation => c.source }
+          .toSet
+      storageInterface.listFileMetaRecursive(bucketAndPrefix.bucket, Some(prefix)) match {
+        case Right(maybeListing) =>
+          val orphans = maybeListing.toList
+            .flatMap(_.files)
+            .collect { case fm: FileMetadata => fm }
+            .filter(fm =>
+              fm.file.startsWith(prefix) && !fm.lastModified.isAfter(ageThreshold) && !referenced.contains(fm.file),
+            )
+            .map(_.file)
+          if (orphans.nonEmpty) {
+            storageInterface.deleteFiles(bucketAndPrefix.bucket, orphans) match {
+              case Left(err) =>
+                logger.warn(
+                  s"[${connectorTaskId.show}] Batch temp sweep failed to delete ${orphans.size} orphan(s) for " +
+                    s"$topicPartition: ${err.message()}",
+                )
+              case Right(_) =>
+                logger.debug(
+                  s"[${connectorTaskId.show}] Batch temp sweep deleted ${orphans.size} orphan(s) for $topicPartition",
+                )
+            }
+          }
+        case Left(err) =>
+          logger.warn(
+            s"[${connectorTaskId.show}] Batch temp sweep LIST failed for $topicPartition: ${err.message()}",
+          )
+      }
+    } catch {
+      case NonFatal(e) =>
+        logger.warn(s"[${connectorTaskId.show}] Batch temp sweep threw for $topicPartition; ignoring", e)
+    }
 
   /**
    * Decides how to open a master lock given the result of reading it, and is re-entrant so a

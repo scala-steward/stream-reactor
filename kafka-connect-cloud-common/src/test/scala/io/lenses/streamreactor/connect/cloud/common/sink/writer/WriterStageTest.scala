@@ -30,8 +30,11 @@ import io.lenses.streamreactor.connect.cloud.common.sink.NonFatalCloudSinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.commit.CommitPolicy
 import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
+import io.lenses.streamreactor.connect.cloud.common.model.TopicPartition
+import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingOperationsProcessors
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingState
 import io.lenses.streamreactor.connect.cloud.common.storage.NonExistingFileError
 import io.lenses.streamreactor.connect.cloud.common.storage.UploadError
 import io.lenses.streamreactor.connect.cloud.common.storage.UploadFailedError
@@ -92,6 +95,15 @@ class WriterStageTest
     }
   }
 
+  /** Records every uploadFile destination path so temp-path shapes can be asserted. */
+  private class PathCapturingStorage extends InMemoryStorageInterface {
+    @volatile var uploadPaths: List[String] = Nil
+    override def uploadFile(source: UploadableFile, bucket: String, path: String): Either[UploadError, String] = {
+      uploadPaths = uploadPaths :+ path
+      super.uploadFile(source, bucket, path)
+    }
+  }
+
   private class FailingUploadStorage(err: File => UploadError) extends CountingStorage {
     override def uploadFile(source: UploadableFile, bucket: String, path: String): Either[UploadError, String] = {
       uploads.incrementAndGet()
@@ -108,6 +120,11 @@ class WriterStageTest
   ): Writer[FakeFileMetadata] = {
     val idx = mock[IndexManager]
     when(idx.indexingEnabled).thenReturn(true)
+    // Echo index updates so a granular Writer.commit chain (T9.1) can run to completion.
+    when(idx.updateForPartitionKey(any[TopicPartition], any[String], any[Option[Offset]], any[Option[PendingState]]))
+      .thenAnswer((_: TopicPartition, _: String, co: Option[Offset], _: Option[PendingState]) => co.asRight[SinkError])
+    when(idx.update(any[TopicPartition], any[Option[Offset]], any[Option[PendingState]]))
+      .thenAnswer((_: TopicPartition, co: Option[Offset], _: Option[PendingState]) => co.asRight[SinkError])
 
     val okb = mock[ObjectKeyBuilder]
     when(okb.build(any[Offset], any[Offset], any[Long], any[Long], any[Long]))
@@ -397,6 +414,28 @@ class WriterStageTest
     writer.currentWriteState shouldBe a[NoWriter]
     file.exists() shouldBe false
     storage.snapshot(bucket).keys should contain(staged.tempPath)
+  }
+
+  test("[B] T9.1 batch stage temps are connector-scoped; granular commit temps are not") {
+    // Batch: stage() uploads under .temp-upload/<connector>/<topic>/<partition>/<batchUuid>/.
+    val batchStorage = new PathCapturingStorage
+    val batchFile    = stagingFile()
+    val batchWriter  = buildWriter(batchStorage, batchFile)
+    batchWriter.forceWriteState(uploadingState(batchFile))
+    batchWriter.stage(batchUuid).value.value
+    val batchPath = batchStorage.uploadPaths.head
+    batchPath should startWith(s".temp-upload/${connectorTaskId.name}/${tp.topic}/${tp.partition}/")
+
+    // Granular: Writer.commit uploads under .temp-upload/<topic>/<partition>/<uuid>/ — no connector
+    // segment — so the batch sweep's connector-scoped prefix can never match a granular temp.
+    val granularStorage = new PathCapturingStorage
+    val granularFile    = stagingFile()
+    val granularWriter  = buildWriter(granularStorage, granularFile)
+    granularWriter.forceWriteState(uploadingState(granularFile))
+    granularWriter.commit.value
+    val granularPath = granularStorage.uploadPaths.head
+    granularPath should startWith(s".temp-upload/${tp.topic}/${tp.partition}/")
+    granularPath should not startWith s".temp-upload/${connectorTaskId.name}/"
   }
 
   test("[NL] T2.9 commit on a Staged writer is Fatal so a routing bug cannot mix the two protocols") {
