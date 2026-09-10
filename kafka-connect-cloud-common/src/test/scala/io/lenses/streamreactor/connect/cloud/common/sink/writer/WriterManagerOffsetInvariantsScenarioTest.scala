@@ -176,6 +176,8 @@ class WriterManagerOffsetInvariantsScenarioTest
       Right(master.get(topicPartition).map(Offset(_)))
     }
 
+    override def afterBatchCommit(topicPartition: TopicPartition, committed: Offset): Unit = ()
+
     override def getSeekedOffsetForPartitionKey(
       topicPartition: TopicPartition,
       partitionKey:   String,

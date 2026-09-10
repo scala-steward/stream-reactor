@@ -121,6 +121,17 @@ class IndexManagerV2(
   private val granularCache            = new ConcurrentHashMap[TopicPartition, ConcurrentHashMap[String, GranularCacheEntry]]()
   private val granularCacheSizeCounter = new AtomicInteger(0)
 
+  // Legacy granular-lock snapshot taken at batch-mode open(), keyed by TopicPartition. Present only
+  // in batch mode. `floors` holds the per-key dedup floor; `purged` flips once the batch watermark
+  // has caught up to every legacy lock and they have been deleted. See §2.6 of the plan.
+  private val legacy = TrieMap.empty[TopicPartition, LegacyState]
+
+  // Exposed for tests: the resolved legacy floor for a key, and whether the TP has been purged.
+  private[seek] def legacyFloor(tp: TopicPartition, pk: String): Option[Option[Offset]] =
+    legacy.get(tp).flatMap(_.floors.get(pk))
+  private[seek] def legacyPurged(tp: TopicPartition): Boolean =
+    legacy.get(tp).exists(_.purged)
+
   private def gcGet(tp: TopicPartition, pk: String): Option[GranularCacheEntry] =
     Option(granularCache.get(tp)).flatMap(inner => Option(inner.get(pk)))
 
@@ -313,6 +324,11 @@ class IndexManagerV2(
         tryOpen(bucketAndPrefix.bucket, path),
         MaxOpenCreateRaceAttempts,
       )
+      // Batch mode only, strictly after master resolution and the ownership bump: snapshot and
+      // resolve every legacy granular lock left by a granular-mode deployment (§2.6).
+      _ <-
+        if (commitMode == CommitMode.Batch) snapshotLegacyLocks(topicPartition, bucketAndPrefix)
+        else ().asRight[SinkError]
     } yield offset
 
   }
@@ -533,13 +549,210 @@ class IndexManagerV2(
    * granular-lock component that a granular -> batch migration needs is added in the transition
    * work (see `docs/datalake-exactly-once-partitionby.md`, "Switching modes").
    */
+  /**
+   * Batch-mode dedup floor: `max(masterW(tp), legacyFloor(tp, pk))`.
+   *
+   * The legacy component only matters during a granular -> batch migration, while granular locks
+   * left by the previous deployment are still present. Once they are purged (or on a fresh
+   * deployment) the floor is just the master offset.
+   */
   override def batchDedupFloor(
     topicPartition: TopicPartition,
     partitionKey:   Option[String],
   ): Either[SinkError, Option[Offset]] = {
-    val _ = partitionKey
-    seekedOffsets.get(topicPartition).asRight
+    val master = seekedOffsets.get(topicPartition)
+    legacy.get(topicPartition) match {
+      case None => master.asRight
+      case Some(state) =>
+        val pkOpt = partitionKey.filter(_.nonEmpty)
+        if (state.purged || pkOpt.isEmpty) master.asRight
+        else {
+          val pk = pkOpt.get
+          state.floors.get(pk) match {
+            case Some(legacyFloor) => maxOffset(master, legacyFloor).asRight
+            // Lazy path: a key created after the snapshot costs one GET, as ensureGranularLock
+            // does today.
+            case None => loadLegacy(topicPartition, pk).map(maxOffset(master, _))
+          }
+        }
+    }
   }
+
+  /**
+   * §2.6 purge. Once the batch watermark `committed` has caught up to every legacy lock on the TP
+   * (`committed >= maxLegacy`), the granular locks can no longer skip an uncommitted record, so
+   * they are deleted along with the sweep marker. Deferred until then because a legacy lock can be
+   * ahead of everything the new owner has delivered (its records were all skipped). Best effort:
+   * a delete failure is retried on the next commit.
+   */
+  override def afterBatchCommit(topicPartition: TopicPartition, committed: Offset): Unit =
+    legacy.get(topicPartition).foreach { state =>
+      if (!state.purged && state.maxLegacy.forall(_.value <= committed.value)) {
+        bucketAndPrefixFn(topicPartition) match {
+          case Right(bp) =>
+            val lockPaths = state.floors.keys.toList.map(pk =>
+              generateGranularLockFilePath(connectorTaskId, topicPartition, pk, directoryFileName),
+            )
+            val markerPath = generateSweepMarkerPath(connectorTaskId, topicPartition, directoryFileName)
+            storageInterface.deleteFiles(bp.bucket, lockPaths :+ markerPath) match {
+              case Right(_) =>
+                state.purged = true
+                gcRemoveAllForTp(topicPartition)
+                metrics.incrementLegacyLocksPurged()
+                logger.info(
+                  s"[${connectorTaskId.show}] Purged ${lockPaths.size} legacy granular lock(s) for " +
+                    s"$topicPartition after batch watermark reached ${committed.value}.",
+                )
+              case Left(err) =>
+                logger.warn(
+                  s"[${connectorTaskId.show}] Legacy-lock purge for $topicPartition failed; will retry on the " +
+                    s"next batch commit: ${err.message()}",
+                )
+            }
+          case Left(_) =>
+        }
+      }
+    }
+
+  private def maxOffset(a: Option[Offset], b: Option[Offset]): Option[Offset] =
+    (a.toList ++ b.toList) match {
+      case Nil  => None
+      case list => Some(list.maxBy(_.value))
+    }
+
+  private def storeLegacyFloor(tp: TopicPartition, pk: String, floor: Option[Offset]): Unit =
+    legacy.get(tp).foreach(_.floors.put(pk, floor))
+
+  /**
+   * Snapshot every legacy granular lock present on the TP at batch-mode `open()`: resolve any
+   * in-flight chain, bump each lock's eTag (fencing granular zombies), and record its offset as a
+   * per-key floor. An empty listing means a fresh (or already-purged) deployment, marked purged
+   * immediately so `batchDedupFloor` never pays a GET.
+   */
+  private def snapshotLegacyLocks(
+    topicPartition:  TopicPartition,
+    bucketAndPrefix: CloudLocation,
+  ): Either[SinkError, Unit] = {
+    val prefix =
+      s"$directoryFileName/${connectorTaskId.name}/.locks/${topicPartition.topic}/${topicPartition.partition}/"
+    val state = LegacyState(TrieMap.empty[String, Option[Offset]], purged = false)
+    legacy.put(topicPartition, state)
+    storageInterface.listFileMetaRecursive(bucketAndPrefix.bucket, Some(prefix)) match {
+      case Right(maybeListing) =>
+        val lockKeys = maybeListing.toList.flatMap(_.files).collect { case fm: FileMetadata => fm.file }.collect {
+          case p if p.startsWith(prefix) =>
+            p.substring(p.lastIndexOf('/') + 1)
+        }.collect {
+          // A `*.lock.tmp.<uuid>` orphan does not end in `.lock`; `sweep-marker.json` likewise.
+          // Only genuine `<pk>.lock` files become floors.
+          case name if name.endsWith(".lock") && TmpOrphanPattern.findFirstIn(name).isEmpty =>
+            name.stripSuffix(".lock")
+        }
+        if (lockKeys.isEmpty) {
+          state.purged = true
+          ().asRight
+        } else {
+          lockKeys.foldLeft(().asRight[SinkError]) { (acc, pk) =>
+            acc.flatMap(_ => loadLegacy(topicPartition, pk).map(_ => ()))
+          }
+        }
+      case Left(err) =>
+        NonFatalCloudSinkError.unswallowable(
+          s"Failed to list legacy granular locks for $topicPartition: ${err.message()}",
+          err.toExceptionOption,
+        ).asLeft
+    }
+  }
+
+  /**
+   * Loads one legacy granular lock, resolving a `PendingState`, bumping a clean lock's eTag, or
+   * taking ownership of a poison blob, and records the resulting offset as the key's floor.
+   */
+  private def loadLegacy(topicPartition: TopicPartition, partitionKey: String): Either[SinkError, Option[Offset]] =
+    bucketAndPrefixFn(topicPartition).flatMap { bp =>
+      val path = generateGranularLockFilePath(connectorTaskId, topicPartition, partitionKey, directoryFileName)
+      val resolved: Either[SinkError, Option[Offset]] = tryOpen(bp.bucket, path) match {
+        case Right(owe @ ObjectWithETag(IndexFile(_, committedOffset, Some(pending)), _)) =>
+          // Dead-worker recovery: resolve the in-flight chain. The final updateForPartitionKey
+          // bumps the eTag, so the lock is fenced too.
+          gcPut(topicPartition, partitionKey, GranularCacheEntry(None, owe.eTag))
+          pendingOperationsProcessors.processPendingOperations(
+            topicPartition,
+            committedOffset,
+            pending,
+            (tp, co, ps) => updateForPartitionKey(tp, partitionKey, co, ps),
+          )
+
+        case Right(owe @ ObjectWithETag(IndexFile(_, committedOffset, None), _)) =>
+          gcPut(topicPartition, partitionKey, GranularCacheEntry(committedOffset, owe.eTag))
+          bumpLegacyLock(topicPartition, partitionKey, committedOffset, MaxLegacyBumpAttempts)
+
+        case Left(_: FileNotFoundError) =>
+          Option.empty[Offset].asRight
+
+        case Left(EmptyFileError(_, eTag)) =>
+          // Take ownership exactly as ensureGranularLock does; floor is None.
+          storageInterface.writeBlobToFile(
+            bp.bucket,
+            path,
+            ObjectWithETag(IndexFile(lockOwner, Option.empty, Option.empty), eTag),
+          ).bimap(
+            err => NonFatalCloudSinkError.unswallowable(err.message(), err.toExceptionOption): SinkError,
+            owe => { gcPut(topicPartition, partitionKey, GranularCacheEntry(None, owe.eTag)); Option.empty[Offset] },
+          )
+
+        case Left(err) =>
+          NonFatalCloudSinkError.unswallowable(
+            s"Failed to load legacy granular lock $topicPartition/$partitionKey: ${err.message()}",
+            err.toExceptionOption,
+          ).asLeft
+      }
+      resolved.map { floor =>
+        storeLegacyFloor(topicPartition, partitionKey, floor)
+        floor
+      }
+    }
+
+  /**
+   * Bumps a clean legacy lock's eTag (rewrites `committedOffset` unchanged, `pendingState = None`).
+   * On an eTag mismatch — a granular zombie wrote between our read and this bump — re-read and
+   * repeat, at most [[MaxLegacyBumpAttempts]] times, then fail fatally. Never uses an offset whose
+   * bump did not succeed.
+   */
+  private def bumpLegacyLock(
+    topicPartition:  TopicPartition,
+    partitionKey:    String,
+    committedOffset: Option[Offset],
+    attemptsLeft:    Int,
+  ): Either[SinkError, Option[Offset]] =
+    updateForPartitionKey(topicPartition, partitionKey, committedOffset, Option.empty) match {
+      case Right(_) => committedOffset.asRight
+      case Left(_) if attemptsLeft > 1 =>
+        bucketAndPrefixFn(topicPartition).flatMap { bp =>
+          val path = generateGranularLockFilePath(connectorTaskId, topicPartition, partitionKey, directoryFileName)
+          tryOpen(bp.bucket, path) match {
+            case Right(owe @ ObjectWithETag(IndexFile(_, co2, None), _)) =>
+              gcPut(topicPartition, partitionKey, GranularCacheEntry(co2, owe.eTag))
+              bumpLegacyLock(topicPartition, partitionKey, co2, attemptsLeft - 1)
+            case Right(owe @ ObjectWithETag(IndexFile(_, co2, Some(pending)), _)) =>
+              gcPut(topicPartition, partitionKey, GranularCacheEntry(None, owe.eTag))
+              pendingOperationsProcessors.processPendingOperations(
+                topicPartition,
+                co2,
+                pending,
+                (tp, co, ps) => updateForPartitionKey(tp, partitionKey, co, ps),
+              )
+            case Left(rerr) =>
+              new FatalCloudSinkError(rerr.message(), rerr.toExceptionOption, topicPartition).asLeft
+          }
+        }
+      case Left(err) =>
+        new FatalCloudSinkError(
+          s"Exhausted legacy-lock bump attempts for $topicPartition/$partitionKey: ${err.message()}",
+          err.exception(),
+          topicPartition,
+        ).asLeft
+    }
 
   // Cache-first lookup: return the cached offset if present, otherwise fetch the granular lock
   // from cloud storage and populate the cache (lazy load). Returns Right(None) if the lock does
@@ -1432,6 +1645,27 @@ class IndexManagerV2(
 object IndexManagerV2 {
 
   case class GranularCacheEntry(offset: Option[Offset], eTag: String)
+
+  /**
+   * Per-topic-partition snapshot of legacy granular locks during a granular -> batch migration.
+   *
+   * @param floors per partition-key dedup floor (the lock's committed offset, or `None`).
+   * @param purged set once every legacy lock has been deleted; after that the floor is the master
+   *               offset alone and no per-key GET is ever issued.
+   */
+  private[seek] final case class LegacyState(
+    floors:     TrieMap[String, Option[Offset]],
+    var purged: Boolean,
+  ) {
+    def maxLegacy: Option[Offset] =
+      floors.values.flatten.toList match {
+        case Nil  => None
+        case list => Some(list.maxBy(_.value))
+      }
+  }
+
+  /** Bounded re-read budget when a legacy-lock eTag bump loses a race to a granular zombie. */
+  val MaxLegacyBumpAttempts: Int = 3
 
   // Discriminates between GC items targeting the live `.lock` blob and items
   // targeting orphaned `.lock.tmp.<uuid>` residue from a crashed writer. The

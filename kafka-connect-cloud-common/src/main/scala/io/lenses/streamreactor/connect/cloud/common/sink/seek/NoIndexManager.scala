@@ -82,6 +82,8 @@ class NoIndexManager extends IndexManager {
     partitionKey:   Option[String],
   ): Either[SinkError, Option[Offset]] = Option.empty[Offset].asRight
 
+  override def afterBatchCommit(topicPartition: TopicPartition, committed: Offset): Unit = ()
+
   override def updateMasterLock(
     topicPartition:   TopicPartition,
     globalSafeOffset: Offset,

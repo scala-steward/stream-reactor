@@ -384,6 +384,12 @@ trait CloudSinkMetricsMBean {
    */
   def getBatchCommitFailuresTotal: Long
 
+  /**
+   * `commit.mode=batch` only: cumulative topic-partitions whose legacy granular locks were purged
+   * after a granular -> batch migration once the batch watermark caught up to them.
+   */
+  def getLegacyLocksPurgedTotal: Long
+
   // =========================================================================
   // F. Current state gauges
   // =========================================================================
@@ -488,6 +494,7 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   private val batchCommitsTotal            = new LongAdder()
   private val batchCommitFilesTotal        = new LongAdder()
   private val batchCommitFailuresTotal     = new LongAdder()
+  private val legacyLocksPurgedTotal       = new LongAdder()
 
   // --- F. Current state gauges ---
 
@@ -584,6 +591,7 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   override def getBatchCommitsTotal:            Long = batchCommitsTotal.sum()
   override def getBatchCommitFilesTotal:        Long = batchCommitFilesTotal.sum()
   override def getBatchCommitFailuresTotal:     Long = batchCommitFailuresTotal.sum()
+  override def getLegacyLocksPurgedTotal:       Long = legacyLocksPurgedTotal.sum()
 
   // F. Current state gauges
   override def getInFlightUploads: Int = inFlightUploads.get()
@@ -689,6 +697,7 @@ class CloudSinkMetrics() extends CloudSinkMetricsMBean {
   def incrementBatchCommits():        Unit = batchCommitsTotal.increment()
   def incrementBatchCommitFailures(): Unit = batchCommitFailuresTotal.increment()
   def addBatchCommitFiles(count: Long): Unit = batchCommitFilesTotal.add(count)
+  def incrementLegacyLocksPurged(): Unit = legacyLocksPurgedTotal.increment()
 
   // F. State gauge mutators
   def incrementInFlightUploads(): Unit = { val _ = inFlightUploads.incrementAndGet() }

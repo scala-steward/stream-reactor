@@ -126,6 +126,17 @@ trait IndexManager {
   ): Either[SinkError, Option[Offset]]
 
   /**
+   * Hook called after a successful `CommitMode.Batch` commit at offset `committed`.
+   *
+   * Used by the granular -> batch transition to purge the legacy granular locks once the batch
+   * watermark has caught up to every one of them (`committed >= maxLegacy`); until then a legacy
+   * lock could be ahead of everything the new owner has delivered, and purging early would let
+   * those records be re-written. A no-op once the locks are purged or when there were none. Best
+   * effort: failures are retried on the next commit, never surfaced.
+   */
+  def afterBatchCommit(topicPartition: TopicPartition, committed: Offset): Unit
+
+  /**
    * Updates the master lock with the global safe offset.
    * Writes `globalSafeOffset - 1` as the committedOffset to preserve existing semantics.
    *

@@ -220,10 +220,11 @@ class WriterCommitManager[SM <: FileMetadata](
                 partitionKey     = None,
                 stagingFile      = None,
               ).map { _ =>
-                staged.foreach(_ => ())
                 writers.foreach(_.finalizeCommit(pendingOffset))
                 metrics.incrementBatchCommits()
                 metrics.addBatchCommitFiles(staged.size.toLong)
+                // Legacy granular-lock purge hook (granular -> batch transition, §2.6).
+                indexManager.afterBatchCommit(topicPartition, pendingOffset)
                 pendingOperationsProcessors.deleteTempsBestEffort(staged.map(_.deleteOp))
               }.leftMap { err =>
                 metrics.incrementBatchCommitFailures()
