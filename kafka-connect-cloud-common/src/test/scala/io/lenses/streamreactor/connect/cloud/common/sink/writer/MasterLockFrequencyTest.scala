@@ -32,6 +32,7 @@ import io.lenses.streamreactor.connect.cloud.common.sink.config.ValuePartitionFi
 import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.KeyNamer
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
+import io.lenses.streamreactor.connect.cloud.common.sink.seek.CommitMode
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.IndexManager
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.PendingOperationsProcessors
 import io.lenses.streamreactor.connect.cloud.common.storage.FileMetadata
@@ -112,6 +113,7 @@ class MasterLockFrequencyTest
   private def buildWriterManager(
     indexManager: IndexManager,
     metrics:      CloudSinkMetrics = new CloudSinkMetrics(),
+    commitMode:   CommitMode       = CommitMode.Granular,
   ): WriterManager[FileMetadata] =
     new WriterManager[FileMetadata](
       commitPolicyFn              = _ => Right(commitPolicy),
@@ -125,6 +127,7 @@ class MasterLockFrequencyTest
       schemaChangeDetector        = schemaChangeDetector,
       skipNullValues              = false,
       pendingOperationsProcessors = pendingOpsProcessors,
+      commitMode                  = commitMode,
       metrics                     = metrics,
     )
 
@@ -645,5 +648,55 @@ class MasterLockFrequencyTest
     // Exactly two successful master-lock writes total: the initial cycle at 51 (step 1)
     // and the new-episode routine write at 6 (step 4).
     metrics.getMasterLockUpdates shouldBe 2L
+  }
+
+  // ── Partition-batch commit mode: the master lock is written only by commitBatch ─────
+
+  test(
+    "[B] T5.2 batch: preCommit, cleanUp and close never write the master lock or run granular-lock GC",
+  ) {
+    val indexManager = mock[IndexManager]
+    when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(Some(Offset(50)))
+
+    val metrics = new CloudSinkMetrics()
+    val wm      = buildWriterManager(indexManager, metrics, CommitMode.Batch)
+    wm.putWriter(MapKey(tp0, dateA), makeIdleWriter(tp0, Some(Offset(60))))
+    wm.putWriter(MapKey(tp0, dateB), makeIdleWriter(tp0, Some(Offset(70))))
+
+    // The dirty predicate would be true in granular mode: 71 > 51.
+    wm.preCommit(currentOffsets(tp0, 100))(tp0).offset() shouldBe 71L
+    wm.cleanUp(tp0)
+    wm.close()
+
+    verify(indexManager, never).updateMasterLock(any[TopicPartition], any[Offset])
+    verify(indexManager, never).cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])
+    metrics.getMasterLockUpdates shouldBe 0L
+    metrics.getMasterLockWriteForcedRevoke shouldBe 0L
+  }
+
+  test(
+    "[B] T5.3 batch: close() skips the forced master-lock write that granular mode performs for the same state",
+  ) {
+    // Granular arm: the forced Revoke write fires.
+    val granularIm = mock[IndexManager]
+    when(granularIm.getSeekedOffsetForTopicPartition(tp0)).thenReturn(Some(Offset(50)))
+    when(granularIm.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
+    when(granularIm.cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])).thenReturn(Right(()))
+    val granularMetrics = new CloudSinkMetrics()
+    val granularWm      = buildWriterManager(granularIm, granularMetrics, CommitMode.Granular)
+    granularWm.putWriter(MapKey(tp0, dateA), makeIdleWriter(tp0, Some(Offset(70))))
+    granularWm.close()
+    verify(granularIm).updateMasterLock(eqTo(tp0), eqTo(Offset(71)))
+    granularMetrics.getMasterLockWriteForcedRevoke shouldBe 1L
+
+    // Batch arm: identical writer state, no write at all.
+    val batchIm = mock[IndexManager]
+    when(batchIm.getSeekedOffsetForTopicPartition(tp0)).thenReturn(Some(Offset(50)))
+    val batchMetrics = new CloudSinkMetrics()
+    val batchWm      = buildWriterManager(batchIm, batchMetrics, CommitMode.Batch)
+    batchWm.putWriter(MapKey(tp0, dateA), makeIdleWriter(tp0, Some(Offset(70))))
+    batchWm.close()
+    verify(batchIm, never).updateMasterLock(any[TopicPartition], any[Offset])
+    batchMetrics.getMasterLockWriteForcedRevoke shouldBe 0L
   }
 }

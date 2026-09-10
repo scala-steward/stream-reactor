@@ -175,7 +175,9 @@ class WriterManager[SM <: FileMetadata](
     val tpWriters = writersForTopicPartition(topicPartition)
     // Defensive wrap: state clear, writer close, and cache eviction below must always run
     // regardless of the forced-write outcome.
-    if (tpWriters.nonEmpty) {
+    // Batch mode never force-writes: the durable floor only ever advances through a completed
+    // batch CAS, so writing it here could claim offsets whose objects are still at temp paths.
+    if (tpWriters.nonEmpty && commitMode == CommitMode.Granular) {
       val outcome: ForceWriteOutcome =
         try {
           attemptForceMasterLockWrite(topicPartition, tpWriters, reason)
@@ -548,7 +550,17 @@ class WriterManager[SM <: FileMetadata](
           writers.keys.exists(k => k.topicPartition == topicPartition && k.partitionValues.nonEmpty)
 
         val shouldReturnOffset: Boolean =
-          if (hasPartitionByWriters) {
+          if (commitMode == CommitMode.Batch) {
+            // Batch mode: `preCommit` is a pure read. `commitBatch`'s CAS is the only thing that
+            // advances the durable floor, and granular-lock GC has nothing to collect because
+            // batch mode never creates granular locks. `firstBufferedOffsets` already includes
+            // `Staged` writers, so the barrier below is the same one granular mode computes.
+            metrics.clearMasterLockDirty(topicPartition)
+            safeOffsetHighWatermarks.put(topicPartition, globalSafeOffset)
+            advanceLastReturned(topicPartition, globalSafeOffset)
+            forceWriteAfterCleanUp.remove(topicPartition)
+            true
+          } else if (hasPartitionByWriters) {
             val lastWritten = currentLastWrittenMaster(topicPartition)
             val dirty       = globalSafeOffset > lastWritten
 

@@ -105,9 +105,9 @@ class WriterCommitManagerBatchTest
 
   /** Records master-lock payloads and upload calls, and can fail one nominated staging file. */
   private class RecordingStorage extends InMemoryStorageInterface {
-    val uploads                                = new AtomicInteger(0)
+    val uploads = new AtomicInteger(0)
     val failUploadFor: AtomicReference[Option[File]] = new AtomicReference(None)
-    val masterWrites                           = mutable.ListBuffer.empty[IndexFile]
+    val masterWrites = mutable.ListBuffer.empty[IndexFile]
 
     override def uploadFile(source: UploadableFile, bucket: String, path: String): Either[UploadError, String] = {
       uploads.incrementAndGet()
@@ -267,8 +267,8 @@ class WriterCommitManagerBatchTest
     val metrics = new CloudSinkMetrics()
     val fileA   = stagingWith("A: 100..199")
     val fileB   = stagingWith("B: 200..250")
-    val wA       = buildWriter(im, "A", "data/orders/0/a.json")
-    val wB       = buildWriter(im, "B", "data/orders/0/b.json")
+    val wA      = buildWriter(im, "A", "data/orders/0/a.json")
+    val wB      = buildWriter(im, "B", "data/orders/0/b.json")
     writing(wA, fileA, 100, 199)
     writing(wB, fileB, 200, 250)
 
@@ -296,8 +296,8 @@ class WriterCommitManagerBatchTest
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val fileB = stagingWith("B")
-    val wA     = buildWriter(im, "A", "data/orders/0/a.json")
-    val wB     = buildWriter(im, "B", "data/orders/0/b.json")
+    val wA    = buildWriter(im, "A", "data/orders/0/a.json")
+    val wB    = buildWriter(im, "B", "data/orders/0/b.json")
     writing(wA, fileA, 100, 199)
     writing(wB, fileB, 200, 250)
 
@@ -332,7 +332,7 @@ class WriterCommitManagerBatchTest
   test("[NL] T4.3 the CAS committedOffset comes from the master lock, never from a writer's stale state") {
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
-    val wA     = buildWriter(im, "A", "data/orders/0/a.json")
+    val wA    = buildWriter(im, "A", "data/orders/0/a.json")
     writing(wA, fileA, 100, 199)
     // An idle sibling carrying a stale committed offset must not influence the CAS payload.
     val stale = buildWriter(im, "STALE", "data/orders/0/stale.json")
@@ -353,8 +353,8 @@ class WriterCommitManagerBatchTest
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val fileB = stagingWith("B")
-    val wA     = buildWriter(im, "A", "data/orders/0/a.json")
-    val wB     = buildWriter(im, "B", "data/orders/0/b.json")
+    val wA    = buildWriter(im, "A", "data/orders/0/a.json")
+    val wB    = buildWriter(im, "B", "data/orders/0/b.json")
     writing(wA, fileA, 100, 199)
     writing(wB, fileB, 200, 250)
     storage.failUploadFor.set(Some(fileB))
@@ -384,8 +384,8 @@ class WriterCommitManagerBatchTest
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val fileB = stagingWith("B")
-    val wA     = buildWriter(im, "A", "data/orders/0/a.json")
-    val wB     = buildWriter(im, "B", "data/orders/0/b.json")
+    val wA    = buildWriter(im, "A", "data/orders/0/a.json")
+    val wB    = buildWriter(im, "B", "data/orders/0/b.json")
     writing(wA, fileA, 100, 199)
     writing(wB, fileB, 200, 250)
     storage.failUploadFor.set(Some(fileB))
@@ -414,8 +414,8 @@ class WriterCommitManagerBatchTest
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val fileB = stagingWith("B")
-    val wA     = buildWriter(im, "A", "data/orders/0/a.json")
-    val wB     = buildWriter(im, "B", "data/orders/0/b.json")
+    val wA    = buildWriter(im, "A", "data/orders/0/a.json")
+    val wB    = buildWriter(im, "B", "data/orders/0/b.json")
     writing(wA, fileA, 100, 199)
     writing(wB, fileB, 200, 250)
 
@@ -450,9 +450,9 @@ class WriterCommitManagerBatchTest
     val fileA = stagingWith("A")
     val fileB = stagingWith("B")
     val fileC = stagingWith("C")
-    val wA     = buildWriter(im, "A", "data/orders/0/a.json")
-    val wB     = buildWriter(im, "B", "data/orders/0/b.json")
-    val wC     = buildWriter(im, "C", "data/orders/0/c.json")
+    val wA    = buildWriter(im, "A", "data/orders/0/a.json")
+    val wB    = buildWriter(im, "B", "data/orders/0/b.json")
+    val wC    = buildWriter(im, "C", "data/orders/0/c.json")
     writing(wA, fileA, 100, 199)
     writing(wB, fileB, 200, 250)
     writing(wC, fileC, 251, 300)
@@ -489,15 +489,15 @@ class WriterCommitManagerBatchTest
   test("[ND] T4.8 a last-copy failure is NonFatal and the recommit re-drives the chain without re-uploading") {
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
-    val wA     = buildWriter(im, "A", "data/orders/0/a.json")
+    val wA    = buildWriter(im, "A", "data/orders/0/a.json")
     writing(wA, fileA, 100, 199)
 
     val stagedA = wA.stage("probe").value.value
     storage.arm(FailMoveAt(bucket, stagedA.tempPath))
     val uploadsAfterStage = storage.uploads.get()
 
-    val cm     = commitManager(im, sourceOf("A" -> wA))
-    val first  = cm.commitBatch(tp)
+    val cm    = commitManager(im, sourceOf("A" -> wA))
+    val first = cm.commitBatch(tp)
     first.left.value.rollBack() shouldBe false
     wA.hasPendingUpload shouldBe true
     finalKeys() shouldBe empty
@@ -587,11 +587,11 @@ class WriterCommitManagerBatchTest
   }
 
   test("[B] T4.11 commitPending and commitForTopicPartition also commit the whole topic-partition batch") {
-    val im     = buildIndexManager()
-    val fileA  = stagingWith("A")
-    val fileB  = stagingWith("B")
-    val wA      = buildWriter(im, "A", "data/orders/0/a.json", commitPolicy = neverFlush)
-    val wB      = buildWriter(im, "B", "data/orders/0/b.json", commitPolicy = neverFlush)
+    val im    = buildIndexManager()
+    val fileA = stagingWith("A")
+    val fileB = stagingWith("B")
+    val wA    = buildWriter(im, "A", "data/orders/0/a.json", commitPolicy = neverFlush)
+    val wB    = buildWriter(im, "B", "data/orders/0/b.json", commitPolicy = neverFlush)
     writing(wA, fileA, 100, 199)
     writing(wB, fileB, 200, 250)
     // A is parked mid-upload, B is still buffering: commitPending must take both.
@@ -602,7 +602,7 @@ class WriterCommitManagerBatchTest
     finalKeys() should contain theSameElementsAs Seq("data/orders/0/a.json", "data/orders/0/b.json")
 
     val fileC = stagingWith("C")
-    val wC     = buildWriter(im, "C", "data/orders/0/c.json", commitPolicy = neverFlush)
+    val wC    = buildWriter(im, "C", "data/orders/0/c.json", commitPolicy = neverFlush)
     writing(wC, fileC, 251, 300)
     commitManager(im, sourceOf("C" -> wC)).commitForTopicPartition(tp).value
     finalKeys() should contain("data/orders/0/c.json")
@@ -612,8 +612,8 @@ class WriterCommitManagerBatchTest
   test("[B] T4.11 granular mode routes to Writer.commit and never stages a writer") {
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
-    val wA     = buildWriter(im, "A", "data/orders/0/a.json", commitPolicy = alwaysFlush)
-    val wB     = buildWriter(im, "B", "data/orders/0/b.json", commitPolicy = neverFlush)
+    val wA    = buildWriter(im, "A", "data/orders/0/a.json", commitPolicy = alwaysFlush)
+    val wB    = buildWriter(im, "B", "data/orders/0/b.json", commitPolicy = neverFlush)
     val fileB = stagingWith("B")
     writing(wA, fileA, 100, 199)
     writing(wB, fileB, 200, 250)
@@ -636,8 +636,8 @@ class WriterCommitManagerBatchTest
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val fileB = stagingWith("B")
-    val wA     = buildWriter(im, "A", "data/orders/0/a.json")
-    val wB     = buildWriter(im, "B", "data/orders/0/b.json")
+    val wA    = buildWriter(im, "A", "data/orders/0/a.json")
+    val wB    = buildWriter(im, "B", "data/orders/0/b.json")
     writing(wA, fileA, 100, 199)
     writing(wB, fileB, 200, 250)
     wA.stage("probe").value.value
