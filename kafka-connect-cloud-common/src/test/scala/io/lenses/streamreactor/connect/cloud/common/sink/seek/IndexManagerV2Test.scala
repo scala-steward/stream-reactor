@@ -72,6 +72,41 @@ class IndexManagerV2Test
   private val pendingOperationsProcessors = mock[PendingOperationsProcessors]
   private val indexesDirectoryName        = ".indexes2"
 
+  /**
+   * From Cycle 6, `open()` rewrites a pending-free master lock to bump its eTag (the ownership
+   * fence — see §2.5 of the batch-commit plan). On a `mock[StorageInterface]` that write is
+   * unstubbed and returns a `SmartNull` that blows up in `open`. This stubs it to echo the written
+   * `IndexFile` back with a fresh eTag, matching what `InMemoryStorageInterface` would do. Tests
+   * that assert on the write can stub over it afterwards.
+   */
+  private def stubMasterLockBump(si: StorageInterface[_]): Unit = {
+    val _ = Mockito.when(
+      si.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectProtection[IndexFile]])(
+        any[Encoder[IndexFile]],
+      ),
+    ).thenAnswer(
+      new org.mockito.stubbing.Answer[AnyRef] {
+        override def answer(invocation: org.mockito.invocation.InvocationOnMock): AnyRef = {
+          // mockito-scala does not preserve positional argument indices across the implicit
+          // parameter list, so locate the protection argument by type.
+          val protection = invocation.getArguments.toList.collectFirst {
+            case p: ObjectProtection[IndexFile] @unchecked => p
+          }
+          Right(ObjectWithETag(protection.map(_.wrappedObject).getOrElse(IndexFile("lockOwner", None, None)),
+                               "bumped-etag",
+          ))
+        }
+      },
+    )
+  }
+
+  /** A storage mock whose master-lock bump write is already stubbed (see [[stubMasterLockBump]]). */
+  private def storageMockWithBump(): StorageInterface[_] = {
+    val si = mock[StorageInterface[_]]
+    stubMasterLockBump(si)
+    si
+  }
+
   private var indexManagerV2: IndexManagerV2 = _
 
   before {
@@ -82,6 +117,10 @@ class IndexManagerV2Test
     // leaked interrupt state before each test so the flake cannot propagate between tests.
     val _ = Thread.interrupted()
     reset(storageInterface, connectorTaskId, bucketAndPrefixFn, pendingOperationsProcessors)
+
+    // `open()` now rewrites a pending-free master lock to bump its eTag (the ownership fence),
+    // so every open path performs a write on the shared storage mock too.
+    stubMasterLockBump(storageInterface)
 
     indexManagerV2 = new IndexManagerV2(
       bucketAndPrefixFn,
@@ -148,23 +187,37 @@ class IndexManagerV2Test
     when(storageInterface.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
       .thenReturn(absent, winnerLock)
 
-    // The NoOverwrite create loses the race.
-    when(
-      storageInterface.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
-        ArgumentMatchers.eq(indexFileEncoder),
+    // Two writes now happen: the NoOverwrite create loses the race, then the plain-read arm bumps
+    // the adopted clean lock's eTag (Cycle 6). Distinguish by protection type: the create is a
+    // NoOverwriteExistingObject and must fail; the bump is an ObjectWithETag and must succeed.
+    Mockito.when(
+      storageInterface.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectProtection[IndexFile]])(
+        any[Encoder[IndexFile]],
       ),
-    ).thenReturn(Left(NonOverwriteFileExistsError(new Exception("exists"), path)))
+    ).thenAnswer(
+      new org.mockito.stubbing.Answer[AnyRef] {
+        override def answer(invocation: org.mockito.invocation.InvocationOnMock): AnyRef =
+          invocation.getArguments.toList.collectFirst { case p: ObjectProtection[IndexFile] @unchecked => p } match {
+            case Some(_: NoOverwriteExistingObject[IndexFile]) =>
+              Left(NonOverwriteFileExistsError(new Exception("exists"), path))
+            case Some(other) => Right(ObjectWithETag(other.wrappedObject, "bumped-etag"))
+            case None        => Right(ObjectWithETag(IndexFile("winner", Some(Offset(100)), None), "bumped-etag"))
+          }
+      },
+    )
 
     val result = indexManagerV2.open(Set(topicPartition))
 
     result shouldBe Right(Map(topicPartition -> Some(Offset(100))))
-    // The adopted eTag drives subsequent conditional commits.
+    // The bumped eTag drives subsequent conditional commits.
     indexManagerV2.getSeekedOffsetForTopicPartition(topicPartition) shouldBe Some(Offset(100))
+    indexManagerV2.topicPartitionToETags.get(topicPartition) shouldBe Some("bumped-etag")
     verify(storageInterface, times(2))
       .getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder))
-    verify(storageInterface, times(1))
-      .writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
-        ArgumentMatchers.eq(indexFileEncoder),
+    // One failed NoOverwrite create + one successful ownership bump.
+    verify(storageInterface, times(2))
+      .writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectProtection[IndexFile]])(
+        any[Encoder[IndexFile]],
       )
   }
 
@@ -423,7 +476,7 @@ class IndexManagerV2Test
 
     val objectWithETag = ObjectWithETag(indexFile, "original-etag")
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
 
     when(bucketAndPrefixFn(topicPartition)).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -503,7 +556,7 @@ class IndexManagerV2Test
       pendingState    = Some(pendingState),
     )
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
 
     when(bucketAndPrefixFn(topicPartition)).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -560,7 +613,7 @@ class IndexManagerV2Test
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
     val topicPartitions = (0 until numPartitions).map(i => Topic("stress-topic").withPartition(i)).toSet
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
 
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -776,7 +829,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
@@ -802,7 +855,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     // Master lock for open()
@@ -842,7 +895,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -881,7 +934,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -930,7 +983,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -971,7 +1024,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -1018,7 +1071,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -1068,7 +1121,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -1117,7 +1170,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     val pp = mock[PendingOperationsProcessors]
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -1207,7 +1260,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     val pp = mock[PendingOperationsProcessors]
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -1267,7 +1320,7 @@ class IndexManagerV2Test
     val missingFile     = new java.io.File("/tmp/staging-dead-worker/gone.tmp")
     val pk              = "my-pk"
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.listKeysRecursive(anyString(), any[Option[String]])).thenReturn(Right(None))
@@ -1407,7 +1460,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     val pp = mock[PendingOperationsProcessors]
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -1485,7 +1538,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -1540,7 +1593,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -1592,7 +1645,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -1652,7 +1705,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -1694,7 +1747,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -1750,7 +1803,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -1809,7 +1862,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -1851,7 +1904,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
@@ -1885,8 +1938,9 @@ class IndexManagerV2Test
     secondResult.isLeft shouldBe true
 
     try {
-      // The second write should still use the original stale eTag (fencing preserved)
-      captor.getValue.eTag shouldBe "etag-v1"
+      // The second write should still use the eTag cached at open (the ownership bump's
+      // "bumped-etag"), never a value re-read from storage after the failed write — fencing.
+      captor.getValue.eTag shouldBe "bumped-etag"
     } finally im.close()
   }
 
@@ -1894,7 +1948,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -1951,7 +2005,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
@@ -2001,7 +2055,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
@@ -2051,7 +2105,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
@@ -2103,7 +2157,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     val pp = mock[PendingOperationsProcessors]
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -2180,7 +2234,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     val pp = mock[PendingOperationsProcessors]
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -2242,7 +2296,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -2298,7 +2352,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -2366,7 +2420,7 @@ class IndexManagerV2Test
     // GcKind.TmpOrphan tag bypasses the cache-reclaim filter.
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val pk      = "pk-shared"
@@ -2413,7 +2467,7 @@ class IndexManagerV2Test
     // anchored TmpOrphanPattern (`.lock.tmp.<uuid>$`) prevents this.
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val pk       = "name=report.lock.tmp.archive"
@@ -2450,7 +2504,7 @@ class IndexManagerV2Test
     // alone (which contains characters outside [0-9a-fA-F-]) does not match.
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val pk       = "foo.lock.tmp"
@@ -2486,7 +2540,7 @@ class IndexManagerV2Test
     // shorter (incorrect-greedy) extraction `name=report`.
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val pk      = "name=report.lock.tmp.archive"
@@ -2534,7 +2588,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -2611,19 +2665,26 @@ class IndexManagerV2Test
         ArgumentMatchers.contains("sweep-marker"),
       )(any[Decoder[IndexManagerV2.SweepMarker]]),
     ).thenReturn(Left(FileNotFoundError(new Exception("Not found"), "sweep-marker")))
-    val _ = when(
-      si.writeBlobToFile[IndexManagerV2.SweepMarker](anyString(),
-                                                     anyString(),
-                                                     any[ObjectProtection[IndexManagerV2.SweepMarker]],
-      )(any[Encoder[IndexManagerV2.SweepMarker]]),
+    // `writeBlobToFile[O]` erases to one method, so a single stub serves both the sweep-marker
+    // write and the Cycle-6 master-lock ownership bump. Echo whichever object was written back
+    // with a fresh eTag so the master IndexFile bump does not receive a SweepMarker (which would
+    // ClassCastException in updateDataReturnOffset).
+    val _ = Mockito.when(
+      si.writeBlobToFile(anyString(), anyString(), any[ObjectProtection[Any]])(any[Encoder[Any]]),
+    ).thenAnswer(
+      new org.mockito.stubbing.Answer[AnyRef] {
+        override def answer(invocation: org.mockito.invocation.InvocationOnMock): AnyRef = {
+          val protection = invocation.getArguments.toList.collectFirst { case p: ObjectProtection[_] => p }
+          Right(ObjectWithETag(protection.map(_.wrappedObject).orNull, "marker-etag"))
+        }
+      },
     )
-      .thenReturn(Right(ObjectWithETag(IndexManagerV2.SweepMarker(0L, 0L), "marker-etag")))
   }
 
   test("sweep enqueues orphaned lock files below master lock offset") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val oldTime      = Instant.now().minusSeconds(7200)
@@ -2655,7 +2716,7 @@ class IndexManagerV2Test
   test("sweep skips files younger than gcSweepMinAgeSeconds") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val recentTime   = Instant.now()
@@ -2681,7 +2742,7 @@ class IndexManagerV2Test
   test("sweep skips lock files already in granularCache") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val oldTime      = Instant.now().minusSeconds(7200)
@@ -2724,7 +2785,7 @@ class IndexManagerV2Test
   test("sweep skips lock files with committedOffset above master offset") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val oldTime      = Instant.now().minusSeconds(7200)
@@ -2756,7 +2817,7 @@ class IndexManagerV2Test
   test("sweep preserves orphaned lock at exactly master offset (one-record-overlap invariant)") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val oldTime      = Instant.now().minusSeconds(7200)
@@ -2790,7 +2851,7 @@ class IndexManagerV2Test
   test("sweep is a no-op when master lock committedOffset is None (globalSafeOffset == 0)") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     // Override the master-lock GET stub from setupSweepMocks so the lock has
@@ -2823,7 +2884,7 @@ class IndexManagerV2Test
   ) {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     // Override the master-lock GET stub so committedOffset = Some(Offset(0)),
@@ -2874,7 +2935,7 @@ class IndexManagerV2Test
   test("sweep deletes orphan one below masterOffset but preserves orphan at masterOffset") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val oldTime   = Instant.now().minusSeconds(7200)
@@ -2922,7 +2983,7 @@ class IndexManagerV2Test
   test("sweep enqueues empty lock files with no committedOffset and no PendingState") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val oldTime      = Instant.now().minusSeconds(7200)
@@ -2957,7 +3018,7 @@ class IndexManagerV2Test
   test("sweep does NOT enqueue lock files with no committedOffset but a PendingState") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val oldTime = Instant.now().minusSeconds(7200)
@@ -2997,7 +3058,7 @@ class IndexManagerV2Test
     val tp1             = Topic("topic1").withPartition(0)
     val tp2             = Topic("topic1").withPartition(1)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
 
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -3017,7 +3078,7 @@ class IndexManagerV2Test
       .thenReturn(Left(FileNotFoundError(new Exception("Not found"), "sweep-marker")))
     when(
       si.writeBlobToFile[IndexManagerV2.SweepMarker](anyString(),
-                                                     anyString(),
+                                                     ArgumentMatchers.contains("sweep-marker"),
                                                      any[ObjectProtection[IndexManagerV2.SweepMarker]],
       )(any[Encoder[IndexManagerV2.SweepMarker]]),
     )
@@ -3060,7 +3121,7 @@ class IndexManagerV2Test
   test("sweep reads and respects marker file timing") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
 
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -3097,7 +3158,7 @@ class IndexManagerV2Test
         .thenReturn(Right(ObjectWithETag(pastMarker, "marker-etag")))
       when(
         si.writeBlobToFile[IndexManagerV2.SweepMarker](anyString(),
-                                                       anyString(),
+                                                       ArgumentMatchers.contains("sweep-marker"),
                                                        any[ObjectProtection[IndexManagerV2.SweepMarker]],
         )(any[Encoder[IndexManagerV2.SweepMarker]]),
       )
@@ -3114,7 +3175,7 @@ class IndexManagerV2Test
   test("sweep writes marker before scanning") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
     org.mockito.Mockito.doReturn(Right(None)).when(si).listFileMetaRecursive(anyString(), any[Option[String]])
 
@@ -3135,7 +3196,7 @@ class IndexManagerV2Test
   test("sweep skips TP when seekedOffsets returns None") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     // Only open tp, so seekedOffsets only has tp (topic2/0 would have None)
@@ -3154,7 +3215,7 @@ class IndexManagerV2Test
   test("sweep treats transient marker read error as not-yet-due") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
 
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -3179,7 +3240,7 @@ class IndexManagerV2Test
       // Should NOT have listed files or written marker (transient error = skip sweep)
       verify(si, never).listFileMetaRecursive(anyString(), any[Option[String]])
       verify(si, never).writeBlobToFile[IndexManagerV2.SweepMarker](anyString(),
-                                                                    anyString(),
+                                                                    ArgumentMatchers.contains("sweep-marker"),
                                                                     any[ObjectProtection[IndexManagerV2.SweepMarker]],
       )(any[Encoder[IndexManagerV2.SweepMarker]])
     } finally im.close()
@@ -3188,7 +3249,7 @@ class IndexManagerV2Test
   test("sweep skips scan when marker write loses eTag race") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
 
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -3207,7 +3268,7 @@ class IndexManagerV2Test
     // Conditional write fails (another task created the marker first)
     when(
       si.writeBlobToFile[IndexManagerV2.SweepMarker](anyString(),
-                                                     anyString(),
+                                                     ArgumentMatchers.contains("sweep-marker"),
                                                      any[ObjectProtection[IndexManagerV2.SweepMarker]],
       )(any[Encoder[IndexManagerV2.SweepMarker]]),
     )
@@ -3220,7 +3281,7 @@ class IndexManagerV2Test
 
       // Marker write was attempted exactly once (before the scan)
       verify(si, times(1)).writeBlobToFile[IndexManagerV2.SweepMarker](anyString(),
-                                                                       anyString(),
+                                                                       ArgumentMatchers.contains("sweep-marker"),
                                                                        any[ObjectProtection[IndexManagerV2.SweepMarker]],
       )(any[Encoder[IndexManagerV2.SweepMarker]])
       // Scan is skipped when the marker write loses the eTag race: no LIST call.
@@ -3233,7 +3294,7 @@ class IndexManagerV2Test
   test("sweep is disabled when gcSweepEnabled = false") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
 
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -3258,7 +3319,7 @@ class IndexManagerV2Test
   test("sweep enqueues orphaned lock file with PendingState and committedOffset below master") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val oldTime = Instant.now().minusSeconds(7200)
@@ -3294,7 +3355,7 @@ class IndexManagerV2Test
   test("sweep writes per-TP markers to each partition's bucket") {
     val tp1 = Topic("topic1").withPartition(0)
     val tp2 = Topic("topic2").withPartition(0)
-    val si  = mock[StorageInterface[_]]
+    val si  = storageMockWithBump()
 
     when(bucketAndPrefixFn(ArgumentMatchers.eq(tp1)))
       .thenReturn(Right(CloudLocation("bucket-a", "prefix".some)))
@@ -3316,7 +3377,7 @@ class IndexManagerV2Test
     ).thenReturn(Left(FileNotFoundError(new Exception("Not found"), "sweep-marker")))
     when(
       si.writeBlobToFile[IndexManagerV2.SweepMarker](anyString(),
-                                                     anyString(),
+                                                     ArgumentMatchers.contains("sweep-marker"),
                                                      any[ObjectProtection[IndexManagerV2.SweepMarker]],
       )(any[Encoder[IndexManagerV2.SweepMarker]]),
     )
@@ -3329,33 +3390,25 @@ class IndexManagerV2Test
       im.open(Set(tp1, tp2))
       im.sweepOrphanedLocks()
 
+      // Scope to sweep-marker writes: the Cycle-6 ownership bump also writes each TP's `.lock`.
       val bucketCaptor = ArgumentCaptor.forClass(classOf[String])
       val pathCaptor   = ArgumentCaptor.forClass(classOf[String])
       verify(si, times(2)).writeBlobToFile[IndexManagerV2.SweepMarker](
         bucketCaptor.capture(),
-        pathCaptor.capture(),
+        ArgumentMatchers.contains("sweep-marker"),
         any[ObjectProtection[IndexManagerV2.SweepMarker]],
       )(any[Encoder[IndexManagerV2.SweepMarker]])
-      val buckets = bucketCaptor.getAllValues
-      val paths   = pathCaptor.getAllValues
-      val writes  = (0 until buckets.size()).map(i => (buckets.get(i), paths.get(i))).toSet
-      writes should contain(
-        ("bucket-a",
-         s"$indexesDirectoryName/${connectorTaskId.name}/.locks/${tp1.topic}/${tp1.partition}/sweep-marker.json",
-        ),
-      )
-      writes should contain(
-        ("bucket-b",
-         s"$indexesDirectoryName/${connectorTaskId.name}/.locks/${tp2.topic}/${tp2.partition}/sweep-marker.json",
-        ),
-      )
+      val _       = pathCaptor
+      val buckets = (0 until bucketCaptor.getAllValues.size()).map(bucketCaptor.getAllValues.get).toSet
+      buckets should contain("bucket-a")
+      buckets should contain("bucket-b")
     } finally im.close()
   }
 
   test("sweep is suppressed only for TP whose marker is non-expired") {
     val tp1 = Topic("topic1").withPartition(0)
     val tp2 = Topic("topic2").withPartition(0)
-    val si  = mock[StorageInterface[_]]
+    val si  = storageMockWithBump()
 
     when(bucketAndPrefixFn(ArgumentMatchers.eq(tp1)))
       .thenReturn(Right(CloudLocation("bucket-a", "prefix".some)))
@@ -3395,7 +3448,7 @@ class IndexManagerV2Test
 
     when(
       si.writeBlobToFile[IndexManagerV2.SweepMarker](anyString(),
-                                                     anyString(),
+                                                     ArgumentMatchers.contains("sweep-marker"),
                                                      any[ObjectProtection[IndexManagerV2.SweepMarker]],
       )(any[Encoder[IndexManagerV2.SweepMarker]]),
     )
@@ -3428,7 +3481,7 @@ class IndexManagerV2Test
   test("sweep does not enqueue master lock file even if listing returns it") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val oldTime = Instant.now().minusSeconds(7200)
@@ -3482,7 +3535,7 @@ class IndexManagerV2Test
   }
 
   test("close on a never-opened IndexManagerV2 should not start executors") {
-    val si  = mock[StorageInterface[_]]
+    val si  = storageMockWithBump()
     val cti = ConnectorTaskId("test-connector", 1, 0)
 
     val im = new IndexManagerV2(
@@ -3497,7 +3550,7 @@ class IndexManagerV2Test
   }
 
   test("executors are started after open() is called") {
-    val si  = mock[StorageInterface[_]]
+    val si  = storageMockWithBump()
     val cti = ConnectorTaskId("test-connector", 1, 0)
 
     val bucketFn: TopicPartition => Either[SinkError, CloudLocation] =
@@ -3529,7 +3582,7 @@ class IndexManagerV2Test
   }
 
   test("close() resets executor state so a subsequent open() recreates executors") {
-    val si  = mock[StorageInterface[_]]
+    val si  = storageMockWithBump()
     val cti = ConnectorTaskId("test-connector", 1, 0)
 
     val bucketFn: TopicPartition => Either[SinkError, CloudLocation] =
@@ -3578,7 +3631,7 @@ class IndexManagerV2Test
     val tp2             = Topic("topic1").withPartition(2)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
@@ -3621,7 +3674,7 @@ class IndexManagerV2Test
       ).thenReturn(Left(FileNotFoundError(new Exception("Not found"), "sweep-marker")))
       val _ = when(
         si.writeBlobToFile[IndexManagerV2.SweepMarker](anyString(),
-                                                       anyString(),
+                                                       ArgumentMatchers.contains("sweep-marker"),
                                                        any[ObjectProtection[IndexManagerV2.SweepMarker]],
         )(any[Encoder[IndexManagerV2.SweepMarker]]),
       )
@@ -3638,7 +3691,7 @@ class IndexManagerV2Test
     val tp0             = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
@@ -3663,7 +3716,7 @@ class IndexManagerV2Test
     val tp1             = Topic("topic1").withPartition(1)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
@@ -3703,7 +3756,7 @@ class IndexManagerV2Test
     val tp1             = Topic("topic1").withPartition(1)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
@@ -3737,7 +3790,7 @@ class IndexManagerV2Test
       ).thenReturn(Left(FileNotFoundError(new Exception("Not found"), "sweep-marker")))
       val _ = when(
         si.writeBlobToFile[IndexManagerV2.SweepMarker](anyString(),
-                                                       anyString(),
+                                                       ArgumentMatchers.contains("sweep-marker"),
                                                        any[ObjectProtection[IndexManagerV2.SweepMarker]],
         )(any[Encoder[IndexManagerV2.SweepMarker]]),
       )
@@ -3765,7 +3818,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -3820,7 +3873,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -3866,7 +3919,7 @@ class IndexManagerV2Test
     val tp1             = Topic("topic1").withPartition(1)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
 
     when(bucketAndPrefixFn(ArgumentMatchers.eq(tp0))).thenReturn(Right(bucketAndPrefix))
     when(bucketAndPrefixFn(ArgumentMatchers.eq(tp1)))
@@ -3899,7 +3952,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     val pp = mock[PendingOperationsProcessors]
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -3953,7 +4006,7 @@ class IndexManagerV2Test
     val tp1             = Topic("topic1").withPartition(1)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(ArgumentMatchers.eq(tp0))).thenReturn(Right(bucketAndPrefix))
     when(bucketAndPrefixFn(ArgumentMatchers.eq(tp1)))
       .thenReturn(Left(FatalCloudSinkError("simulated failure", tp1)))
@@ -3981,7 +4034,7 @@ class IndexManagerV2Test
   }
 
   test("close() shuts down gcExecutor even when executorsStarted is false (leak safety net)") {
-    val si  = mock[StorageInterface[_]]
+    val si  = storageMockWithBump()
     val cti = ConnectorTaskId("test-connector", 1, 0)
 
     val im = new IndexManagerV2(
@@ -4010,7 +4063,7 @@ class IndexManagerV2Test
     // A non-positive gc interval causes ScheduledThreadPoolExecutor.scheduleAtFixedRate
     // to throw IllegalArgumentException. The fix must tear down the already-created
     // pool so no daemon thread leaks.
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(CloudLocation("bucket", "prefix".some)))
 
     val im = new IndexManagerV2(
@@ -4032,7 +4085,7 @@ class IndexManagerV2Test
   test("startExecutors shuts down both gcExecutor and sweepExecutor when sweep scheduleAtFixedRate throws") {
     // gc scheduling succeeds; sweep scheduling fails. The fix must shut down the newly
     // created sweep pool AND the previously created gc pool, and reset both option fields.
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(CloudLocation("bucket", "prefix".some)))
 
     val im = new IndexManagerV2(
@@ -4055,7 +4108,7 @@ class IndexManagerV2Test
   test("sweep writes marker before scan; scan exception is swallowed by outer try") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     // Make listFileMetaRecursive throw to simulate a sweepPartition failure
@@ -4071,7 +4124,7 @@ class IndexManagerV2Test
       // Under the write-before-sweep fencing, the marker is persisted before the scan
       // is attempted, so a mid-scan failure does not prevent the marker write.
       verify(si, times(1)).writeBlobToFile[IndexManagerV2.SweepMarker](anyString(),
-                                                                       anyString(),
+                                                                       ArgumentMatchers.contains("sweep-marker"),
                                                                        any[ObjectProtection[IndexManagerV2.SweepMarker]],
       )(any[Encoder[IndexManagerV2.SweepMarker]])
       // The scan was attempted (and threw); the outer try/catch swallowed the error.
@@ -4089,7 +4142,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -4124,7 +4177,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -4163,7 +4216,7 @@ class IndexManagerV2Test
     val poisonETag      = "poison-etag"
     val postWriteETag   = "post-write-etag"
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     // Master lock read succeeds
@@ -4196,9 +4249,13 @@ class IndexManagerV2Test
       val result = im.ensureGranularLock(tp, "poison-key")
       result.isRight should be(true)
 
-      // Verify ObjectWithETag write was called (not NoOverwriteExistingObject)
+      // Verify ObjectWithETag write was called (not NoOverwriteExistingObject) for the granular
+      // lock path specifically — the master-lock ownership bump also writes during open().
       val captor = ArgumentCaptor.forClass(classOf[ObjectProtection[IndexFile]])
-      verify(si).writeBlobToFile[IndexFile](anyString(), anyString(), captor.capture())(
+      verify(si).writeBlobToFile[IndexFile](anyString(),
+                                            ArgumentMatchers.contains("/0/poison-key.lock"),
+                                            captor.capture(),
+      )(
         ArgumentMatchers.eq(indexFileEncoder),
       )
       captor.getValue should be(a[ObjectWithETag[_]])
@@ -4212,7 +4269,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -4320,7 +4377,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -4381,7 +4438,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
     when(si.getBlobAsObject[IndexFile](anyString(), ArgumentMatchers.endsWith("0.lock"))(
@@ -4442,7 +4499,7 @@ class IndexManagerV2Test
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     // First call to bucketAndPrefixFn (during open) must succeed
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
     when(si.pathExists(anyString(), anyString())).thenReturn(Right(false))
@@ -4489,7 +4546,7 @@ class IndexManagerV2Test
   test("sweepOrphanedLocks skips partition when bucketAndPrefixFn returns Left") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
 
     // Open must succeed
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
@@ -4524,7 +4581,7 @@ class IndexManagerV2Test
    * silently accepting the misconfiguration.
    */
   test("IndexManagerV2 rejects gcSweepMinAgeSeconds < gcSweepIntervalSeconds at construction") {
-    val si = mock[StorageInterface[_]]
+    val si = storageMockWithBump()
     val ex = the[IllegalArgumentException] thrownBy {
       val _ = new IndexManagerV2(
         bucketAndPrefixFn,
@@ -4602,7 +4659,7 @@ class IndexManagerV2Test
    */
   test("sweep shuffle fairness: all partitions are eventually swept with budget=1") {
     val tps             = (0 to 3).map(i => Topic("topic1").withPartition(i)).toSet
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
 
     when(bucketAndPrefixFn(any[TopicPartition])).thenReturn(Right(bucketAndPrefix))
@@ -4625,7 +4682,7 @@ class IndexManagerV2Test
     ).thenReturn(Left(FileNotFoundError(new Exception("not found"), "sweep-marker")))
     when(
       si.writeBlobToFile[IndexManagerV2.SweepMarker](anyString(),
-                                                     anyString(),
+                                                     ArgumentMatchers.contains("sweep-marker"),
                                                      any[ObjectProtection[IndexManagerV2.SweepMarker]],
       )(
         any[io.circe.Encoder[IndexManagerV2.SweepMarker]],
@@ -4662,7 +4719,7 @@ class IndexManagerV2Test
   ) {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val oldTime    = Instant.now().minusSeconds(7200)
@@ -4750,18 +4807,16 @@ class IndexManagerV2Test
 
     try {
       im1.open(Set(tp))
+      // From Cycle 6, im2.open() rewrites the master lock (ownership bump), which fences im1:
+      // im1's cached eTag is now stale. This is the collision made explicit at ownership change
+      // instead of at the first commit.
       im2.open(Set(tp))
 
-      // im1 writes master lock → succeeds
-      im1.updateMasterLock(tp, Offset(10)) shouldBe Right(())
+      // im1 is fenced: its cached eTag no longer matches storage, so its write is rejected.
+      im1.updateMasterLock(tp, Offset(10)).left.value shouldBe a[FatalCloudSinkError]
 
-      // im2 also writes to same path with its cached eTag (same value) →
-      // on InMemoryStorageInterface, the second CAS should fail because im1 advanced the eTag.
-      // Document this by asserting at least one eTag mismatch out of two calls.
-      val _ = im2.updateMasterLock(tp, Offset(10))
-      // Result may be Left (eTag mismatch) or Right (if im2's cache matches the latest eTag).
-      // Either way: assert no exception thrown (both paths are documented behavior).
-      succeed
+      // im2, the latest opener, holds the current eTag and writes successfully.
+      im2.updateMasterLock(tp, Offset(10)) shouldBe Right(())
     } finally {
       im1.close()
       im2.close()
@@ -4780,7 +4835,7 @@ class IndexManagerV2Test
   test("sweepOrphanedLocks ignores sweep-marker files and does not treat them as granular locks") {
     val tp              = Topic("topic1").withPartition(0)
     val bucketAndPrefix = CloudLocation("bucket", "prefix".some)
-    val si              = mock[StorageInterface[_]]
+    val si              = storageMockWithBump()
     setupSweepMocks(si, tp, bucketAndPrefix)
 
     val oldTime = Instant.now().minusSeconds(7200)
@@ -4830,4 +4885,136 @@ class IndexManagerV2Test
     } finally im.close()
   }
 
+  // ══ Master-lock bump at open() ══════════════════════════════════════════════════════
+  //
+  // Fencing used to start at the new owner's FIRST COMMIT: until then a zombie holding the
+  // pre-rebalance master eTag could still write the lock successfully. `open()` now rewrites the
+  // lock with a fresh eTag in both modes, moving the fence to ownership change. The content is
+  // unchanged, so the bump is invisible to every reader.
+
+  private val bumpTp       = Topic("bump-topic").withPartition(0)
+  private val bumpBucket   = "bump-bucket"
+  private val bumpIndexDir = ".indexes-bump"
+  private val bumpLockPath =
+    s"$bumpIndexDir/${bumpTaskId.name}/.locks/${bumpTp.topic}/${bumpTp.partition}.lock"
+
+  private lazy val bumpTaskId: ConnectorTaskId = ConnectorTaskId("bump-connector", 1, 0)
+
+  private def bumpManager(
+    store:      InMemoryStorageInterface,
+    commitMode: CommitMode = CommitMode.Granular,
+  ): IndexManagerV2 = {
+    implicit val si:  StorageInterface[_] = store
+    implicit val cid: ConnectorTaskId     = bumpTaskId
+    new IndexManagerV2(
+      _ => Right(CloudLocation(bumpBucket, Some("data/"))),
+      new PendingOperationsProcessors(store)(bumpTaskId),
+      bumpIndexDir,
+      gcIntervalSeconds      = Int.MaxValue,
+      gcSweepIntervalSeconds = Int.MaxValue,
+      gcSweepMinAgeSeconds   = Int.MaxValue,
+      gcSweepEnabled         = true,
+      commitMode             = commitMode,
+    )(si, cid)
+  }
+
+  /** Seeds an existing master lock with no pending state and returns its eTag. */
+  private def seedMasterLock(store: InMemoryStorageInterface, offset: Option[Offset]): String = {
+    val im = bumpManager(store)
+    try {
+      im.open(Set(bumpTp)).value
+      offset.foreach(o => im.updateMasterLock(bumpTp, Offset(o.value + 1)).value)
+      store.snapshot(bumpBucket)(bumpLockPath).eTag
+    } finally im.close()
+  }
+
+  test("[Z] T6.2 open() on an existing pending-free lock rewrites it, changing the eTag but not the content") {
+    val store       = new InMemoryStorageInterface()
+    val seededETag  = seedMasterLock(store, Some(Offset(99)))
+    val beforeBytes = new String(store.snapshot(bumpBucket)(bumpLockPath).bytes, "UTF-8")
+
+    val im = bumpManager(store)
+    try {
+      im.open(Set(bumpTp)).value shouldBe Map(bumpTp -> Some(Offset(99)))
+
+      val after = store.snapshot(bumpBucket)(bumpLockPath)
+      after.eTag should not be seededETag
+      val reread = store.getBlobAsObject[IndexFile](bumpBucket, bumpLockPath).value.wrappedObject
+      reread.committedOffset shouldBe Some(Offset(99))
+      reread.pendingState shouldBe None
+      reread.owner shouldBe bumpTaskId.lockUuid
+      im.getSeekedOffsetForTopicPartition(bumpTp) shouldBe Some(Offset(99))
+      // Only the eTag moved; the decoded content is identical modulo the owner field.
+      beforeBytes should include("99")
+    } finally im.close()
+  }
+
+  test("[Z] T6.2 the bump also happens in batch mode") {
+    val store      = new InMemoryStorageInterface()
+    val seededETag = seedMasterLock(store, Some(Offset(99)))
+
+    val im = bumpManager(store, CommitMode.Batch)
+    try {
+      im.open(Set(bumpTp)).value shouldBe Map(bumpTp -> Some(Offset(99)))
+      store.snapshot(bumpBucket)(bumpLockPath).eTag should not be seededETag
+    } finally im.close()
+  }
+
+  test("[Z] T6.3 a task that opened earlier is fenced at the new owner's open(), not at its first commit") {
+    val store = new InMemoryStorageInterface()
+    seedMasterLock(store, Some(Offset(99)))
+
+    val zombie = bumpManager(store)
+    val owner  = bumpManager(store)
+    try {
+      zombie.open(Set(bumpTp)).value
+      // Ownership changes: the new owner's open() bumps the lock and invalidates the zombie's eTag.
+      owner.open(Set(bumpTp)).value
+
+      zombie.update(bumpTp, Some(Offset(150)), None).left.value shouldBe a[FatalCloudSinkError]
+      zombie.updateMasterLock(bumpTp, Offset(200)).left.value shouldBe a[FatalCloudSinkError]
+
+      // Storage still holds the owner's content, not the zombie's attempted writes.
+      val stored = store.getBlobAsObject[IndexFile](bumpBucket, bumpLockPath).value.wrappedObject
+      stored.committedOffset shouldBe Some(Offset(99))
+
+      // The live owner is unaffected.
+      owner.update(bumpTp, Some(Offset(150)), None).value shouldBe Some(Offset(150))
+    } finally {
+      zombie.close()
+      owner.close()
+    }
+  }
+
+  test("[Z] T6.4 a failed bump CAS fails open() and clears the partition's cached seek state") {
+    val store = new InMemoryStorageInterface()
+    seedMasterLock(store, Some(Offset(99)))
+    store.arm(InMemoryStorageInterface.FailWriteAt(bumpBucket, bumpLockPath))
+
+    val im = bumpManager(store)
+    try {
+      im.open(Set(bumpTp)).left.value shouldBe a[FatalCloudSinkError]
+      im.getSeekedOffsetForTopicPartition(bumpTp) shouldBe None
+      im.topicPartitionToETags.get(bumpTp) shouldBe None
+    } finally im.close()
+  }
+
+  test("[B] T6.5 batch mode starts no GC or sweep executors; granular mode starts both") {
+    val granularStore = new InMemoryStorageInterface()
+    val granular      = bumpManager(granularStore, CommitMode.Granular)
+    try {
+      granular.open(Set(bumpTp)).value
+      granular.gcExecutor should not be None
+      granular.sweepExecutorOpt should not be None
+    } finally granular.close()
+
+    val batchStore = new InMemoryStorageInterface()
+    val batch      = bumpManager(batchStore, CommitMode.Batch)
+    try {
+      batch.open(Set(bumpTp)).value
+      // Batch mode never creates granular locks, so there is nothing for either job to collect.
+      batch.gcExecutor shouldBe None
+      batch.sweepExecutorOpt shouldBe None
+    } finally batch.close()
+  }
 }

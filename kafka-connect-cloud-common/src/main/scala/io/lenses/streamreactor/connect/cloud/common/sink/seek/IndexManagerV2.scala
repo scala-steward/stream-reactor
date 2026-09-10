@@ -184,7 +184,10 @@ class IndexManagerV2(
   @volatile private[seek] var sweepExecutorOpt: Option[ScheduledExecutorService] = None
 
   private def startExecutors(): Unit =
-    if (!executorsStarted) {
+    // Batch mode never creates granular lock files, so neither the GC drain nor the orphan sweep
+    // has anything to collect; starting them would only burn threads and LIST calls. The batch
+    // `.temp-upload` sweep runs inline in `open()` instead.
+    if (!executorsStarted && commitMode == CommitMode.Granular) {
       // Allocate each executor in two phases: create the pool, then schedule.
       // If scheduleAtFixedRate throws (e.g. RejectedExecutionException, bad interval),
       // we must shut the just-created pool down before rethrowing -- otherwise the
@@ -412,6 +415,27 @@ class IndexManagerV2(
           val _ = topicPartitionToETags.remove(topicPartition)
           err
         }
+
+      case Right(ObjectWithETag(IndexFile(_, committedOffset, None), eTag)) =>
+        // Ownership bump. Adopting the eTag without rewriting would leave the previous owner's
+        // token valid until this task's first commit, so a zombie could still write the lock in
+        // between. Rewriting here moves the fence to ownership change. Content is unchanged apart
+        // from the owner field, so nothing a reader depends on moves.
+        // A Left means another task raced us and won: fail fatally so Connect restarts and
+        // re-opens rather than proceeding on a token we do not hold.
+        storageInterface.writeBlobToFile(
+          bucketAndPrefix.bucket,
+          path,
+          ObjectWithETag(IndexFile(lockOwner, committedOffset, None), eTag),
+        )
+          .leftMap { err: UploadError =>
+            logger.warn(
+              s"[${connectorTaskId.show}] Master-lock ownership bump failed for $topicPartition at $path " +
+                s"(another task may have taken ownership): ${err.message()}",
+            )
+            new FatalCloudSinkError(err.message(), err.toExceptionOption, topicPartition): SinkError
+          }
+          .map(updateDataReturnOffset(topicPartition, _))
 
       case Right(objectWithetag @ ObjectWithETag(IndexFile(_, _, _), _)) =>
         updateDataReturnOffset(topicPartition, objectWithetag).asRight[SinkError]
