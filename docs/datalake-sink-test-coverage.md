@@ -19,6 +19,12 @@ For the two-tier lock and exactly-once design see [datalake-exactly-once-partiti
    never appears twice at the final path — even across task crashes, restarts, rebalances, or mid-commit
    failures. The two-tier lock (master lock + per-partition-key granular lock) plus the `shouldSkip`
    filter on replay together guarantee idempotence.
+3. **Routing-independence under `commit.mode=batch`.** In the opt-in batch commit mode, guarantees 1
+   and 2 hold **without** requiring the PARTITIONBY key to be a deterministic function of the record:
+   all writers on a Kafka partition commit together through one master-lock CAS and deduplicate against
+   a topic-partition-level floor. This closes the granular-mode silent-loss window under wall-clock
+   SMTs. See the `commit.mode=batch` rows throughout this document and
+   [`BatchCommitScenarioTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/BatchCommitScenarioTest.scala).
 
 These guarantees hold for all three supported providers — AWS S3, Google Cloud Storage, and Azure ADLS
 Gen2 — and the same scenarios are exercised against each provider's emulator (see
@@ -134,6 +140,19 @@ of why each gap is acceptable for the data-loss / no-duplicate guarantees.
 | **Kafka broker offset commit failures.** The framework-side step that runs after `SinkTask.preCommit` returns. | This commit is owned by the Kafka Connect framework, not the connector. The boundary is outside what the connector code can intercept. | The connector enforces two invariants that together convert any framework-side failure into safe at-least-once redelivery: (1) `globalSafeOffset` HWM monotonicity (9 tests in [`WriterManagerOffsetInvariantsScenarioTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/WriterManagerOffsetInvariantsScenarioTest.scala) lines 436–576), so the next `preCommit` returns an offset ≥ the failed one; (2) the master lock acts as a durable seek floor on restart ([`GranularLockScenarioTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/GranularLockScenarioTest.scala) "HWM initialization from master lock prevents master lock regression across restarts" line 1232). No record is permanently lost or silently duplicated. |
 | **PARTITIONBY paths longer than the provider's key-length limit.** | The byte/character rule differs by provider (S3/GCS-flat: 1024 bytes UTF-8; ADLS Gen2: 1024 characters; GCS-HNS: 512+512 split), so a single connector-side check would either over-reject or under-reject. | The cloud SDK rejects the request with a 4xx, the connector maps the resulting `UploadError` to `FatalCloudSinkError` via `ensureGranularLock` / `updateForPartitionKey`, and **no data is written**. The operator sees the SDK error message instead of a connector-authored "PARTITIONBY too long" error — the safety property (no silent loss, no partial write) is unchanged. Documented as an operator contract. |
 | **Key-length enforcement in `InMemoryStorageInterface`.** | The unit-test double is intentionally lenient because each real provider has a different limit (byte vs character). Enforcing one rule in the double would diverge from at least one provider. | Production-side fatal mapping for over-long keys is covered indirectly by the integration tests against the real emulators, which use the actual SDK rules. |
+
+### `commit.mode=batch` residuals (documented, not fixed)
+
+Batch mode removes granular-mode silent loss under non-deterministic keys but explicitly does **not** address the following (see [`datalake-exactly-once-partitionby.md`](./datalake-exactly-once-partitionby.md#known-residuals)):
+
+| Residual | Why it is acceptable |
+|---|---|
+| **Misplacement** under wall-clock keys for batches that never reached the CAS. | Records buffered under one wall-clock key and replayed under another still land in the later bucket. Batch mode removes *loss*, not *misplacement*; the operator contract for temporal correctness is unchanged. |
+| **Non-atomic visibility** of a batch's N files. | The N copies are applied sequentially, so a reader can observe a partially-visible batch between the first and last copy. Each file is individually complete; no partial file is ever visible. |
+| **Up to N orphan temps** per fenced or rebalanced batch. | Bounded by the `.temp-upload` orphan sweep (`gc.sweep.min.age.seconds`); temps are never read and never at a final path. |
+| **Granular-mode zombie creating a brand-new key** after the new owner's snapshot. | Mitigated by the stop-first switch procedure; same residual class the current design already carries. |
+| **S3 unconditional purge delete.** | `deleteFile` ignores the eTag on S3, so the legacy-lock purge is unconditional there; bounded by the stop-first procedure. |
+| **GCS `mvFile` ignores the source eTag.** | Temp-path uniqueness (the `batchUuid` segment) is load-bearing for correctness on GCS; guaranteed by construction in `Writer.stage`. |
 
 ---
 
@@ -351,6 +370,15 @@ collisions, and storage-layer determinism hazards.
 | Sweep does NOT enqueue locks with no `committedOffset` but active `PendingState=[Copy,Delete]` | [`IndexManagerV2Test`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2Test.scala) |
 | `sweepOrphanedLocks` ignores sweep-marker files; does not treat them as granular locks | [`IndexManagerV2Test`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2Test.scala) |
 | Construction rejects `gcSweepMinAgeSeconds < gcSweepIntervalSeconds` with `IllegalArgumentException` | [`IndexManagerV2Test`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2Test.scala) |
+| Batch `.temp-upload` sweep at `open()`: aged unreferenced temp deleted, fresh one kept (T9.4); other-connector/granular-layout temps untouched (T9.5); a resolvable pending Copy is completed not swept (T9.2); an unresolvable one is not deleted (T9.3); a LIST failure leaves `open()` `Right` (T9.6) | [`BatchTempSweepTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/BatchTempSweepTest.scala) |
+| Batch mode starts neither the GC drain nor the granular-lock sweep executor; granular starts both (T6.5) | [`IndexManagerV2Test`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2Test.scala) |
+
+### Mode switching (`commit.mode`)
+
+| Scenario | Test file |
+|---|---|
+| granular → batch: `open()` snapshots and eTag-bumps every legacy lock (T7.1), resolves pending chains (T7.3/T7.4), raises the per-key floor (T7.2), lazily loads late keys (T7.10), fences granular zombies (T7.11/T7.12), and purges only once `P >= maxLegacy` (T7.7/T7.8/T7.9) | [`CommitModeSwitchTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/CommitModeSwitchTest.scala) |
+| batch → granular (rollback): a stale legacy lock cannot re-write a committed record (T8.3), a pending `[Copy,Copy]` chain is completed by granular `open` (T8.4), and pre-commit rollback matches pre-switch granular floors (T8.5); the `createWriter` `max` hardening (T8.1/T8.2) | [`CommitModeSwitchTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/CommitModeSwitchTest.scala), [`GranularLockScenarioTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/GranularLockScenarioTest.scala) |
 
 ### Provider semantics — non-masking and idempotence
 
@@ -378,7 +406,7 @@ collisions, and storage-layer determinism hazards.
 |---|---|
 | Over-long PARTITIONBY paths: the connector does not pre-validate; the SDK rejects (S3/GCS-flat: 1024-byte UTF-8; ADLS Gen2: 1024-character; GCS-HNS: 512+512 split) and the resulting `UploadError` is mapped to `FatalCloudSinkError` by `ensureGranularLock` / `updateForPartitionKey`. No data is written. | n/a — provider-side rejection |
 | `InMemoryStorageInterface` does not enforce a key-length limit; tests using the in-memory double can pass keys longer than real providers would accept | n/a — operator contract |
-| SMT non-determinism: contract requires a deterministic `PARTITIONBY` derived from record value/key fields. The connector does **not** detect a wall-clock or random SMT producing different keys for the same offset on replay — see [`docs/datalake-exactly-once-partitionby.md`](./datalake-exactly-once-partitionby.md) §"SMT non-determinism" | n/a — operator contract |
+| SMT non-determinism: in the default granular mode the contract requires a deterministic `PARTITIONBY` derived from record value/key fields; a wall-clock/random SMT can cause silent data loss on replay. The supported fix is `commit.mode=batch`, which deduplicates against a topic-partition floor. Pinned by [`BatchCommitScenarioTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/BatchCommitScenarioTest.scala) T0.1 (granular loss) vs T0.4 (batch writes once) — see [`docs/datalake-exactly-once-partitionby.md`](./datalake-exactly-once-partitionby.md) §"Failure mode: silent data loss" | granular: operator contract; batch: covered |
 | Each `Writer.commit` attempt produces a distinct `tempFileUuid` (regression guard) | [`CloudSinkTaskTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/CloudSinkTaskTest.scala) |
 
 ### Error-policy classification matrix
@@ -394,6 +422,8 @@ each error class into a thrown exception. The corresponding tests live in
 | `BatchCloudSinkError` with `fatal.nonEmpty` (mixed batch with at least one fatal) | `FatalConnectException` (fatal precedence; no `RetriableIntegrityException` leaked) | `FatalConnectException` | `FatalConnectException` | yes — only for fatal TPs; non-fatal sibling TPs survive |
 | `NonFatalCloudSinkError(swallowable=false)` / `BatchCloudSinkError` with only unswallowable non-fatals (e.g. transient granular-lock read timeout) | wraps in `RetriableException(cause=RetriableIntegrityException)` — Connect re-delivers the same batch | `RetriableIntegrityException` rethrown as-is — fail-fast, no silent skip | `RetriableIntegrityException` rethrown as-is — fail-fast | no |
 | `NonFatalCloudSinkError(swallowable=true)` / `BatchCloudSinkError` with only swallowable non-fatals (e.g. transient `UploadFailedError`) | wraps in `RetriableException(cause=ConnectException)` (NOT `Fatal`) | logged at WARN and swallowed; `put` returns normally | `ConnectException` rethrown as-is — task fails | no |
+
+**`commit.mode=batch` rows.** `commitBatch` produces the same error classes, aggregated per topic-partition into a `BatchCloudSinkError` (flattened, never nested): a `stage()` transient upload or a last-`Copy` failure is a swallowable/unswallowable `NonFatal` (`rollBack=false`; retried by `recommitPending`), while a `stage()` missing-file, a CAS failure and a mid-chain `Copy` failure are `Fatal` (`rollBack=true`; restart replays from the master floor). These follow the same RETRY/NOOP/THROW columns above. Pinned by [`WriterCommitManagerBatchTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/WriterCommitManagerBatchTest.scala) T4.4 (staging failure, non-rollback), T4.6 (CAS Fatal), T4.7 (mid-chain Fatal), T4.8 (last-copy NonFatal).
 
 ---
 
