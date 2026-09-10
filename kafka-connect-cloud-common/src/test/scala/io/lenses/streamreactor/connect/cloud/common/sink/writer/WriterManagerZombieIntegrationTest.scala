@@ -460,4 +460,267 @@ class WriterManagerZombieIntegrationTest
     im2.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(100))
     im2.close()
   }
+
+  // ════════════════════════════════════════════════════════════════════════════════════
+  // Cycle 10: end-to-end zombie scenarios in commit.mode=batch
+  // ════════════════════════════════════════════════════════════════════════════════════
+
+  private val batchKey: immutable.Map[PartitionField, String] = Map(dateField -> "2024-02-02")
+
+  private def buildBatchIndexManager(storage: StorageInterface[FakeFileMetadata]): IndexManagerV2 = {
+    implicit val si: StorageInterface[FakeFileMetadata] = storage
+    new IndexManagerV2(
+      bucketAndPrefixFn           = bucketAndPrefix,
+      pendingOperationsProcessors = new PendingOperationsProcessors(storage),
+      directoryFileName           = directoryName,
+      gcIntervalSeconds           = Int.MaxValue,
+      gcSweepIntervalSeconds      = Int.MaxValue,
+      gcSweepMinAgeSeconds        = Int.MaxValue,
+      gcSweepEnabled              = false,
+      commitMode                  = io.lenses.streamreactor.connect.cloud.common.sink.seek.CommitMode.Batch,
+    )(si, connectorTaskId)
+  }
+
+  private def batchStagingFile(): File = {
+    val f = File.createTempFile("wm-zombie-batch-", ".tmp")
+    java.nio.file.Files.write(f.toPath, "payload".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+    f.deleteOnExit()
+    f
+  }
+
+  /** A batch WriterManager plus a mutable flush toggle: buffer with flush=false, then flip + commit. */
+  private final class BatchPair(
+    val im:    IndexManagerV2,
+    val wm:    WriterManager[FakeFileMetadata],
+    val flush: java.util.concurrent.atomic.AtomicBoolean,
+  ) {
+    def deliver(offsets: Range): Unit =
+      offsets.foreach(o => wm.write(tp0.withOffset(Offset(o.toLong)), batchMessage(o.toLong)).value)
+    def commit(): Either[io.lenses.streamreactor.connect.cloud.common.sink.BatchCloudSinkError, Unit] = {
+      flush.set(true)
+      val r = wm.commitFlushableWriters()
+      flush.set(false)
+      r
+    }
+  }
+
+  private def buildBatchWriterManager(
+    im:      IndexManagerV2,
+    storage: StorageInterface[FakeFileMetadata],
+    metrics: CloudSinkMetrics,
+    values:  immutable.Map[PartitionField, String],
+    flush:   java.util.concurrent.atomic.AtomicBoolean,
+  ): WriterManager[FakeFileMetadata] = {
+    val keyNamer = mock[KeyNamer]
+    when(
+      keyNamer.processPartitionValues(
+        any[io.lenses.streamreactor.connect.cloud.common.formats.writer.MessageDetail],
+        any[TopicPartition],
+      ),
+    ).thenReturn(values.asRight[SinkError])
+    val fw = mock[FormatWriter]
+    when(fw.write(any[io.lenses.streamreactor.connect.cloud.common.formats.writer.MessageDetail])).thenReturn(
+      ().asRight,
+    )
+    when(fw.complete()).thenReturn(().asRight)
+    when(fw.rolloverFileOnSchemaChange()).thenReturn(false)
+    val policy = mock[io.lenses.streamreactor.connect.cloud.common.sink.commit.CommitPolicy]
+    when(policy.shouldFlush(any[io.lenses.streamreactor.connect.cloud.common.sink.commit.CommitContext]))
+      .thenAnswer((_: io.lenses.streamreactor.connect.cloud.common.sink.commit.CommitContext) => flush.get())
+    new WriterManager[FakeFileMetadata](
+      commitPolicyFn    = _ => policy.asRight,
+      bucketAndPrefixFn = bucketAndPrefix,
+      keyNamerFn        = _ => keyNamer.asRight,
+      stagingFilenameFn = (_, _) => batchStagingFile().asRight,
+      objKeyBuilderFn = (_, vs) => {
+        val okb = mock[ObjectKeyBuilder]
+        when(okb.build(any[Offset], any[Offset], any[Long], any[Long], any[Long])).thenAnswer {
+          (first: Offset, _: Offset, _: Long, _: Long, _: Long) =>
+            val seg = WriterManager.derivePartitionKey(vs).getOrElse("nokey")
+            CloudLocation(bucket,
+                          path = Some(s"data/${tp0.topic.value}/${tp0.partition}/$seg-${first.value}.json"),
+            ).asRight
+        }
+        okb
+      },
+      formatWriterFn              = (_, _) => fw.asRight,
+      indexManager                = im,
+      transformerF                = Right(_),
+      schemaChangeDetector        = mock[SchemaChangeDetector],
+      skipNullValues              = false,
+      pendingOperationsProcessors = new PendingOperationsProcessors(storage),
+      commitMode                  = io.lenses.streamreactor.connect.cloud.common.sink.seek.CommitMode.Batch,
+      metrics                     = metrics,
+    )
+  }
+
+  private def batchPair(
+    storage: InMemoryStorageInterface,
+    metrics: CloudSinkMetrics                      = new CloudSinkMetrics(),
+    values:  immutable.Map[PartitionField, String] = batchKey,
+  ): BatchPair = {
+    val im = buildBatchIndexManager(storage)
+    im.open(Set(tp0)).value
+    val flush = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val wm    = buildBatchWriterManager(im, storage, metrics, values, flush)
+    new BatchPair(im, wm, flush)
+  }
+
+  private def batchMessage(offset: Long): io.lenses.streamreactor.connect.cloud.common.formats.writer.MessageDetail =
+    io.lenses.streamreactor.connect.cloud.common.formats.writer.MessageDetail(
+      key       = io.lenses.streamreactor.connect.cloud.common.sink.conversion.StringSinkData("k", None),
+      value     = io.lenses.streamreactor.connect.cloud.common.sink.conversion.StringSinkData("v", None),
+      headers   = Map.empty,
+      timestamp = None,
+      topic     = tp0.topic,
+      partition = tp0.partition,
+      offset    = Offset(offset),
+    )
+
+  private def seedBatchMaster(storage: InMemoryStorageInterface, committed: Long): Unit = {
+    val seed = buildBatchIndexManager(storage)
+    seed.open(Set(tp0)).value
+    seed.updateMasterLock(tp0, Offset(committed + 1)).value
+    seed.close()
+  }
+
+  private def dataKeys(storage: InMemoryStorageInterface): Seq[String] = storage.keysUnder(bucket, "data/")
+
+  test("[Z] T10.1 pre-CAS batch zombie: O's open fences Z; Z's commitBatch fails and O replays each offset once") {
+    val storage = new InMemoryStorageInterface()
+    seedBatchMaster(storage, 99)
+
+    // Zombie Z opens and buffers records.
+    val z = batchPair(storage)
+    z.deliver(100 to 104)
+
+    // New owner O opens (ownership bump fences Z's master eTag).
+    val o = batchPair(storage)
+
+    // Z flushes: staging succeeds (pre-CAS), the CAS is fenced -> Fatal, nothing under data/.
+    z.commit().isLeft shouldBe true
+    dataKeys(storage) shouldBe empty
+    storage.keysUnder(bucket, s".temp-upload/${connectorTaskId.name}/") should not be empty
+
+    // O replays and commits each offset once: a single batch object, master advanced to 104.
+    o.deliver(100 to 104)
+    o.commit()
+    dataKeys(storage) should have size 1
+    o.im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(104))
+
+    z.wm.close(); z.im.close(); o.wm.close(); o.im.close()
+  }
+
+  test("[Z] T10.2 a zombie that completed its batch: the new owner re-delivers and does not duplicate") {
+    val storage = new InMemoryStorageInterface()
+    seedBatchMaster(storage, 99)
+
+    // Z commits a full batch (CAS + copies done, master advanced to 102).
+    val z = batchPair(storage, values = Map(dateField -> "keyA"))
+    z.deliver(100 to 102)
+    z.commit().isRight shouldBe true
+    val objectsAfterZ = dataKeys(storage)
+    objectsAfterZ should have size 1
+    z.im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(102))
+
+    // New owner O opens (no pending state, master at 102) and Kafka re-delivers 100..102.
+    val ometrics = new CloudSinkMetrics()
+    val o        = batchPair(storage, ometrics, values = Map(dateField -> "keyA"))
+    o.deliver(100 to 102)
+    // Every re-delivered offset is at or below the master floor: all skipped, no new object.
+    ometrics.getDuplicateRecordsSkippedTotal shouldBe 3L
+    ometrics.getRecordsWrittenTotal shouldBe 0L
+    dataKeys(storage) shouldBe objectsAfterZ
+
+    z.wm.close(); z.im.close(); o.wm.close(); o.im.close()
+  }
+
+  test("[Z] T10.3 ping-pong: after a completed batch commit, the fenced side surfaces Fatal and there is one object") {
+    val storage = new InMemoryStorageInterface()
+    seedBatchMaster(storage, 99)
+
+    val z = batchPair(storage)
+    z.deliver(100 to 103)
+    // Z completes a full batch commit, reaching committedOffset = 103.
+    z.commit().isRight shouldBe true
+    val objectsAfterZ = dataKeys(storage)
+    objectsAfterZ should have size 1
+    z.im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(103))
+
+    // O opens afterwards (bump). Z, now the loser, tries to commit again and is fenced; O owns P.
+    val o = batchPair(storage)
+    o.im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(103))
+    z.deliver(104 to 105)
+    z.commit().isLeft shouldBe true // fenced: availability, not safety
+    // Exactly one object per final path throughout, and the master offset is a single agreed P.
+    dataKeys(storage).toSet.size shouldBe dataKeys(storage).size
+
+    z.wm.close(); z.im.close(); o.wm.close(); o.im.close()
+  }
+
+  test("[Z] T10.4 rollback with a batch zombie: a granular owner opens, fences Z, and owns the master lock") {
+    val storage = new InMemoryStorageInterface()
+    seedBatchMaster(storage, 99)
+
+    val z = batchPair(storage)
+    z.deliver(100 to 103)
+
+    // Granular owner O opens (ownership bump) — the rollback direction.
+    val oim = buildIndexManager(storage)
+    oim.open(Set(tp0)).value
+
+    // Z's batch commit CAS is fenced; nothing reached a final path.
+    z.commit().isLeft shouldBe true
+    dataKeys(storage) shouldBe empty
+
+    // O (granular) owns the current master eTag and writes successfully.
+    oim.updateMasterLock(tp0, Offset(105)).value
+
+    z.wm.close(); z.im.close(); oim.close()
+  }
+
+  test("[Z] T10.5 granular zombie vs batch owner: the zombie's updateMasterLock after O.open is fenced") {
+    val storage = new InMemoryStorageInterface()
+    seedBatchMaster(storage, 99)
+
+    // Granular zombie opened first, holding the master eTag.
+    val zim = buildIndexManager(storage)
+    zim.open(Set(tp0)).value
+
+    // Batch owner O opens later and bumps the master lock.
+    val oim = buildBatchIndexManager(storage)
+    oim.open(Set(tp0)).value
+
+    // The granular zombie's master-lock write is now fenced (previously it would have succeeded
+    // until O's first commit).
+    zim.updateMasterLock(tp0, Offset(200)).isLeft shouldBe true
+    oim.updateMasterLock(tp0, Offset(150)).value
+
+    zim.close(); oim.close()
+  }
+
+  test("[NL] T10.6 rebalance mid-batch: a new owner seeks the master floor and writes 100..104 once") {
+    val storage = new InMemoryStorageInterface()
+    seedBatchMaster(storage, 99)
+
+    // Owner buffers records, then a rebalance closes it before any batch commit.
+    val first = batchPair(storage)
+    first.deliver(100 to 104)
+    first.wm.close() // rebalance: nothing was committed
+    first.im.close()
+    dataKeys(storage) shouldBe empty
+
+    // New owner opens, seeks the master floor (99), and re-delivers everything, writing once.
+    val metrics2 = new CloudSinkMetrics()
+    val second   = batchPair(storage, metrics2)
+    second.im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(99))
+    second.deliver(100 to 104)
+    second.commit()
+    metrics2.getRecordsWrittenTotal shouldBe 5L
+    metrics2.getDuplicateRecordsSkippedTotal shouldBe 0L
+    dataKeys(storage) should have size 1
+    second.im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(104))
+
+    second.wm.close(); second.im.close()
+  }
 }

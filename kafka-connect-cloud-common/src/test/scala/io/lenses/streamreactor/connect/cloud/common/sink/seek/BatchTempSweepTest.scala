@@ -44,11 +44,7 @@ import java.time.Instant
  * strictly after master resolution, the ownership bump and the legacy snapshot, and reaps aged
  * temp objects under the connector-scoped prefix without ever touching anything else.
  */
-class BatchTempSweepTest
-    extends AnyFunSuiteLike
-    with Matchers
-    with EitherValues
-    with BeforeAndAfterEach {
+class BatchTempSweepTest extends AnyFunSuiteLike with Matchers with EitherValues with BeforeAndAfterEach {
 
   private implicit val connectorTaskId: ConnectorTaskId = ConnectorTaskId("sweep-test", 1, 0)
   private implicit val cloudLocationValidator: CloudLocationValidator =
@@ -103,7 +99,7 @@ class BatchTempSweepTest
     seedMaster(99)
     val old   = scopedPrefix + "uuid-old/data/orders/0/old.json"
     val fresh = scopedPrefix + "uuid-fresh/data/orders/0/fresh.json"
-    writeTemp(old, ageSecondsAgo = ageSeconds + 60)
+    writeTemp(old, ageSecondsAgo   = ageSeconds + 60)
     writeTemp(fresh, ageSecondsAgo = 0)
 
     val im = buildIndexManager()
@@ -134,7 +130,7 @@ class BatchTempSweepTest
   // ── T9.2 ────────────────────────────────────────────────────────────────────────────
 
   test("[NL] T9.2 a temp referenced by a resolvable pending Copy is completed by open, not swept first") {
-    val temp  = scopedPrefix + "uuid/data/orders/0/pending.json"
+    val temp   = scopedPrefix + "uuid/data/orders/0/pending.json"
     val final_ = "data/orders/0/pending.json"
     storage.writeStringToFile(bucket, temp, UploadableString("pending payload")).value
     storage.setLastModified(bucket, temp, Instant.now().minusSeconds((ageSeconds + 600).toLong)) shouldBe true
@@ -156,7 +152,7 @@ class BatchTempSweepTest
   // ── T9.3 ────────────────────────────────────────────────────────────────────────────
 
   test("[NL] T9.3 a temp referenced by a pending state that open could not resolve is not deleted") {
-    val temp  = scopedPrefix + "uuid/data/orders/0/stuck.json"
+    val temp   = scopedPrefix + "uuid/data/orders/0/stuck.json"
     val final_ = "data/orders/0/stuck.json"
     storage.writeStringToFile(bucket, temp, UploadableString("stuck payload")).value
     storage.setLastModified(bucket, temp, Instant.now().minusSeconds((ageSeconds + 600).toLong)) shouldBe true
