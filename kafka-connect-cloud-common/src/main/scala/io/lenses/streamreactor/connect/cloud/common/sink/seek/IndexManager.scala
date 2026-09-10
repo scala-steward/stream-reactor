@@ -107,6 +107,25 @@ trait IndexManager {
   ): Either[SinkError, Option[Offset]]
 
   /**
+   * The deduplication floor for one topic-partition in `CommitMode.Batch`.
+   *
+   * Batch mode does not consult a per-writer granular lock, because a replayed offset is not
+   * guaranteed to route back to the key that originally handled it. Instead every writer on the
+   * topic-partition shares this floor: the master lock's committed offset, raised by any legacy
+   * granular lock still present from a granular-mode deployment (see the mode-switch section of
+   * `docs/datalake-exactly-once-partitionby.md`).
+   *
+   * @param topicPartition The `TopicPartition` being deduplicated.
+   * @param partitionKey   The sanitized partition key the record routed to, if PARTITIONBY is in use.
+   * @return `Right(Some(offset))` for the highest offset already accounted for, `Right(None)` when
+   *         nothing is, or `Left(SinkError)` when a legacy lock could not be read.
+   */
+  def batchDedupFloor(
+    topicPartition: TopicPartition,
+    partitionKey:   Option[String],
+  ): Either[SinkError, Option[Offset]]
+
+  /**
    * Updates the master lock with the global safe offset.
    * Writes `globalSafeOffset - 1` as the committedOffset to preserve existing semantics.
    *

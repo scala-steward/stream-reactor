@@ -146,6 +146,13 @@ class WriterManager[SM <: FileMetadata](
   // of the dirty flag. Cleared on the next write attempt (success or failure).
   private val forceWriteAfterCleanUp = mutable.Set.empty[TopicPartition]
 
+  // Batch mode only. Highest offset this task has successfully buffered for the TP in the current
+  // ownership episode, across every key. It is the in-memory half of the batch dedup floor: it
+  // covers records that are held but not yet durable, which the master lock cannot know about.
+  // Cleared wherever those buffers are discarded — `closePartition`, `close()` and `cleanUp(tp)` —
+  // because after a rollback the records really do have to be re-delivered.
+  private val maxBufferedOffset = mutable.Map.empty[TopicPartition, Long]
+
   def recommitPending(): Either[SinkError, Unit] = {
     logger.debug(s"[{}] Retry Pending", connectorTaskId.show)
     val result = writerCommitManager.commitPending()
@@ -194,6 +201,7 @@ class WriterManager[SM <: FileMetadata](
     lastWrittenMasterSafeOffset.remove(topicPartition)
     lastReturnedSafeOffset.remove(topicPartition)
     forceWriteAfterCleanUp.remove(topicPartition)
+    maxBufferedOffset.remove(topicPartition)
     // Materialise keys to a list so the map mutation does not invalidate the iterator.
     val keysToRemove = writers
       .view.filterKeys(_.topicPartition == topicPartition)
@@ -319,6 +327,7 @@ class WriterManager[SM <: FileMetadata](
     lastWrittenMasterSafeOffset.clear()
     lastReturnedSafeOffset.clear()
     forceWriteAfterCleanUp.clear()
+    maxBufferedOffset.clear()
     metrics.clearAllMasterLockDirty()
     // After every per-TP closePartition has run, refresh the writer-count and oldest-file
     // gauges for the final values (in the steady-state path writers are now empty).
@@ -334,8 +343,21 @@ class WriterManager[SM <: FileMetadata](
       s"[${connectorTaskId.show}] Received call to WriterManager.write for ${topicPartitionOffset.topic}-${topicPartitionOffset.partition}:${topicPartitionOffset.offset}",
     )
     for {
-      writer    <- writer(topicPartitionOffset.toTopicPartition, messageDetail)
-      shouldSkip = writer.shouldSkip(topicPartitionOffset.offset)
+      writer <- writer(topicPartitionOffset.toTopicPartition, messageDetail)
+      shouldSkip <- commitMode match {
+        case CommitMode.Granular => writer.shouldSkip(topicPartitionOffset.offset).asRight[SinkError]
+        case CommitMode.Batch    =>
+          // Routing-independent floor: max(masterW, maxBuffered). A Left here is the same
+          // unswallowable NonFatal that a granular-lock read failure produces today.
+          indexManager.batchDedupFloor(topicPartitionOffset.toTopicPartition, writer.partitionKeyOpt).map {
+            imFloor =>
+              val floor =
+                (imFloor.map(_.value).toList ++ maxBufferedOffset.get(
+                  topicPartitionOffset.toTopicPartition,
+                ).toList).maxOption
+              floor.exists(_ >= topicPartitionOffset.offset.value)
+          }
+      }
       resultIfNotSkipped <-
         if (!shouldSkip) {
           transformerF(messageDetail).leftMap(ex =>
@@ -359,7 +381,14 @@ class WriterManager[SM <: FileMetadata](
       // commitException can not be recovered from
       _ <- rollOverTopicPartitionWriters(writer, topicPartitionOffset.toTopicPartition, messageDetail)
       // a processErr can potentially be recovered from in the next iteration.  Can be due to network problems
-      _         <- writer.write(messageDetail)
+      _ <- writer.write(messageDetail)
+      _ = if (commitMode == CommitMode.Batch) {
+        val tp      = topicPartitionOffset.toTopicPartition
+        val current = maxBufferedOffset.getOrElse(tp, Long.MinValue)
+        if (topicPartitionOffset.offset.value > current) {
+          val _ = maxBufferedOffset.put(tp, topicPartitionOffset.offset.value)
+        }
+      }
       commitRes <- writerCommitManager.commitFlushableWritersForTopicPartition(topicPartitionOffset.toTopicPartition)
     } yield commitRes
 
@@ -419,20 +448,29 @@ class WriterManager[SM <: FileMetadata](
     val partitionKey = WriterManager.derivePartitionKey(partitionValues)
     for {
       commitPolicy <- commitPolicyFn(topicPartition)
-      _            <- partitionKey.fold(().asRight[SinkError])(pk => indexManager.ensureGranularLock(topicPartition, pk))
-      lastSeekedOffset <- partitionKey match {
-        case Some(pk) =>
-          // Granular-lock-first, master-lock-fallback: prevents duplication when a lock is GC'd
-          // and a new writer is later created for the same partition key.
-          // When globalSafeOffset == 0, `updateMasterLock` stores None, so the fallback
-          // produces None.orElse(None) = None — no false skip of offset 0.
-          indexManager.getSeekedOffsetForPartitionKey(topicPartition, pk).map {
-            granularOffset =>
-              granularOffset.orElse(indexManager.getSeekedOffsetForTopicPartition(topicPartition))
-          }
-        case None =>
+      // Batch mode never reads or writes a granular lock: dedup comes from the TP-level floor, so
+      // creating one per key would be pure API cost.
+      _ <-
+        if (commitMode == CommitMode.Batch) ().asRight[SinkError]
+        else partitionKey.fold(().asRight[SinkError])(pk => indexManager.ensureGranularLock(topicPartition, pk))
+      lastSeekedOffset <-
+        if (commitMode == CommitMode.Batch) {
+          // Populates `getCommittedOffset` so `preCommit`'s `committedOffsets.isEmpty` check behaves
+          // exactly as the granular master-lock fallback does.
           indexManager.getSeekedOffsetForTopicPartition(topicPartition).asRight[SinkError]
-      }
+        } else partitionKey match {
+          case Some(pk) =>
+            // Granular-lock-first, master-lock-fallback: prevents duplication when a lock is GC'd
+            // and a new writer is later created for the same partition key.
+            // When globalSafeOffset == 0, `updateMasterLock` stores None, so the fallback
+            // produces None.orElse(None) = None — no false skip of offset 0.
+            indexManager.getSeekedOffsetForPartitionKey(topicPartition, pk).map {
+              granularOffset =>
+                granularOffset.orElse(indexManager.getSeekedOffsetForTopicPartition(topicPartition))
+            }
+          case None =>
+            indexManager.getSeekedOffsetForTopicPartition(topicPartition).asRight[SinkError]
+        }
     } yield {
       new Writer(
         topicPartition,
@@ -661,6 +699,9 @@ class WriterManager[SM <: FileMetadata](
     // next `preCommit` stays monotonic. See docs/datalake-exactly-once-partitionby.md
     // ("`lastReturnedSafeOffset` Role by Mode").
     lastWrittenMasterSafeOffset.remove(topicPartition)
+    // The buffered records this floor covered have just been discarded, so they must be
+    // re-delivered rather than skipped.
+    maxBufferedOffset.remove(topicPartition)
     forceWriteAfterCleanUp.add(topicPartition)
     metrics.clearMasterLockDirty(topicPartition)
     // Evict cache so a fresh writer reloads its dedup floor from storage.
@@ -704,6 +745,8 @@ class WriterManager[SM <: FileMetadata](
     }
 
   private[writer] def writerCount: Int = writers.size
+
+  private[writer] def writerFor(key: MapKey): Option[Writer[SM]] = writers.get(key)
 
   private[writer] def putWriter(key: MapKey, writer: Writer[SM]): Unit = {
     val _ = writers.put(key, writer)

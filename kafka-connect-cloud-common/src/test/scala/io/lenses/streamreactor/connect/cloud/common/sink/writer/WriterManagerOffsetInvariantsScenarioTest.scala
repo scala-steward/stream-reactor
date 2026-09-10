@@ -168,6 +168,14 @@ class WriterManagerOffsetInvariantsScenarioTest
     override def getSeekedOffsetForTopicPartition(topicPartition: TopicPartition): Option[Offset] =
       master.get(topicPartition).map(Offset(_))
 
+    override def batchDedupFloor(
+      topicPartition: TopicPartition,
+      partitionKey:   Option[String],
+    ): Either[SinkError, Option[Offset]] = {
+      val _ = partitionKey
+      Right(master.get(topicPartition).map(Offset(_)))
+    }
+
     override def getSeekedOffsetForPartitionKey(
       topicPartition: TopicPartition,
       partitionKey:   String,

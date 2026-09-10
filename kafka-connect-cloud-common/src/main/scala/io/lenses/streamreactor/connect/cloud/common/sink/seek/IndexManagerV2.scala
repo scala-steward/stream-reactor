@@ -504,6 +504,19 @@ class IndexManagerV2(
   override def getSeekedOffsetForTopicPartition(topicPartition: TopicPartition): Option[Offset] =
     seekedOffsets.get(topicPartition)
 
+  /**
+   * Batch-mode dedup floor. For now this is just the master lock's committed offset; the legacy
+   * granular-lock component that a granular -> batch migration needs is added in the transition
+   * work (see `docs/datalake-exactly-once-partitionby.md`, "Switching modes").
+   */
+  override def batchDedupFloor(
+    topicPartition: TopicPartition,
+    partitionKey:   Option[String],
+  ): Either[SinkError, Option[Offset]] = {
+    val _ = partitionKey
+    seekedOffsets.get(topicPartition).asRight
+  }
+
   // Cache-first lookup: return the cached offset if present, otherwise fetch the granular lock
   // from cloud storage and populate the cache (lazy load). Returns Right(None) if the lock does
   // not exist in storage yet -- callers must fall back to the master lock offset (via

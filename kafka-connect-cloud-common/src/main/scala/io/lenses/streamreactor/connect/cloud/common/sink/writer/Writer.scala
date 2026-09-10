@@ -71,6 +71,9 @@ class Writer[SM <: FileMetadata](
   private[writer] def forceWriteState(state: WriteState): Unit = writeState = state
   private[writer] def currentWriteState: WriteState = writeState
 
+  /** The sanitized PARTITIONBY key this writer is keyed on, if any. */
+  private[writer] def partitionKeyOpt: Option[String] = partitionKey
+
   /**
    * Returns true if any cause in the throwable chain is an IOException.
    *
