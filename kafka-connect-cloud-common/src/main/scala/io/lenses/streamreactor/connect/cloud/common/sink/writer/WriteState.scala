@@ -19,7 +19,6 @@ import com.typesafe.scalalogging.LazyLogging
 import io.lenses.streamreactor.connect.cloud.common.formats.writer.FormatWriter
 import io.lenses.streamreactor.connect.cloud.common.model.Offset
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.CopyOperation
-import io.lenses.streamreactor.connect.cloud.common.sink.seek.DeleteOperation
 import org.apache.kafka.connect.data.Schema
 
 import java.io.File
@@ -155,7 +154,10 @@ case class Staged(
 
   def copyOp: CopyOperation = CopyOperation(bucket, tempPath, finalPath, tempETag)
 
-  def deleteOp: DeleteOperation = DeleteOperation(bucket, tempPath, tempETag)
+  // No deleteOp: every CopyOperation runs via `storageInterface.mvFile`, which MOVES the object
+  // on all three backends (copy + delete source). By the time the commit chain returns `Right`,
+  // every temp this writer staged is already gone -- a separate post-commit delete would be
+  // dead code (see WriterCommitManager.commitBatch's doc).
 
   /**
    * The batch offset `newOffset` is the max `uncommittedOffset` across the batch, so it is normally

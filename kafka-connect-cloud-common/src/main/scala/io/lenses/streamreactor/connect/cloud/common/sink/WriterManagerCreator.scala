@@ -153,7 +153,10 @@ class WriterManagerCreator[MD <: FileMetadata, SC <: CloudSinkConfig[_]] extends
     ).getOrElse(new NoIndexManager())
 
     // With indexing disabled there is no lock to CAS, so the mode is irrelevant; Granular keeps
-    // the pre-existing code path.
+    // the pre-existing code path. (The case where an operator sets commit.mode=batch while
+    // exactly-once is disabled is warned about at config-parse time -- see
+    // `IndexSettings.getIndexSettings` -- since `indexOptions` is `None` here and carries no
+    // trace of what commit.mode was configured.)
     val commitMode: CommitMode = config.indexOptions.map(_.commitMode).getOrElse(CommitMode.Granular)
 
     try {

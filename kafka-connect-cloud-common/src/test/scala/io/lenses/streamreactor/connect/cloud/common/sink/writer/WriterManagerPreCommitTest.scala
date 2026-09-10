@@ -1035,7 +1035,7 @@ class WriterManagerPreCommitTest
   // granular mode but never writes the master lock, because the only thing allowed to advance
   // the durable floor is a completed batch CAS.
 
-  test("[NL] T5.1 batch: preCommit returns the Staged writer's firstBufferedOffset, not the idle sibling's") {
+  test("[NL] batch: preCommit returns the Staged writer's firstBufferedOffset, not the idle sibling's") {
     val indexManager = mock[IndexManager]
     when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(Some(Offset(99)))
 
@@ -1050,7 +1050,7 @@ class WriterManagerPreCommitTest
     verify(indexManager, never).updateMasterLock(any[TopicPartition], any[Offset])
   }
 
-  test("[NL] T5.4 batch: preCommit tracks the buffered floor across null-skipped records and then advances") {
+  test("[NL] batch: preCommit tracks the buffered floor across null-skipped records and then advances") {
     val indexManager = mock[IndexManager]
     when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(Some(Offset(250)))
 
@@ -1069,7 +1069,7 @@ class WriterManagerPreCommitTest
     verify(indexManager, never).updateMasterLock(any[TopicPartition], any[Offset])
   }
 
-  test("[B] T5.5 batch: the high-watermark invariant still holds across cleanUp and re-seed") {
+  test("[B] batch: the high-watermark invariant still holds across cleanUp and re-seed") {
     val indexManager = mock[IndexManager]
     when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(Some(Offset(199)))
 

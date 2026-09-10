@@ -40,7 +40,7 @@ import org.scalatest.matchers.should.Matchers
 import java.time.Instant
 
 /**
- * The batch-mode `.temp-upload` orphan sweep (§2.7). It runs at the end of batch-mode `open()`,
+ * The batch-mode `.temp-upload` orphan sweep. It runs at the end of batch-mode `open()`,
  * strictly after master resolution, the ownership bump and the legacy snapshot, and reaps aged
  * temp objects under the connector-scoped prefix without ever touching anything else.
  */
@@ -93,9 +93,7 @@ class BatchTempSweepTest extends AnyFunSuiteLike with Matchers with EitherValues
     val _ = storage.setLastModified(bucket, path, Instant.now().minusSeconds(ageSecondsAgo.toLong))
   }
 
-  // ── T9.4 ────────────────────────────────────────────────────────────────────────────
-
-  test("[B] T9.4 an aged unreferenced temp under the scoped prefix is swept; a fresh one is kept") {
+  test("[B] an aged unreferenced temp under the scoped prefix is swept; a fresh one is kept") {
     seedMaster(99)
     val old   = scopedPrefix + "uuid-old/data/orders/0/old.json"
     val fresh = scopedPrefix + "uuid-fresh/data/orders/0/fresh.json"
@@ -110,9 +108,7 @@ class BatchTempSweepTest extends AnyFunSuiteLike with Matchers with EitherValues
     } finally im.close()
   }
 
-  // ── T9.5 ────────────────────────────────────────────────────────────────────────────
-
-  test("[B] T9.5 temps under another connector or the granular layout are never touched") {
+  test("[B] temps under another connector or the granular layout are never touched") {
     seedMaster(99)
     val otherConnector = s".temp-upload/other-connector/${tp.topic}/${tp.partition}/uuid/data/x.json"
     val granularLayout = s".temp-upload/${tp.topic}/${tp.partition}/uuid/data/y.json"
@@ -127,9 +123,7 @@ class BatchTempSweepTest extends AnyFunSuiteLike with Matchers with EitherValues
     } finally im.close()
   }
 
-  // ── T9.2 ────────────────────────────────────────────────────────────────────────────
-
-  test("[NL] T9.2 a temp referenced by a resolvable pending Copy is completed by open, not swept first") {
+  test("[NL] a temp referenced by a resolvable pending Copy is completed by open, not swept first") {
     val temp   = scopedPrefix + "uuid/data/orders/0/pending.json"
     val final_ = "data/orders/0/pending.json"
     storage.writeStringToFile(bucket, temp, UploadableString("pending payload")).value
@@ -149,9 +143,7 @@ class BatchTempSweepTest extends AnyFunSuiteLike with Matchers with EitherValues
     } finally im.close()
   }
 
-  // ── T9.3 ────────────────────────────────────────────────────────────────────────────
-
-  test("[NL] T9.3 a temp referenced by a pending state that open could not resolve is not deleted") {
+  test("[NL] a temp referenced by a pending state that open could not resolve is not deleted") {
     val temp   = scopedPrefix + "uuid/data/orders/0/stuck.json"
     val final_ = "data/orders/0/stuck.json"
     storage.writeStringToFile(bucket, temp, UploadableString("stuck payload")).value
@@ -173,9 +165,7 @@ class BatchTempSweepTest extends AnyFunSuiteLike with Matchers with EitherValues
     } finally im.close()
   }
 
-  // ── T9.6 ────────────────────────────────────────────────────────────────────────────
-
-  test("[B] T9.6 a sweep LIST failure leaves open() successful") {
+  test("[B] a sweep LIST failure leaves open() successful") {
     seedMaster(99)
     val listFailing = new InMemoryStorageInterface() {
       override def listFileMetaRecursive(

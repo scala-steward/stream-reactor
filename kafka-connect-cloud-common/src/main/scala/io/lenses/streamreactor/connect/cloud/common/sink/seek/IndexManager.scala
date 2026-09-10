@@ -107,32 +107,32 @@ trait IndexManager {
   ): Either[SinkError, Option[Offset]]
 
   /**
-   * The deduplication floor for one topic-partition in `CommitMode.Batch`.
+   * The deduplication floor for one topic-partition in `CommitMode.Batch`: the master lock's
+   * committed offset alone.
    *
-   * Batch mode does not consult a per-writer granular lock, because a replayed offset is not
-   * guaranteed to route back to the key that originally handled it. Instead every writer on the
-   * topic-partition shares this floor: the master lock's committed offset, raised by any legacy
-   * granular lock still present from a granular-mode deployment (see the mode-switch section of
-   * `docs/datalake-exactly-once-partitionby.md`).
+   * Batch mode does not consult a per-writer (or per-key) granular lock, because a replayed
+   * offset is not guaranteed to route back to the key that originally handled it -- not even
+   * during a granular -> batch migration, while a previous deployment's granular locks are still
+   * being fenced/purged. Consulting them for dedup would silently drop a record whose key
+   * changed between the original attempt and the replay, reintroducing the exact bug batch mode
+   * exists to fix. See the "Switching modes" section of `docs/datalake-exactly-once-partitionby.md`
+   * for the resulting (accepted) duplicate window during migration.
    *
    * @param topicPartition The `TopicPartition` being deduplicated.
-   * @param partitionKey   The sanitized partition key the record routed to, if PARTITIONBY is in use.
-   * @return `Right(Some(offset))` for the highest offset already accounted for, `Right(None)` when
-   *         nothing is, or `Left(SinkError)` when a legacy lock could not be read.
+   * @return `Right(Some(offset))` for the highest offset already durably committed, or
+   *         `Right(None)` when nothing has been committed yet. Never `Left` in practice (kept as
+   *         an `Either` for interface consistency with the rest of `IndexManager`).
    */
-  def batchDedupFloor(
-    topicPartition: TopicPartition,
-    partitionKey:   Option[String],
-  ): Either[SinkError, Option[Offset]]
+  def batchDedupFloor(topicPartition: TopicPartition): Either[SinkError, Option[Offset]]
 
   /**
    * Hook called after a successful `CommitMode.Batch` commit at offset `committed`.
    *
-   * Used by the granular -> batch transition to purge the legacy granular locks once the batch
-   * watermark has caught up to every one of them (`committed >= maxLegacy`); until then a legacy
-   * lock could be ahead of everything the new owner has delivered, and purging early would let
-   * those records be re-written. A no-op once the locks are purged or when there were none. Best
-   * effort: failures are retried on the next commit, never surfaced.
+   * No-op on `IndexManagerV2`: legacy-lock purging during a granular -> batch migration now
+   * happens synchronously inside batch-mode `open()`, as soon as every legacy lock on the TP has
+   * been fenced (it no longer waits for a batch watermark, because `batchDedupFloor` never
+   * consults these locks). Kept on the trait so `WriterCommitManager.commitBatch` does not need
+   * a mode-specific branch to call it.
    */
   def afterBatchCommit(topicPartition: TopicPartition, committed: Offset): Unit
 

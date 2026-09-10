@@ -83,7 +83,7 @@ class WriterManagerCreatorTest extends AnyFunSuite with Matchers with MockitoSug
     indexManager shouldBe an[IndexManagerV2]
   }
 
-  test("[B] T1.3 commit.mode=batch is threaded into both the WriterManager and the IndexManagerV2") {
+  test("[B] commit.mode=batch is threaded into both the WriterManager and the IndexManagerV2") {
     val config = FakeCloudSinkConfig(
       connectionConfig = FakeConnectionConfig(),
       bucketOptions    = Seq.empty,
@@ -103,7 +103,7 @@ class WriterManagerCreatorTest extends AnyFunSuite with Matchers with MockitoSug
     indexManager.asInstanceOf[IndexManagerV2].commitMode shouldBe CommitMode.Batch
   }
 
-  test("[B] T1.3 the default commit mode is granular in both the WriterManager and the IndexManagerV2") {
+  test("[B] the default commit mode is granular in both the WriterManager and the IndexManagerV2") {
     val config = FakeCloudSinkConfig(
       connectionConfig            = FakeConnectionConfig(),
       bucketOptions               = Seq.empty,

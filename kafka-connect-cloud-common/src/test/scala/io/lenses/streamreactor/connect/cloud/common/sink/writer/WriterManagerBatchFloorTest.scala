@@ -184,9 +184,7 @@ class WriterManagerBatchFloorTest
   private def deliver(wm: WriterManager[FakeFileMetadata], offset: Long): Either[SinkError, Unit] =
     wm.write(tp.withOffset(Offset(offset)), message(offset))
 
-  // ── T3.1 ────────────────────────────────────────────────────────────────────────────
-
-  test("[ND] T3.1 offsets at or below the master floor are skipped whichever key they route to; 100 is written") {
+  test("[ND] offsets at or below the master floor are skipped whichever key they route to; 100 is written") {
     val metrics = new CloudSinkMetrics()
     val namer   = new RotatingKeyNamer(pvA)
     val fw      = new FailOnceAtOffset(-1L).formatWriter
@@ -208,9 +206,7 @@ class WriterManagerBatchFloorTest
     wm.close()
   }
 
-  // ── T3.2 ────────────────────────────────────────────────────────────────────────────
-
-  test("[ND] T3.2 in-process re-delivery after a key rotation does not re-buffer offsets already held") {
+  test("[ND] in-process re-delivery after a key rotation does not re-buffer offsets already held") {
     val metrics = new CloudSinkMetrics()
     val namer   = new RotatingKeyNamer(pvA)
     val fw      = new FailOnceAtOffset(103L).formatWriter
@@ -234,9 +230,7 @@ class WriterManagerBatchFloorTest
     wm.close()
   }
 
-  // ── T3.3 ────────────────────────────────────────────────────────────────────────────
-
-  test("[ND] T3.3 the floor is per topic-partition, not per key: an interleaved offset is skipped under any key") {
+  test("[ND] the floor is per topic-partition, not per key: an interleaved offset is skipped under any key") {
     val metrics = new CloudSinkMetrics()
     val namer   = new RotatingKeyNamer(pvA)
     val fw      = new FailOnceAtOffset(-1L).formatWriter
@@ -259,9 +253,7 @@ class WriterManagerBatchFloorTest
     wm.close()
   }
 
-  // ── T3.4 / T3.5 ─────────────────────────────────────────────────────────────────────
-
-  test("[NL] T3.4 cleanUp(tp) resets the buffered floor so a rolled-back offset is written again") {
+  test("[NL] cleanUp(tp) resets the buffered floor so a rolled-back offset is written again") {
     val metrics = new CloudSinkMetrics()
     val namer   = new RotatingKeyNamer(pvA)
     val fw      = new FailOnceAtOffset(-1L).formatWriter
@@ -281,7 +273,7 @@ class WriterManagerBatchFloorTest
     wm.close()
   }
 
-  test("[NL] T3.5 close() resets the buffered floor so a re-delivered offset is written again") {
+  test("[NL] close() resets the buffered floor so a re-delivered offset is written again") {
     val metrics = new CloudSinkMetrics()
     val namer   = new RotatingKeyNamer(pvA)
     val fw      = new FailOnceAtOffset(-1L).formatWriter
@@ -298,9 +290,7 @@ class WriterManagerBatchFloorTest
     wm.close()
   }
 
-  // ── T3.6 ────────────────────────────────────────────────────────────────────────────
-
-  test("[B] T3.6 granular mode is unchanged: the same rotation still re-buffers the already-held offsets") {
+  test("[B] granular mode is unchanged: the same rotation still re-buffers the already-held offsets") {
     indexManager.close()
     storage      = new InMemoryStorageInterface()
     indexManager = buildIndexManager(CommitMode.Granular)

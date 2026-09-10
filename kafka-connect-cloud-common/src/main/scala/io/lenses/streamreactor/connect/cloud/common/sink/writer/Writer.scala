@@ -143,14 +143,21 @@ class Writer[SM <: FileMetadata](
         }
 
       case _: Uploading =>
-        // before we write we need to retry the upload
-        NonFatalCloudSinkError("Attempting Write in Uploading State").asLeft
+        // before we write we need to retry the upload. Unswallowable: under
+        // errors.policy=NOOP/THROW this record would otherwise be silently dropped while the
+        // writer is mid-commit, and the master offset later advances past the dropped offset
+        // once the commit succeeds -- a genuine, if narrow, integrity hazard rather than a safe
+        // no-op. RETRY still re-delivers, which is the desired outcome.
+        NonFatalCloudSinkError.unswallowable("Attempting Write in Uploading State", None).asLeft
 
       case _: Staged =>
         // Batch mode: the writer's bytes are staged and waiting for the master-lock CAS. Accepting
-        // a record now would put it in a file that has already been sized and keyed. NonFatal so
-        // the next recommitPending drives the batch and the record is re-delivered.
-        NonFatalCloudSinkError("Attempting Write in Staged State").asLeft
+        // a record now would put it in a file that has already been sized and keyed. Unswallowable,
+        // not just NonFatal: under errors.policy=NOOP/THROW this record -- and the rest of
+        // the same put() batch, since every writer on the TP is Staged together -- would otherwise
+        // be silently dropped, and the batch commit later advances the floor past them. RETRY
+        // re-delivers, and the next recommitPending drives the batch.
+        NonFatalCloudSinkError.unswallowable("Attempting Write in Staged State", None).asLeft
     }
   }
 
@@ -190,32 +197,38 @@ class Writer[SM <: FileMetadata](
 
     writeState match {
       case uploading: Uploading =>
-        for {
-          key <- objectKeyBuilder.build(
-            uploading.firstBufferedOffset,
-            uploading.uncommittedOffset,
-            uploading.earliestRecordTimestamp,
-            uploading.latestRecordTimestamp,
-            uploading.recordCount,
-          )
-          finalPath <- key.path.toRight(NonFatalCloudSinkError("No path exists within cloud location"): SinkError)
-          // Connector-scoped so the batch sweep can delete orphans belonging to this connector
-          // without ever touching granular-mode temps or another connector's temps.
-          tempPath = finalPath.prependedAll(
-            s".temp-upload/${connectorTaskId.name}/${topicPartition.topic}/${topicPartition.partition}/$batchUuid/",
-          )
-          tempETag <- pendingOperationsProcessors.uploadOnly(
-            topicPartition,
-            UploadOperation(key.bucket, uploading.file, tempPath),
-            partitionKey,
-            Some(uploading.file),
-          )
-        } yield {
-          // On a Left the state deliberately stays `Uploading` with the staging file intact.
-          val staged = uploading.toStaged(key.bucket, tempPath, tempETag, finalPath)
-          writeState = staged
-          staged.some
-        }
+        metrics.incrementInFlightUploads()
+        val result =
+          try {
+            for {
+              key <- objectKeyBuilder.build(
+                uploading.firstBufferedOffset,
+                uploading.uncommittedOffset,
+                uploading.earliestRecordTimestamp,
+                uploading.latestRecordTimestamp,
+                uploading.recordCount,
+              )
+              finalPath <- key.path.toRight(NonFatalCloudSinkError("No path exists within cloud location"): SinkError)
+              // Connector-scoped so the batch sweep can delete orphans belonging to this
+              // connector without ever touching granular-mode temps or another connector's temps.
+              tempPath = finalPath.prependedAll(
+                s".temp-upload/${connectorTaskId.name}/${topicPartition.topic}/${topicPartition.partition}/$batchUuid/",
+              )
+              tempETag <- pendingOperationsProcessors.uploadOnly(
+                topicPartition,
+                UploadOperation(key.bucket, uploading.file, tempPath),
+                partitionKey,
+                Some(uploading.file),
+              )
+            } yield {
+              // On a Left the state deliberately stays `Uploading` with the staging file intact.
+              val staged = uploading.toStaged(key.bucket, tempPath, tempETag, finalPath)
+              writeState = staged
+              staged.some
+            }
+          } finally metrics.decrementInFlightUploads()
+        if (result.isLeft) metrics.incrementFilesFailedTotal()
+        result
       case other =>
         FatalCloudSinkError(s"stage reached an unexpected state $other", topicPartition).asLeft
     }
@@ -471,8 +484,11 @@ class Writer[SM <: FileMetadata](
         case Writing(commitState, _, _, _, uncommittedOffset, _, _) =>
           shouldSkipInternal(currentOffset, Option(largestOffset(commitState.committedOffset, uncommittedOffset)))
         case s: Staged =>
-          // Mirrors the Uploading arm. Only reachable in granular mode, which never produces a
-          // Staged writer; batch mode uses the topic-partition floor instead of shouldSkip.
+          // Unreachable in practice: `shouldSkip` is only ever called from the granular
+          // `WriterManager.write` branch, and `Staged` is only ever produced by `stage()` on the
+          // batch-mode path (which uses the topic-partition floor in `batchDedupFloor` instead of
+          // `shouldSkip`). Kept for match exhaustiveness; mirrors the `Uploading` arm above should
+          // a future refactor ever make it reachable.
           shouldSkipInternal(currentOffset, Option(largestOffset(s.commitState.committedOffset, s.uncommittedOffset)))
       }
     }

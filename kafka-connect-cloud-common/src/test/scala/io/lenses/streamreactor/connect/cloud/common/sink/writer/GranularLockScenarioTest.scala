@@ -1979,7 +1979,7 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     verify(mockFW, times(1)).write(any[MessageDetail])
   }
 
-  // ── Cycle 8: createWriter granular fallback max(granular, master) ────────────────────
+  // ── createWriter granular fallback max(granular, master) ─────────────────────────────
 
   /**
    * Builds a granular-mode WriterManager whose granular lock returns `granular` and whose master
@@ -2045,13 +2045,13 @@ class GranularLockScenarioTest extends AnyFunSuiteLike with Matchers with Mockit
     metrics.getRecordsWrittenTotal == 1L
   }
 
-  test("[B] T8.1 granular fallback with a granular lock at or above the master floor uses the granular offset") {
+  test("[B] granular fallback with a granular lock at or above the master floor uses the granular offset") {
     // K.lock = 150 >= M = 99: floor 150, so record 150 is skipped and 151 is written.
     granularFallbackWrites(granular = Some(150), master = Some(99), offset = 150) shouldBe false
     granularFallbackWrites(granular = Some(150), master = Some(99), offset = 151) shouldBe true
   }
 
-  test("[ND] T8.2 granular fallback with a stale granular lock below the master floor uses the master offset") {
+  test("[ND] granular fallback with a stale granular lock below the master floor uses the master offset") {
     // K.lock = 90 < M = 99: with `orElse` the floor would be 90 and record 95 would be written
     // (a duplicate); `max` raises the floor to 99 so 91..99 are skipped and 100 is written.
     granularFallbackWrites(granular = Some(90), master = Some(99), offset = 95) shouldBe false

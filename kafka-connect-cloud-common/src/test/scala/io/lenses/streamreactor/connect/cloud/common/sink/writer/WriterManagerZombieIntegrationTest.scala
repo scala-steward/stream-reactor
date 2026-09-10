@@ -217,7 +217,7 @@ class WriterManagerZombieIntegrationTest
 
     val wm = buildWriterManager(im, storage, metrics)
 
-    // Cycle 1: establish lastWritten = 51 (committed offset 50 → K = 51).
+    // establish lastWritten = 51 (committed offset 50 → K = 51).
     val writer1 = makeCommittedWriter(tp0, im, storage, committedOffset = Some(Offset(50)))
     wm.putWriter(MapKey(tp0, dateA), writer1)
     wm.preCommit(Map(tp0 -> new OffsetAndMetadata(200)))(tp0).offset() shouldBe 51L
@@ -264,7 +264,7 @@ class WriterManagerZombieIntegrationTest
 
     val wm = buildWriterManager(im, storage, metrics)
 
-    // Cycle 1: establish lastWritten = 51, lastReturnedSafeOffset = 51.
+    // establish lastWritten = 51, lastReturnedSafeOffset = 51.
     val writer1 = makeCommittedWriter(tp0, im, storage, committedOffset = Some(Offset(50)))
     wm.putWriter(MapKey(tp0, dateA), writer1)
     wm.preCommit(Map(tp0 -> new OffsetAndMetadata(200)))(tp0).offset() shouldBe 51L
@@ -283,7 +283,7 @@ class WriterManagerZombieIntegrationTest
     // Arm exactly one master-lock failure to fail the forced write.
     storage.arm(FailWriteAt(bucket, masterLockPath))
 
-    // Cycle 2: WriteForced(PostCleanUp) fires and fails.
+    // WriteForced(PostCleanUp) fires and fails.
     // The flag is cleared BEFORE the write attempt (WriterManager.scala line 627),
     // so the next cycle does NOT re-enter as WriteForced.
     val result2 = wm.preCommit(Map(tp0 -> new OffsetAndMetadata(200)))
@@ -291,7 +291,7 @@ class WriterManagerZombieIntegrationTest
     metrics.getMasterLockWriteForcedPostCleanUp shouldBe 1L
     metrics.getMasterLockFailures shouldBe 1L
 
-    // Cycle 3: storage healthy; the real IndexManagerV2's seekedOffsets(tp0) = Offset(50)
+    // storage healthy; the real IndexManagerV2's seekedOffsets(tp0) = Offset(50)
     // (written by cycle 1), so lastWritten re-seeds to 50+1 = 51, which equals
     // globalSafeOffset = 51. dirty = false → Skip branch.
     //
@@ -316,7 +316,7 @@ class WriterManagerZombieIntegrationTest
       "from older floor; master lock fences replay dedup; granular lock absent (falls back to master floor)",
   ) {
     // Shape:
-    //   Cycle 1 (routine write): committed=50 → K=51 persisted (durable floor = Offset(50)).
+    // Initial write: committed=50 → K=51 persisted (durable floor = Offset(50)).
     //   Add writer2 with committed=100 and skip preCommit: dirty=true on close.
     //   Arm one FailWriteAt for the master-lock path.
     //   wm.close(): force-on-revoke fires → updateMasterLock(Offset(101)) fails → durable floor stays at Offset(50).
@@ -335,7 +335,7 @@ class WriterManagerZombieIntegrationTest
 
     val wm = buildWriterManager(im, storage, metrics)
 
-    // Cycle 1: routine write establishes lastWritten = 51 (committed offset 50 → K = 51).
+    // routine write establishes lastWritten = 51 (committed offset 50 → K = 51).
     val writer1 = makeCommittedWriter(tp0, im, storage, committedOffset = Some(Offset(50)))
     wm.putWriter(MapKey(tp0, dateA), writer1)
     wm.preCommit(Map(tp0 -> new OffsetAndMetadata(200)))(tp0).offset() shouldBe 51L
@@ -355,7 +355,7 @@ class WriterManagerZombieIntegrationTest
     metrics.getMasterLockWriteForcedRevoke shouldBe 1L
     metrics.getMasterLockWriteForcedRevokeFailures shouldBe 1L
     metrics.getMasterLockFailures shouldBe 1L
-    // Cycle 1 routine success; the failed force-write must NOT falsely increment masterLockUpdates.
+    // Initial routine write succeeded; the failed force-write must NOT falsely increment masterLockUpdates.
     metrics.getMasterLockUpdates shouldBe 1L
 
     // Cleanup contract: writer close and cache eviction must still run despite the force failure.
@@ -410,7 +410,7 @@ class WriterManagerZombieIntegrationTest
     // against the real IndexManagerV2 + InMemoryStorageInterface.
     //
     // Shape:
-    //   Cycle 1 (routine write): committed=50 → K=51 persisted (lastWritten=51).
+    // Initial write: committed=50 → K=51 persisted (lastWritten=51).
     //   Skip preCommit after adding high writer: dirty=true on close.
     //   wm.close(): force-on-revoke fires → updateMasterLock(Offset(101)) succeeds.
     //   Assert durable floor = Offset(100) via getSeekedOffsetForTopicPartition (master
@@ -422,7 +422,7 @@ class WriterManagerZombieIntegrationTest
 
     val wm = buildWriterManager(im, storage, metrics)
 
-    // Cycle 1: routine write establishes lastWritten = 51 (committed offset 50 → K = 51).
+    // routine write establishes lastWritten = 51 (committed offset 50 → K = 51).
     val writer1 = makeCommittedWriter(tp0, im, storage, committedOffset = Some(Offset(50)))
     wm.putWriter(MapKey(tp0, dateA), writer1)
     wm.preCommit(Map(tp0 -> new OffsetAndMetadata(200)))(tp0).offset() shouldBe 51L
@@ -462,7 +462,7 @@ class WriterManagerZombieIntegrationTest
   }
 
   // ════════════════════════════════════════════════════════════════════════════════════
-  // Cycle 10: end-to-end zombie scenarios in commit.mode=batch
+  // End-to-end zombie scenarios in commit.mode=batch
   // ════════════════════════════════════════════════════════════════════════════════════
 
   private val batchKey: immutable.Map[PartitionField, String] = Map(dateField -> "2024-02-02")
@@ -586,7 +586,7 @@ class WriterManagerZombieIntegrationTest
 
   private def dataKeys(storage: InMemoryStorageInterface): Seq[String] = storage.keysUnder(bucket, "data/")
 
-  test("[Z] T10.1 pre-CAS batch zombie: O's open fences Z; Z's commitBatch fails and O replays each offset once") {
+  test("[Z] pre-CAS batch zombie: O's open fences Z; Z's commitBatch fails and O replays each offset once") {
     val storage = new InMemoryStorageInterface()
     seedBatchMaster(storage, 99)
 
@@ -604,45 +604,26 @@ class WriterManagerZombieIntegrationTest
 
     // O replays and commits each offset once: a single batch object, master advanced to 104.
     o.deliver(100 to 104)
-    o.commit()
+    o.commit().value
     dataKeys(storage) should have size 1
     o.im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(104))
 
     z.wm.close(); z.im.close(); o.wm.close(); o.im.close()
   }
 
-  test("[Z] T10.2 a zombie that completed its batch: the new owner re-delivers and does not duplicate") {
-    val storage = new InMemoryStorageInterface()
-    seedBatchMaster(storage, 99)
+  // A test for a zombie that completes its batch before the new owner opens was removed: Z
+  // commits fully *before* O ever opens, so this is plain restart re-delivery dedup, not a
+  // zombie scenario -- already pinned, with stronger assertions (object count, no duplicate
+  // under a key rotation), by the equivalent batch-mode scenario tests in BatchCommitScenarioTest.
 
-    // Z commits a full batch (CAS + copies done, master advanced to 102).
-    val z = batchPair(storage, values = Map(dateField -> "keyA"))
-    z.deliver(100 to 102)
-    z.commit().isRight shouldBe true
-    val objectsAfterZ = dataKeys(storage)
-    objectsAfterZ should have size 1
-    z.im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(102))
-
-    // New owner O opens (no pending state, master at 102) and Kafka re-delivers 100..102.
-    val ometrics = new CloudSinkMetrics()
-    val o        = batchPair(storage, ometrics, values = Map(dateField -> "keyA"))
-    o.deliver(100 to 102)
-    // Every re-delivered offset is at or below the master floor: all skipped, no new object.
-    ometrics.getDuplicateRecordsSkippedTotal shouldBe 3L
-    ometrics.getRecordsWrittenTotal shouldBe 0L
-    dataKeys(storage) shouldBe objectsAfterZ
-
-    z.wm.close(); z.im.close(); o.wm.close(); o.im.close()
-  }
-
-  test("[Z] T10.3 ping-pong: after a completed batch commit, the fenced side surfaces Fatal and there is one object") {
+  test("[Z] ping-pong: after a completed batch commit, the fenced side surfaces Fatal; still one object") {
     val storage = new InMemoryStorageInterface()
     seedBatchMaster(storage, 99)
 
     val z = batchPair(storage)
     z.deliver(100 to 103)
     // Z completes a full batch commit, reaching committedOffset = 103.
-    z.commit().isRight shouldBe true
+    z.commit().value
     val objectsAfterZ = dataKeys(storage)
     objectsAfterZ should have size 1
     z.im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(103))
@@ -652,13 +633,16 @@ class WriterManagerZombieIntegrationTest
     o.im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(103))
     z.deliver(104 to 105)
     z.commit().isLeft shouldBe true // fenced: availability, not safety
-    // Exactly one object per final path throughout, and the master offset is a single agreed P.
-    dataKeys(storage).toSet.size shouldBe dataKeys(storage).size
+    // The fenced attempt never reached a final path: still exactly the one object Z committed
+    // before O opened, and the master offset is still Z's single agreed P (103), not Z's
+    // fenced attempt (105).
+    dataKeys(storage) shouldBe objectsAfterZ
+    o.im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(103))
 
     z.wm.close(); z.im.close(); o.wm.close(); o.im.close()
   }
 
-  test("[Z] T10.4 rollback with a batch zombie: a granular owner opens, fences Z, and owns the master lock") {
+  test("[Z] rollback with a batch zombie: a granular owner opens, fences Z, and owns the master lock") {
     val storage = new InMemoryStorageInterface()
     seedBatchMaster(storage, 99)
 
@@ -679,48 +663,13 @@ class WriterManagerZombieIntegrationTest
     z.wm.close(); z.im.close(); oim.close()
   }
 
-  test("[Z] T10.5 granular zombie vs batch owner: the zombie's updateMasterLock after O.open is fenced") {
-    val storage = new InMemoryStorageInterface()
-    seedBatchMaster(storage, 99)
+  // A test for a granular zombie vs batch owner was removed: the ownership bump is
+  // mode-independent and is already pinned at the IndexManagerV2 level by the fencing
+  // tests above; the removed test constructed zero writers and exercised nothing the
+  // mode-independent fencing tests do not already cover.
 
-    // Granular zombie opened first, holding the master eTag.
-    val zim = buildIndexManager(storage)
-    zim.open(Set(tp0)).value
-
-    // Batch owner O opens later and bumps the master lock.
-    val oim = buildBatchIndexManager(storage)
-    oim.open(Set(tp0)).value
-
-    // The granular zombie's master-lock write is now fenced (previously it would have succeeded
-    // until O's first commit).
-    zim.updateMasterLock(tp0, Offset(200)).isLeft shouldBe true
-    oim.updateMasterLock(tp0, Offset(150)).value
-
-    zim.close(); oim.close()
-  }
-
-  test("[NL] T10.6 rebalance mid-batch: a new owner seeks the master floor and writes 100..104 once") {
-    val storage = new InMemoryStorageInterface()
-    seedBatchMaster(storage, 99)
-
-    // Owner buffers records, then a rebalance closes it before any batch commit.
-    val first = batchPair(storage)
-    first.deliver(100 to 104)
-    first.wm.close() // rebalance: nothing was committed
-    first.im.close()
-    dataKeys(storage) shouldBe empty
-
-    // New owner opens, seeks the master floor (99), and re-delivers everything, writing once.
-    val metrics2 = new CloudSinkMetrics()
-    val second   = batchPair(storage, metrics2)
-    second.im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(99))
-    second.deliver(100 to 104)
-    second.commit()
-    metrics2.getRecordsWrittenTotal shouldBe 5L
-    metrics2.getDuplicateRecordsSkippedTotal shouldBe 0L
-    dataKeys(storage) should have size 1
-    second.im.getSeekedOffsetForTopicPartition(tp0) shouldBe Some(Offset(104))
-
-    second.wm.close(); second.im.close()
-  }
+  // A test for rebalance mid-batch was removed: it had the identical shape as the
+  // equivalent scenario in BatchCommitScenarioTest (buffer, close before commit, reopen
+  // at the master floor, re-deliver, one object) minus the wall-clock key rotation
+  // that makes that scenario meaningful -- the other test is strictly stronger.
 }

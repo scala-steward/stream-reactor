@@ -73,11 +73,11 @@ class IndexManagerV2Test
   private val indexesDirectoryName        = ".indexes2"
 
   /**
-   * From Cycle 6, `open()` rewrites a pending-free master lock to bump its eTag (the ownership
-   * fence — see §2.5 of the batch-commit plan). On a `mock[StorageInterface]` that write is
-   * unstubbed and returns a `SmartNull` that blows up in `open`. This stubs it to echo the written
-   * `IndexFile` back with a fresh eTag, matching what `InMemoryStorageInterface` would do. Tests
-   * that assert on the write can stub over it afterwards.
+   * `open()` rewrites a pending-free master lock to bump its eTag (the ownership fence). On a
+   * `mock[StorageInterface]` that write is unstubbed and returns a `SmartNull` that blows up in
+   * `open`. This stubs it to echo the written `IndexFile` back with a fresh eTag, matching what
+   * `InMemoryStorageInterface` would do. Tests that assert on the write can stub over it
+   * afterwards.
    */
   private def stubMasterLockBump(si: StorageInterface[_]): Unit = {
     val _ = Mockito.when(
@@ -188,7 +188,7 @@ class IndexManagerV2Test
       .thenReturn(absent, winnerLock)
 
     // Two writes now happen: the NoOverwrite create loses the race, then the plain-read arm bumps
-    // the adopted clean lock's eTag (Cycle 6). Distinguish by protection type: the create is a
+    // the adopted clean lock's eTag. Distinguish by protection type: the create is a
     // NoOverwriteExistingObject and must fail; the bump is an ObjectWithETag and must succeed.
     Mockito.when(
       storageInterface.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectProtection[IndexFile]])(
@@ -244,11 +244,24 @@ class IndexManagerV2Test
     when(storageInterface.getBlobAsObject[IndexFile](anyString(), anyString())(ArgumentMatchers.eq(indexFileDecoder)))
       .thenReturn(absent, winnerPendingLock)
 
-    when(
-      storageInterface.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
-        ArgumentMatchers.eq(indexFileEncoder),
+    // The create loses the race (NoOverwrite); the re-read's PendingState arm then bumps
+    // ownership BEFORE driving the chain -- distinguish by protection type, as the sibling
+    // pending-free test above does.
+    Mockito.when(
+      storageInterface.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectProtection[IndexFile]])(
+        any[Encoder[IndexFile]],
       ),
-    ).thenReturn(Left(NonOverwriteFileExistsError(new Exception("exists"), path)))
+    ).thenAnswer(
+      new org.mockito.stubbing.Answer[AnyRef] {
+        override def answer(invocation: org.mockito.invocation.InvocationOnMock): AnyRef =
+          invocation.getArguments.toList.collectFirst { case p: ObjectProtection[IndexFile] @unchecked => p } match {
+            case Some(_: NoOverwriteExistingObject[IndexFile]) =>
+              Left(NonOverwriteFileExistsError(new Exception("exists"), path))
+            case Some(other) => Right(ObjectWithETag(other.wrappedObject, "bumped-etag"))
+            case None        => Left(NonOverwriteFileExistsError(new Exception("exists"), path))
+          }
+      },
+    )
 
     // The re-read MUST flow through processPendingOperations (not a naive eTag adoption).
     type FnIndexUpdate = (TopicPartition, Option[Offset], Option[PendingState]) => Either[SinkError, Option[Offset]]
@@ -490,11 +503,12 @@ class IndexManagerV2Test
       .thenReturn(Right(()))
 
     // Return incrementing eTags to simulate GCS generation progression.
-    // open() will call update() twice during pending ops (checkpoint after copy, final after delete),
-    // then once more for the subsequent update() call.
+    // open() now calls writeBlobToFile FOUR times: the pre-chain ownership bump, the
+    // checkpoint after copy, the final write after delete, then once more for the subsequent
+    // update() call.
     val writeResponses = new java.util.concurrent.atomic.AtomicInteger(0)
-    val eTags          = Array("etag-after-copy", "etag-after-delete", "etag-after-subsequent-update")
-    val offsets        = Array(Some(Offset(733)), Some(Offset(773)), Some(Offset(900)))
+    val eTags          = Array("etag-after-bump", "etag-after-copy", "etag-after-delete", "etag-after-subsequent-update")
+    val offsets        = Array(Some(Offset(733)), Some(Offset(733)), Some(Offset(773)), Some(Offset(900)))
     when(
       si.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
         ArgumentMatchers.eq(indexFileEncoder),
@@ -523,14 +537,14 @@ class IndexManagerV2Test
       updateResult.isRight shouldBe true
       updateResult.value shouldBe Some(Offset(900))
 
-      // The third writeBlobToFile call (for the subsequent update) should use "etag-after-delete" (the latest),
-      // not "original-etag" (the stale one). Capture and verify.
+      // The fourth writeBlobToFile call (for the subsequent update) should use "etag-after-delete"
+      // (the latest), not "original-etag" (the stale one). Capture and verify.
       val captor = ArgumentCaptor.forClass(classOf[ObjectWithETag[IndexFile]])
-      verify(si, times(3)).writeBlobToFile[IndexFile](anyString(), anyString(), captor.capture())(
+      verify(si, times(4)).writeBlobToFile[IndexFile](anyString(), anyString(), captor.capture())(
         ArgumentMatchers.eq(indexFileEncoder),
       )
-      val thirdCall = captor.getAllValues.get(2)
-      thirdCall.eTag shouldBe "etag-after-delete"
+      val fourthCall = captor.getAllValues.get(3)
+      fourthCall.eTag shouldBe "etag-after-delete"
     } finally realIndexManagerV2.close()
   }
 
@@ -568,9 +582,10 @@ class IndexManagerV2Test
     when(si.uploadFile(any[UploadableFile], anyString(), anyString()))
       .thenReturn(Left(NonExistingFileError(tempFile)))
 
-    // writeBlobToFile: first call clears pending state (dead-worker recovery), second is the subsequent update
+    // writeBlobToFile: first call is the pre-chain ownership bump, second clears pending
+    // state (dead-worker recovery), third is the subsequent update.
     val cancelWriteResponses = new java.util.concurrent.atomic.AtomicInteger(0)
-    val cancelETags          = Array("etag-after-cancel", "etag-after-update")
+    val cancelETags          = Array("etag-after-bump", "etag-after-cancel", "etag-after-update")
     when(
       si.writeBlobToFile[IndexFile](anyString(), anyString(), any[ObjectWithETag[IndexFile]])(
         ArgumentMatchers.eq(indexFileEncoder),
@@ -599,12 +614,13 @@ class IndexManagerV2Test
       val updateResult = realIndexManagerV2.update(topicPartition, Some(Offset(600)), None)
       updateResult.isRight shouldBe true
 
-      // The second writeBlobToFile should use "etag-after-cancel", not "original-etag"
+      // The third writeBlobToFile call (the subsequent update) should use "etag-after-cancel"
+      // (the latest), not "original-etag" (the stale one) or the bump's eTag.
       val captor = ArgumentCaptor.forClass(classOf[ObjectWithETag[IndexFile]])
-      verify(si, times(2)).writeBlobToFile[IndexFile](anyString(), anyString(), captor.capture())(
+      verify(si, times(3)).writeBlobToFile[IndexFile](anyString(), anyString(), captor.capture())(
         ArgumentMatchers.eq(indexFileEncoder),
       )
-      captor.getAllValues.get(1).eTag shouldBe "etag-after-cancel"
+      captor.getAllValues.get(2).eTag shouldBe "etag-after-cancel"
     } finally realIndexManagerV2.close()
   }
 
@@ -2666,7 +2682,7 @@ class IndexManagerV2Test
       )(any[Decoder[IndexManagerV2.SweepMarker]]),
     ).thenReturn(Left(FileNotFoundError(new Exception("Not found"), "sweep-marker")))
     // `writeBlobToFile[O]` erases to one method, so a single stub serves both the sweep-marker
-    // write and the Cycle-6 master-lock ownership bump. Echo whichever object was written back
+    // write and the master-lock ownership bump. Echo whichever object was written back
     // with a fresh eTag so the master IndexFile bump does not receive a SweepMarker (which would
     // ClassCastException in updateDataReturnOffset).
     val _ = Mockito.when(
@@ -3390,18 +3406,27 @@ class IndexManagerV2Test
       im.open(Set(tp1, tp2))
       im.sweepOrphanedLocks()
 
-      // Scope to sweep-marker writes: the Cycle-6 ownership bump also writes each TP's `.lock`.
+      // Capture EVERY writeBlobToFile[IndexFile-erased] call: generics are erased at the
+      // JVM level, so Mockito cannot distinguish calls by their `O` type parameter -- the
+      // the ownership bump (writing each TP's `.lock`) matches the same verify signature as
+      // the sweep-marker write. Capture all 4 (2 bumps + 2 markers) unconditionally, then filter
+      // to marker paths and assert the exact (bucket, path) pairing in code: a matcher-only
+      // `contains("sweep-marker")` verify would pass even if tp1's marker were written under
+      // tp2's path.
       val bucketCaptor = ArgumentCaptor.forClass(classOf[String])
       val pathCaptor   = ArgumentCaptor.forClass(classOf[String])
-      verify(si, times(2)).writeBlobToFile[IndexManagerV2.SweepMarker](
+      verify(si, times(4)).writeBlobToFile[IndexManagerV2.SweepMarker](
         bucketCaptor.capture(),
-        ArgumentMatchers.contains("sweep-marker"),
+        pathCaptor.capture(),
         any[ObjectProtection[IndexManagerV2.SweepMarker]],
       )(any[Encoder[IndexManagerV2.SweepMarker]])
-      val _       = pathCaptor
-      val buckets = (0 until bucketCaptor.getAllValues.size()).map(bucketCaptor.getAllValues.get).toSet
-      buckets should contain("bucket-a")
-      buckets should contain("bucket-b")
+      val allPairs = (0 until bucketCaptor.getAllValues.size())
+        .map(i => bucketCaptor.getAllValues.get(i) -> pathCaptor.getAllValues.get(i))
+      val markerPairs = allPairs.filter { case (_, p) => p.contains("sweep-marker") }.toSet
+      markerPairs shouldBe Set(
+        "bucket-a" -> IndexManagerV2.generateSweepMarkerPath(connectorTaskId, tp1, indexesDirectoryName),
+        "bucket-b" -> IndexManagerV2.generateSweepMarkerPath(connectorTaskId, tp2, indexesDirectoryName),
+      )
     } finally im.close()
   }
 
@@ -4807,7 +4832,7 @@ class IndexManagerV2Test
 
     try {
       im1.open(Set(tp))
-      // From Cycle 6, im2.open() rewrites the master lock (ownership bump), which fences im1:
+      // im2.open() rewrites the master lock (ownership bump), which fences im1:
       // im1's cached eTag is now stale. This is the collision made explicit at ownership change
       // instead of at the first commit.
       im2.open(Set(tp))
@@ -4901,8 +4926,9 @@ class IndexManagerV2Test
   private lazy val bumpTaskId: ConnectorTaskId = ConnectorTaskId("bump-connector", 1, 0)
 
   private def bumpManager(
-    store:      InMemoryStorageInterface,
-    commitMode: CommitMode = CommitMode.Granular,
+    store:          InMemoryStorageInterface,
+    commitMode:     CommitMode = CommitMode.Granular,
+    gcSweepEnabled: Boolean    = true,
   ): IndexManagerV2 = {
     implicit val si:  StorageInterface[_] = store
     implicit val cid: ConnectorTaskId     = bumpTaskId
@@ -4913,7 +4939,7 @@ class IndexManagerV2Test
       gcIntervalSeconds      = Int.MaxValue,
       gcSweepIntervalSeconds = Int.MaxValue,
       gcSweepMinAgeSeconds   = Int.MaxValue,
-      gcSweepEnabled         = true,
+      gcSweepEnabled         = gcSweepEnabled,
       commitMode             = commitMode,
     )(si, cid)
   }
@@ -4928,28 +4954,36 @@ class IndexManagerV2Test
     } finally im.close()
   }
 
-  test("[Z] T6.2 open() on an existing pending-free lock rewrites it, changing the eTag but not the content") {
-    val store       = new InMemoryStorageInterface()
-    val seededETag  = seedMasterLock(store, Some(Offset(99)))
-    val beforeBytes = new String(store.snapshot(bumpBucket)(bumpLockPath).bytes, "UTF-8")
+  test(
+    "[Z] open() on an existing pending-free lock rewrites the owner field and eTag, but not the offset",
+  ) {
+    // Seeded with a DIFFERENT owner than the opener: if this used the same
+    // `bumpTaskId` for both the seed and the opener, `reread.owner shouldBe bumpTaskId.lockUuid`
+    // would be trivially true whether or not `open()` actually rewrites the owner field.
+    val store      = new InMemoryStorageInterface()
+    val priorOwner = "prior-owner-uuid"
+    val seeded = store.writeBlobToFile(
+      bumpBucket,
+      bumpLockPath,
+      NoOverwriteExistingObject(IndexFile(priorOwner, Some(Offset(99)), None)),
+    )(IndexFile.indexFileEncoder).value
 
     val im = bumpManager(store)
     try {
       im.open(Set(bumpTp)).value shouldBe Map(bumpTp -> Some(Offset(99)))
 
       val after = store.snapshot(bumpBucket)(bumpLockPath)
-      after.eTag should not be seededETag
+      after.eTag should not be seeded.eTag
       val reread = store.getBlobAsObject[IndexFile](bumpBucket, bumpLockPath).value.wrappedObject
       reread.committedOffset shouldBe Some(Offset(99))
       reread.pendingState shouldBe None
+      reread.owner should not be priorOwner
       reread.owner shouldBe bumpTaskId.lockUuid
       im.getSeekedOffsetForTopicPartition(bumpTp) shouldBe Some(Offset(99))
-      // Only the eTag moved; the decoded content is identical modulo the owner field.
-      beforeBytes should include("99")
     } finally im.close()
   }
 
-  test("[Z] T6.2 the bump also happens in batch mode") {
+  test("[Z] the bump also happens in batch mode") {
     val store      = new InMemoryStorageInterface()
     val seededETag = seedMasterLock(store, Some(Offset(99)))
 
@@ -4960,7 +4994,7 @@ class IndexManagerV2Test
     } finally im.close()
   }
 
-  test("[Z] T6.3 a task that opened earlier is fenced at the new owner's open(), not at its first commit") {
+  test("[Z] a task that opened earlier is fenced at the new owner's open(), not at its first commit") {
     val store = new InMemoryStorageInterface()
     seedMasterLock(store, Some(Offset(99)))
 
@@ -4986,10 +5020,34 @@ class IndexManagerV2Test
     }
   }
 
-  test("[Z] T6.4 a failed bump CAS fails open() and clears the partition's cached seek state") {
+  test(
+    "[Z] a bump CAS that loses one race re-reads and retries the SAME arm, succeeding on the second attempt",
+  ) {
+    // The bump arm now shares the create-race's bounded re-read budget instead of failing
+    // open() on the first lost race. A single one-shot write failure (e.g. a concurrent bump by
+    // another opener) must not fail open() -- the re-read finds the lock unchanged (the racer's
+    // write never actually landed here; InMemoryStorageInterface's FailWriteAt just rejects the
+    // call) and the retry succeeds.
     val store = new InMemoryStorageInterface()
     seedMasterLock(store, Some(Offset(99)))
     store.arm(InMemoryStorageInterface.FailWriteAt(bumpBucket, bumpLockPath))
+
+    val im = bumpManager(store)
+    try {
+      im.open(Set(bumpTp)).value shouldBe Map(bumpTp -> Some(Offset(99)))
+    } finally im.close()
+  }
+
+  test(
+    "[Z] a bump CAS that fails every retry attempt exhausts the budget, fails open(), and clears the " +
+      "partition's cached seek state",
+  ) {
+    val store = new InMemoryStorageInterface()
+    seedMasterLock(store, Some(Offset(99)))
+    // Exhaust every attempt in the shared re-read budget (MaxOpenCreateRaceAttempts).
+    (1 to IndexManagerV2.MaxOpenCreateRaceAttempts).foreach(_ =>
+      store.arm(InMemoryStorageInterface.FailWriteAt(bumpBucket, bumpLockPath)),
+    )
 
     val im = bumpManager(store)
     try {
@@ -4999,7 +5057,9 @@ class IndexManagerV2Test
     } finally im.close()
   }
 
-  test("[B] T6.5 batch mode starts no GC or sweep executors; granular mode starts both") {
+  test(
+    "[B] batch mode never starts the granular GC drain; the periodic temp sweep follows gcSweepEnabled",
+  ) {
     val granularStore = new InMemoryStorageInterface()
     val granular      = bumpManager(granularStore, CommitMode.Granular)
     try {
@@ -5008,13 +5068,26 @@ class IndexManagerV2Test
       granular.sweepExecutorOpt should not be None
     } finally granular.close()
 
+    // Batch mode never creates granular locks, so the GC drain has nothing to collect and is
+    // never started, regardless of gcSweepEnabled.
     val batchStore = new InMemoryStorageInterface()
-    val batch      = bumpManager(batchStore, CommitMode.Batch)
+    val batch      = bumpManager(batchStore, CommitMode.Batch, gcSweepEnabled = true)
     try {
       batch.open(Set(bumpTp)).value
-      // Batch mode never creates granular locks, so there is nothing for either job to collect.
       batch.gcExecutor shouldBe None
-      batch.sweepExecutorOpt shouldBe None
+      // The periodic `.temp-upload` sweep companion IS started in batch mode when
+      // gcSweepEnabled, mirroring the granular periodic sweep it complements the at-open sweep
+      // with (a long-lived task with no further rebalances still reaps orphans).
+      batch.sweepExecutorOpt should not be None
     } finally batch.close()
+
+    val batchDisabledStore = new InMemoryStorageInterface()
+    val batchDisabled      = bumpManager(batchDisabledStore, CommitMode.Batch, gcSweepEnabled = false)
+    try {
+      batchDisabled.open(Set(bumpTp)).value
+      batchDisabled.gcExecutor shouldBe None
+      // gcSweepEnabled=false: no periodic executor -- only the at-open, one-off sweep runs.
+      batchDisabled.sweepExecutorOpt shouldBe None
+    } finally batchDisabled.close()
   }
 }

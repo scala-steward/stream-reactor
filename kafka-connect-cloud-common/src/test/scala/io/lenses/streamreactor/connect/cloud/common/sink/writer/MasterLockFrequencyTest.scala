@@ -181,7 +181,7 @@ class MasterLockFrequencyTest
     val metrics = new CloudSinkMetrics()
     val wm      = buildWriterManager(indexManager, metrics)
 
-    // Cycle 1: success — dirty (51 > 0). lastWritten → 51, HWM → 51.
+    // success — dirty (51 > 0). lastWritten → 51, HWM → 51.
     when(indexManager.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
     wm.putWriter(MapKey(tp0, dateA), makeIdleWriter(tp0, Some(Offset(50))))
     wm.preCommit(currentOffsets(tp0, 100))(tp0).offset() shouldBe 51L
@@ -192,24 +192,24 @@ class MasterLockFrequencyTest
     wm.preCommit(currentOffsets(tp0, 100))(tp0).offset() shouldBe 51L
     verify(indexManager, times(1)).updateMasterLock(any[TopicPartition], any[Offset]) // still only one
 
-    // Cycle 4: success — higher-offset writer; dirty (81 > 51). lastWritten → 81, HWM → 81.
+    // success — higher-offset writer; dirty (81 > 51). lastWritten → 81, HWM → 81.
     wm.putWriter(MapKey(tp0, dateB), makeIdleWriter(tp0, Some(Offset(80))))
     wm.preCommit(currentOffsets(tp0, 100))(tp0).offset() shouldBe 81L
     verify(indexManager, times(2)).updateMasterLock(any[TopicPartition], any[Offset])
 
-    // Cycle 5: failure — dirty (121 > 81). HWM and lastWritten do NOT advance; preCommit returns None.
+    // failure — dirty (121 > 81). HWM and lastWritten do NOT advance; preCommit returns None.
     when(indexManager.updateMasterLock(any[TopicPartition], any[Offset]))
       .thenReturn(Left(FatalCloudSinkError("transient", tp0)))
     wm.putWriter(MapKey(tp0, dateA), makeIdleWriter(tp0, Some(Offset(120))))
     wm.preCommit(currentOffsets(tp0, 200)) shouldBe empty
 
-    // Cycle 6: retry success — still dirty (121 > 81; lastWritten did not advance on failure).
+    // retry success — still dirty (121 > 81; lastWritten did not advance on failure).
     when(indexManager.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
     wm.preCommit(currentOffsets(tp0, 200))(tp0).offset() shouldBe 121L
     // Cycles 1, 4, 5 (failed), 6 = 4 actual calls to updateMasterLock.
     verify(indexManager, times(4)).updateMasterLock(any[TopicPartition], any[Offset])
 
-    // Cycle 7: skip again — globalSafeOffset(121) == lastWritten(121).
+    // skip again — globalSafeOffset(121) == lastWritten(121).
     wm.preCommit(currentOffsets(tp0, 200))(tp0).offset() shouldBe 121L
 
     // Aggregate counters.
@@ -270,7 +270,7 @@ class MasterLockFrequencyTest
     val metrics = new CloudSinkMetrics()
     val wm      = buildWriterManager(indexManager, metrics)
 
-    // Cycle 1: a successful routine write establishes lastWritten = 51.
+    // a successful routine write establishes lastWritten = 51.
     when(indexManager.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
     wm.putWriter(MapKey(tp0, dateA), makeIdleWriter(tp0, Some(Offset(50))))
     wm.preCommit(currentOffsets(tp0, 200))(tp0).offset() shouldBe 51L
@@ -441,7 +441,7 @@ class MasterLockFrequencyTest
     when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(None)
     when(indexManager.cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])).thenReturn(Right(()))
 
-    // Cycle 1: routine write succeeds, establishing lastWritten = 51.
+    // routine write succeeds, establishing lastWritten = 51.
     when(indexManager.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
     val metrics = new CloudSinkMetrics()
     val wm      = buildWriterManager(indexManager, metrics)
@@ -468,7 +468,7 @@ class MasterLockFrequencyTest
     // exited via throw before reaching the Left branch).
     metrics.getMasterLockWriteForcedRevokeFailures shouldBe 1L
     metrics.getMasterLockFailures shouldBe 1L
-    // Cycle 1 routine success only — the throw did NOT falsely increment masterLockUpdates.
+    // Initial write only — the throw did NOT falsely increment masterLockUpdates.
     metrics.getMasterLockUpdates shouldBe 1L
 
     // Cleanup contract: writer close, per-TP state clear, and cache eviction must all
@@ -577,7 +577,7 @@ class MasterLockFrequencyTest
     when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(None)
     when(indexManager.cleanUpObsoleteLocks(any[TopicPartition], any[Offset], any[Set[String]])).thenReturn(Right(()))
 
-    // Cycle 1: succeed — establishes lastWritten; dirty flag cleared.
+    // succeed — establishes lastWritten; dirty flag cleared.
     when(indexManager.updateMasterLock(any[TopicPartition], any[Offset])).thenReturn(Right(()))
     val metrics = new CloudSinkMetrics()
     val wm      = buildWriterManager(indexManager, metrics)
@@ -653,7 +653,7 @@ class MasterLockFrequencyTest
   // ── Partition-batch commit mode: the master lock is written only by commitBatch ─────
 
   test(
-    "[B] T5.2 batch: preCommit, cleanUp and close never write the master lock or run granular-lock GC",
+    "[B] batch: preCommit, cleanUp and close never write the master lock or run granular-lock GC",
   ) {
     val indexManager = mock[IndexManager]
     when(indexManager.getSeekedOffsetForTopicPartition(tp0)).thenReturn(Some(Offset(50)))
@@ -675,7 +675,7 @@ class MasterLockFrequencyTest
   }
 
   test(
-    "[B] T5.3 batch: close() skips the forced master-lock write that granular mode performs for the same state",
+    "[B] batch: close() skips the forced master-lock write that granular mode performs for the same state",
   ) {
     // Granular arm: the forced Revoke write fires.
     val granularIm = mock[IndexManager]

@@ -80,11 +80,11 @@ import scala.collection.immutable
  * the durable state after the flush is *partial*. In batch mode the commit point is a single
  * master-lock CAS, so a failure anywhere before it leaves *nothing* durable.
  *
- * Consequence for the batch expectations (recorded as a deliberate deviation from the plan's
- * literal wording): because the batch prefix commits atomically, the post-restart counters for
- * T0.5/T0.6 cannot be read off the granular prefix's partial durable state. Those tests
- * therefore assert the same *guarantees* (no loss, no duplication) by first establishing a
- * durable batch commit in the restart task and then replaying across a key rotation.
+ * Consequence for the batch expectations: because the batch prefix commits atomically, the
+ * post-restart counters for the batch tests cannot be read off the granular prefix's partial
+ * durable state. Those tests therefore assert the same *guarantees* (no loss, no duplication)
+ * by first establishing a durable batch commit in the restart task and then replaying across a
+ * key rotation.
  */
 class BatchCommitScenarioTest
     extends AnyFunSuiteLike
@@ -342,7 +342,7 @@ class BatchCommitScenarioTest
           new String(masterBefore.bytes, StandardCharsets.UTF_8)
         w10.currentWriteState shouldBe a[Uploading]
         // W11 staged successfully: its object is under the connector-scoped batch temp prefix
-        // and W10's is not. (The `Staged` state itself is pinned by T2.9 and T4.4.)
+        // and W10's is not.
         w11.hasPendingUpload shouldBe true
         storage.keysUnder(bucket, batchTempPrefix) should have size 1
         storage.keysUnder(bucket, "data/orders/0/hour11").toList shouldBe Nil
@@ -388,8 +388,6 @@ class BatchCommitScenarioTest
     }
     (metrics, im, wm)
   }
-
-  // ── T0.1 / T0.2 / T0.3 — granular tripwires, pinning today's behaviour ──────────────
 
   test(
     "[B] granular: restart inside the same hour with a wall-clock key silently drops re-delivered 100..199 (DATA LOSS)",
@@ -443,8 +441,6 @@ class BatchCommitScenarioTest
     im11.close()
   }
 
-  // ── T0.4 / T0.5 / T0.6 — batch mode ─────────────────────────────────────────────────
-
   test(
     "[NL] batch: restart inside the same hour with a wall-clock key writes the re-delivered 100..199 exactly once",
   ) {
@@ -480,7 +476,7 @@ class BatchCommitScenarioTest
 
     // Stage 2: a further restart after another key rotation re-delivers 200..250. The
     // topic-partition floor skips all 51 even though the key is brand new -- the granular
-    // mode equivalent (T0.2) re-writes them.
+    // mode equivalent re-writes them.
     val im2 = buildIndexManager(storage, CommitMode.Batch)
     im2.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(250)))
     val m2  = new CloudSinkMetrics()

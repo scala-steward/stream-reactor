@@ -43,7 +43,6 @@ object CommitMode {
 
   val Default: CommitMode = Granular
 
-  /** Case-insensitive parse. `Left` carries an operator-facing message naming the valid values. */
   def fromString(value: String): Either[String, CommitMode] =
     Option(value).map(_.trim.toLowerCase) match {
       case Some(GranularName) => Right(Granular)

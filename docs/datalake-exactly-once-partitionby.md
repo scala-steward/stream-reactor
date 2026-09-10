@@ -196,7 +196,7 @@ The high-watermark is cleared in two paths. `close()` clears it for all partitio
 Four properties combine to provide exactly-once semantics:
 
 1. **No data loss**: `globalSafeOffset ≤ min(firstBufferedOffset)` across all active writers. Kafka never advances past uncommitted data.
-2. **No duplication**: Each writer consults its own granular lock for deduplication. Records that were already committed to storage are skipped on replay. **This property is exactly the one that assumes determinism**: it is correct only if a replayed offset routes back to the key whose granular lock recorded it. When the PARTITIONBY key is not a deterministic function of the record (e.g. a wall-clock SMT), this assumption breaks. The opt-in [`commit.mode=batch`](#partition-batch-commit-mode-commitmodebatch) replaces the per-key granular lock with a topic-partition-level floor `max(masterW(tp), maxBuffered(tp), legacyFloor(K))`, so deduplication no longer depends on key determinism.
+2. **No duplication**: Each writer consults its own granular lock for deduplication. Records that were already committed to storage are skipped on replay. **This property is exactly the one that assumes determinism**: it is correct only if a replayed offset routes back to the key whose granular lock recorded it. When the PARTITIONBY key is not a deterministic function of the record (e.g. a wall-clock SMT), this assumption breaks. The opt-in [`commit.mode=batch`](#partition-batch-commit-mode-commitmodebatch) replaces the per-key granular lock with a topic-partition-level floor `max(masterW(tp), maxBuffered(tp))`, so deduplication no longer depends on key determinism.
 3. **Monotonicity**: `globalSafeOffset` never regresses within a task instance. The master lock and consumer offset can only advance, ensuring that GC decisions remain valid and crash recovery never replays a window whose deduplication state was already cleaned up.
 4. **One-record-overlap invariant**: Both GC (`cleanUpObsoleteLocks`) and the orphan sweep (`sweepOrphanedLocks`) use thresholds strictly below `masterOffset` (`globalSafeOffset - 1`). This preserves the granular lock at `masterOffset` -- the exact offset that `context.offset(tp, masterOffset)` will replay on restart. Without this lock, `shouldSkip` cannot deduplicate the replayed record, causing duplication.
 
@@ -305,7 +305,7 @@ The most severe granular-mode failure under wall-clock keys is not duplication o
 - A rebalance closes the task before `recommitPending` succeeds; W10's staging file is deleted. Nothing for 100..199 ever reached a final path.
 - The task restarts and seeks to the master floor 99, and a wall-clock SMT now stamps hour 11 for the re-delivered 100..199. They route to K11 — whose granular lock is at 250. `shouldSkip` sees `250 >= offset` for every one of 100..199 and skips them all.
 
-The records 100..199 are **gone**: never written to any final path, and permanently skipped on replay. This is loss, not misplacement. The pre-batch recommendation — which claimed the connector never drops data in this situation — was wrong for this case. Pinned by [`BatchCommitScenarioTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/BatchCommitScenarioTest.scala) **T0.1**; the batch-mode counterpart **T0.4** writes the same 100..199 exactly once. The supported fix for non-deterministic keys is [`commit.mode=batch`](#partition-batch-commit-mode-commitmodebatch).
+The records 100..199 are **gone**: never written to any final path, and permanently skipped on replay. This is loss, not misplacement. The pre-batch recommendation — which claimed the connector never drops data in this situation — was wrong for this case. The data-loss scenario is pinned as a regression test in [`BatchCommitScenarioTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/BatchCommitScenarioTest.scala); the batch-mode counterpart writes the same 100..199 exactly once. The supported fix for non-deterministic keys is [`commit.mode=batch`](#partition-batch-commit-mode-commitmodebatch).
 
 ### What IS deterministic (safe for exactly-once)
 
@@ -518,7 +518,7 @@ When indexing is enabled, each writer commit follows a three-phase protocol:
 
 Each phase is followed by an eTag-conditional update of the writer's lock file (granular or master). The eTag acts as a fencing token: if two tasks overlap (a "zombie" that woke up after a GC pause, and the new task that took over after a rebalance), only one can succeed at the conditional lock update. The other's update fails with an eTag mismatch.
 
-**From this release, `open()` rewrites the master lock in both commit modes** (an eTag-conditional "ownership bump"; see [Master-lock bump at `open()`](#master-lock-bump-at-open-both-modes)). This moves the fence from the new owner's *first commit* to its *`open()`*: a zombie holding a pre-rebalance master eTag is fenced the moment the new owner opens the partition, rather than surviving until the new owner happens to write the lock. The three-phase description above still applies to granular-mode per-key locks; the bump adds an earlier fence at the master level. Pinned by [`IndexManagerV2Test`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2Test.scala) T6.2/T6.3 and end-to-end by [`WriterManagerZombieIntegrationTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/WriterManagerZombieIntegrationTest.scala) T10.5.
+**From this release, `open()` rewrites the master lock in both commit modes** (an eTag-conditional "ownership bump"; see [Master-lock bump at `open()`](#master-lock-bump-at-open-both-modes)). This moves the fence from the new owner's *first commit* to its *`open()`*: a zombie holding a pre-rebalance master eTag is fenced the moment the new owner opens the partition, rather than surviving until the new owner happens to write the lock. The three-phase description above still applies to granular-mode per-key locks; the bump adds an earlier fence at the master level, and — being mode-independent — fences a zombie of *either* mode against an opener of *either* mode. Pinned by [`IndexManagerV2Test`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2Test.scala).
 
 **Critical invariant**: The fencing guarantee depends on eTags being held exclusively in memory and never re-read from shared storage during a commit. If a task discards its eTag and re-reads the current eTag from storage, it effectively steals the new task's fencing token, defeating the mechanism. For this reason, `updateForPartitionKey` treats a granular lock eTag cache miss as a `FatalCloudSinkError` rather than transparently re-reading from storage. Similarly, `updateMasterLock` does not refresh its cached eTag on write failure. The granular cache uses no automatic eviction (see "Lazy loading and in-memory cache"), so the only way an active writer's eTag can be missing is through explicit lifecycle eviction (writer close, partition reassignment, or idle-writer eviction) -- all of which invalidate the writer, not just the cache entry.
 
@@ -687,35 +687,36 @@ sequenceDiagram
     WCM->>IM: update(tp, seekedOffset(tp), Some(PendingState(P, [Copy_1..Copy_N])))
     Note over IM: eTag CAS = the single commit point. Left -> Fatal
     WCM->>POP: processPendingOperations(tp, seekedOffset(tp), pending, indexManager.update, escalateOnCancel = true)
-    POP->>S: mvFile per Copy, then update(remaining) per op; last Copy -> update(Some(P), None)
+    POP->>S: mvFile per Copy (moves the object, no separate delete), then update(remaining) per op; last Copy -> update(Some(P), None)
     WCM->>W: finalizeCommit(P) on every staged writer
-    WCM->>POP: deleteTempsBestEffort(staged.map(_.deleteOp))
 ```
 
 The single master-lock CAS (`indexManager.update(tp, committed, Some(pending))`) is the **only commit point**. Everything before it is retryable with no durable trace; everything after it is recoverable from what the CAS recorded. The chain is `[Copy x N]` only, by design:
 
 - **No `UploadOperation`** in the chain: `updateEtag` would overwrite every per-file eTag with the last upload's, corrupting the recorded copies. Uploads happen earlier, in `stage()`.
-- **No `DeleteOperation`** in the chain: a Delete mid-chain is a place where a failure would be Fatal and would block rollback recovery. Temp deletes are done best-effort *after* the commit point (`deleteTempsBestEffort`); an undeleted temp is reaped by the orphan sweep.
+- **No `DeleteOperation`** in the chain: a Delete mid-chain is a place where a failure would be Fatal and would block rollback recovery. There is no post-commit temp delete step either: every `CopyOperation` runs via `mvFile`, which **moves** the object on all three backends (S3/GCS copy+delete-source, ADLS rename) — by the time the chain returns `Right`, every temp this batch staged is already gone. An undeleted temp from a *failed* chain is reaped by the orphan sweep.
+- **A tail `Copy` failure is `Fatal`**, exactly like a mid-chain failure: the data is durable at `.temp-upload/<uuid>` and the lock's `PendingState` still references it, so a restart (`IndexManagerV2.open`) resumes the chain. (A `Delete` in the same tail position stays `NonFatal` — it is hygiene-only, the data already landed via its preceding `Copy`.)
 
-Pinned by [`WriterCommitManagerBatchTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/WriterCommitManagerBatchTest.scala) T4.1 (happy path), T4.2 (the CAS records exactly one Copy per writer, no Upload/Delete), T4.10 (a post-commit temp-delete failure does not fail the batch).
+Pinned by [`WriterCommitManagerBatchTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/WriterCommitManagerBatchTest.scala).
 
 ### Dedup floor
 
-The batch dedup floor for record `(tp, K, N)` is `N <= max(masterW(tp), maxBuffered(tp), legacyFloor(K))`, and every component is monotone within an ownership episode:
+The batch dedup floor for record `(tp, K, N)` is `N <= max(masterW(tp), maxBuffered(tp))` — **routing-independent and deliberately master-only**:
 
 - `masterW(tp)` — the master lock's committed offset (the durable floor).
 - `maxBuffered(tp)` — the highest offset this task has buffered for the TP across every key in the current episode; it covers held-but-not-yet-durable records that the master lock cannot know about. Reset on `close`/`cleanUp`.
-- `legacyFloor(K)` — a per-key floor carried over from a granular deployment during migration (see [Switching modes](#switching-modes)); absent on a fresh batch deployment.
 
-The `maxBuffered` component is what makes in-process re-delivery safe under a key rotation: if key `A` buffers 100..102 and then the SMT rotates to key `C` before Connect re-delivers 100..102, the floor skips them under `C` instead of re-buffering them. Pinned by [`WriterManagerBatchFloorTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/WriterManagerBatchFloorTest.scala) T3.1–T3.3.
+It does **not** consult a per-key granular lock, even during a granular → batch migration (see [Switching modes](#switching-modes)): a replayed record is not guaranteed to route back to the key that originally handled it, and consulting a stale per-key lock for dedup would silently drop a record whose key changed — reintroducing the exact bug batch mode exists to fix. The migration therefore accepts a bounded, one-time duplicate window instead.
+
+The `maxBuffered` component is what makes in-process re-delivery safe under a key rotation: if key `A` buffers 100..102 and then the SMT rotates to key `C` before Connect re-delivers 100..102, the floor skips them under `C` instead of re-buffering them. Pinned by [`WriterManagerBatchFloorTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/WriterManagerBatchFloorTest.scala).
 
 ### `preCommit` in batch mode
 
-`preCommit` returns the same `globalSafeOffset` barrier as granular mode — `min(firstBufferedOffset)` across all active writers, which includes `Staged` writers — but is a **pure read**: it never writes the master lock and never runs granular-lock GC. The durable floor advances *only* through a completed `commitBatch` CAS. Pinned by T4.12 (a staged-but-not-committed batch returns the earliest buffered offset), [`WriterManagerPreCommitTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/WriterManagerPreCommitTest.scala) T5.1, and [`MasterLockFrequencyTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/MasterLockFrequencyTest.scala) T5.2 (`preCommit`/`cleanUp`/`close` never write the master lock).
+`preCommit` returns the same `globalSafeOffset` barrier as granular mode — `min(firstBufferedOffset)` across all active writers, which includes `Staged` writers — but is a **pure read**: it never writes the master lock and never runs granular-lock GC. The durable floor advances *only* through a completed `commitBatch` CAS. Pinned by [`WriterManagerPreCommitTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/WriterManagerPreCommitTest.scala) and [`MasterLockFrequencyTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/writer/MasterLockFrequencyTest.scala) (batch `preCommit`/`cleanUp`/`close` never write the master lock).
 
 ### Master-lock bump at `open()` (both modes)
 
-`open()` on an existing pending-free lock now rewrites it via an eTag CAS, keeping the `committedOffset` and clearing `pendingState`, only changing the eTag and owner. This fences any task holding the previous master eTag at **ownership change** rather than at the new owner's first commit. It applies in both granular and batch modes. Pinned by T6.2 (the bump), T6.3 (an earlier opener is fenced), and T10.5 (a granular zombie's `updateMasterLock` after a batch owner's open is fenced).
+`open()` on an existing pending-free lock now rewrites it via an eTag CAS, keeping the `committedOffset` and clearing `pendingState`, only changing the eTag and owner. This fences any task holding the previous master eTag at **ownership change** rather than at the new owner's first commit. It applies in both granular and batch modes. The bump shares the bounded re-read budget (`MaxOpenCreateRaceAttempts`) with the lost-create-race path: a single lost race re-reads and retries rather than failing `open()`, and only fails fatally once the budget is exhausted. When `open()` instead finds an existing `PendingState`, the bump happens **first** (an owner-only rewrite of the still-pending lock), *then* the chain is driven with the new eTag — otherwise a zombie racing the same chain could win its first step before the fence moved. Pinned by [`IndexManagerV2Test`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/IndexManagerV2Test.scala).
 
 ### Failure handling
 
@@ -723,36 +724,36 @@ Error classification in batch mode drives `handleErrors` exactly as the existing
 
 | Failure | Classification | Writer state after | Recovery | Data outcome |
 |---|---|---|---|---|
-| `stage()` upload transient (`UploadFailedError`) | `NonFatal`, `rollBack = false` | `Uploading`, staging kept | `recommitPending` re-drives the batch; `stage()` is idempotent | no loss (T4.4) |
-| `stage()` `NonExistingFileError` (staging gone) | `Fatal`, `rollBack = true` | `Uploading` until `cleanUp` | restart replays from master | no loss (T2.5) |
-| `complete()` IOException | `Fatal` | — | restart from master | no loss (T2.6) |
-| CAS `update` failure | `Fatal` | `Staged`; temps kept, staging deleted by cleanUp | restart replays from master, temps become sweep candidates | no loss (T4.6) |
-| mid-chain `Copy` failure | `Fatal` | `Staged` | restart resumes from the recorded remaining ops | one object per path (T4.7) |
-| last `Copy` failure | `NonFatal` | `Staged` | next `recommitPending` re-drives the full chain idempotently | one object per path (T4.8) |
-| post-commit temp delete failure | WARN only | `NoWriter` | temp becomes a sweep candidate | no impact (T4.10) |
+| `stage()` upload transient (`UploadFailedError`) | `NonFatal`, `rollBack = false` | `Uploading`, staging kept | `recommitPending` re-drives the batch; `stage()` is idempotent | no loss  |
+| `stage()` `NonExistingFileError` (staging gone) | `Fatal`, `rollBack = true` | `Uploading` until `cleanUp` | restart replays from master | no loss  |
+| `complete()` IOException | `Fatal` | — | restart from master | no loss  |
+| CAS `update` failure | `Fatal` | `Staged`; temps kept, staging deleted by cleanUp | restart replays from master, temps become sweep candidates | no loss  |
+| mid-chain `Copy` failure | `Fatal` | `Staged` | restart resumes from the recorded remaining ops | one object per path  |
+| last `Copy` failure | `Fatal` | `Staged` | restart (`IndexManagerV2.open`) resumes the chain without re-uploading | one object per path  |
+| last `Delete` failure | `NonFatal`, WARN only | `NoWriter` | temp becomes a sweep candidate | no impact (hygiene-only) |
 
 ### Zombie safety
 
 The docs' existing zombie guarantees hold in batch mode, by the master-eTag CAS refreshed at `open()` and after each chain step:
 
-- **Pre-CAS zombie**: a zombie that staged temps but is fenced at the CAS writes nothing to a final path; its temps are orphans bounded by the sweep. Holds — T10.1.
-- **CAS-then-crash**: a zombie that CAS'd and copied some files leaves a resumable `PendingState`; the new owner completes it, and the zombie's resumed `mvFile`s are idempotent no-ops while its next `update` is fenced. One object per path — T10.2/T10.3.
-- **Rollback (batch → granular)**: the granular owner's open fences the batch zombie's CAS — T10.4.
-- **Master-level fence**: a granular zombie is fenced at the batch owner's open — T10.5.
-- **Orphan temps**: up to N temps per fenced or rebalanced batch, bounded by the sweep (a *different mechanism* from granular's per-key GC) — T10.6, T9.4.
+- **Pre-CAS zombie**: a zombie that staged temps but is fenced at the CAS writes nothing to a final path; its temps are orphans bounded by the sweep.
+- **CAS-then-crash**: a zombie that CAS'd and copied some files leaves a resumable `PendingState`; the new owner completes it, and the zombie's resumed `mvFile`s are idempotent no-ops while its next `update` is fenced. One object per path, no duplication.
+- **Rollback (batch → granular)**: the granular owner's open fences the batch zombie's CAS.
+- **Master-level fence**: the ownership bump at `open()` is mode-independent, so a granular zombie is fenced at a batch owner's open the same way a batch zombie is fenced at a granular owner's open — pinned at the `IndexManagerV2` level by the fencing tests.
+- **Orphan temps**: up to N temps per fenced or rebalanced batch, bounded by the at-`open()` sweep and, if `gc.sweep.enabled`, an equivalent periodic sweep.
 
 ### Switching modes
 
 Switching modes requires the connector to be **stopped first**: stop the connector, confirm every task is STOPPED, change `commit.mode`, start. This bounds mixed-mode zombies to hung JVMs — the same residual class the current design already carries.
 
-- **Granular → Batch.** The new owner bumps the master lock (fencing anyone holding the old master eTag), snapshots and eTag-bumps every legacy granular lock (fencing granular zombies and resolving their in-flight chains), and seeks to the master `committedOffset`. The dedup floor becomes `max(masterW, maxBuffered, legacyFloor(K))`. The legacy locks are **purged only once the batch watermark `P >= maxLegacy`** — a legacy lock can be ahead of everything the new owner has delivered (its records were all skipped and never raised `P`), so purging early would let those records be re-written. The earlier assumption "watermark ≥ every legacy lock after the first batch commit" was therefore false. Pinned by [`CommitModeSwitchTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/CommitModeSwitchTest.scala) T7.1–T7.12.
-- **Batch → Granular (rollback).** Old code seeks to the master `W`. Nothing above `W` is at a final path; everything at or below is. A pending `[Copy x N]` chain is completed by the existing `processPendingOperations` unchanged (a Copy returns no eTag so `updateEtag` is a no-op; the last Copy sets `committedOffset = P`). With the Cycle-8 `max` hardening (`createWriter` floors at `max(granularOffset, masterOffset)`), a stale legacy lock `L < W` cannot re-write record `W`. Pinned by T8.3–T8.5.
-
+- **Granular → Batch.** The new owner bumps the master lock (fencing anyone holding the old master eTag), then fences (eTag-bumps or resolves any in-flight chain on) every legacy granular lock left by the previous deployment. Because the dedup floor is master-only (see [Dedup floor](#dedup-floor)), fencing is decoupled from deduplication: once every legacy lock on the TP has been fenced, they are **purged immediately** — nothing waits for a batch watermark. A LIST failure, or a single lock that cannot be fenced (e.g. still racing a live granular zombie), is logged and retried on the next `open()`; it does not fail `open()`, because correctness no longer depends on it. **Trade-off**: every record in `(masterAtSwitch, maxLegacyLockAtSwitch]` is re-written (a bounded, one-time duplicate), never lost, regardless of which key it now routes to. Operationally, flushing and idling the connector before stopping it (so the granular master lock reaches `max(every key's lock)` before the switch) closes this window to zero. Pinned by [`CommitModeSwitchTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/CommitModeSwitchTest.scala).
+- **Batch → Granular (rollback).** Old code seeks to the master `W`. Nothing above `W` is at a final path; everything at or below is. A pending `[Copy x N]` chain is completed by the existing `processPendingOperations` unchanged (a Copy returns no eTag so `updateEtag` is a no-op; the last Copy sets `committedOffset = P`). With the `createWriter` `max` hardening (floors at `max(granularOffset, masterOffset)`), a stale legacy lock `L < W` cannot re-write record `W`. Pinned by [`CommitModeSwitchTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/CommitModeSwitchTest.scala).
 ### Known residuals
 
 Batch mode does **not** fix, and explicitly documents, the following (see also [What we explicitly do not test](datalake-sink-test-coverage.md)):
 
 - **Misplacement** under wall-clock keys for batches that never reached the CAS: records buffered under one wall-clock key and replayed under another still land in the later bucket. Batch mode removes *loss*, not *misplacement*.
+- **Migration duplicate window**: every record in `(masterAtSwitch, maxLegacyLockAtSwitch]` is re-written once during a granular → batch migration (see [Switching modes](#switching-modes)). Avoidable operationally by flushing and idling the connector before the switch.
 - **Non-atomic visibility** of a batch's N files: the N copies are applied sequentially, so a reader can observe a partially-visible batch between the first and last copy.
 - **Up to N orphan temps** per fenced or rebalanced batch, bounded by the orphan sweep's age threshold (`gc.sweep.min.age.seconds`).
 - **Granular-mode zombie creating a brand-new key** after the new owner's snapshot commits under that key unfenced (mitigated by the stop-first switch procedure).
@@ -961,10 +962,10 @@ When the connector is deployed fresh against an Azure Data Lake Storage Gen2 con
 
 In batch mode the rows above still hold, but the mechanism differs on four points (see [Partition-batch commit mode](#partition-batch-commit-mode-commitmodebatch)):
 
-- **Writer accumulation / commit unit.** All non-idle writers on a Kafka partition commit together through one master-lock CAS, not per-key. Deduplication is a topic-partition-level floor, not a per-key granular lock — so a crash/replay under a *different* key is deduplicated correctly (no silent loss). Pinned by `BatchCommitScenarioTest` T0.4/T0.5.
-- **GC.** Granular-lock GC and the granular-lock sweep do not run (no granular locks are created). A separate `.temp-upload` orphan sweep reaps aged batch temps at `open()`. Pinned by `BatchTempSweepTest` T9.2–T9.6.
-- **Migration.** A granular → batch switch snapshots, resolves and eTag-bumps the legacy locks at `open()`, and purges them only once the batch watermark reaches `maxLegacy`. Pinned by `CommitModeSwitchTest` T7.1–T7.12.
-- **Rollback.** A batch → granular switch is completed by the existing `processPendingOperations` (the pending chain is `[Copy x N]`), and the Cycle-8 `max` hardening prevents a stale legacy lock from re-writing a committed record. Pinned by `CommitModeSwitchTest` T8.3–T8.5.
+- **Writer accumulation / commit unit.** All non-idle writers on a Kafka partition commit together through one master-lock CAS, not per-key. Deduplication is a topic-partition-level floor, not a per-key granular lock — so a crash/replay under a *different* key is deduplicated correctly (no silent loss). Pinned by `BatchCommitScenarioTest`.
+- **GC.** Granular-lock GC and the granular-lock sweep do not run (no granular locks are created). A separate `.temp-upload` orphan sweep reaps aged batch temps at `open()` and, if `gc.sweep.enabled`, on a periodic schedule mirroring the granular sweep. Pinned by [`BatchTempSweepTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/BatchTempSweepTest.scala).
+- **Migration.** A granular → batch switch fences (eTag-bumps or resolves) every legacy lock at `open()` and purges them immediately once fenced — deduplication is master-only and never consults them, so nothing is gated on a batch watermark. Pinned by [`CommitModeSwitchTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/CommitModeSwitchTest.scala).
+- **Rollback.** A batch → granular switch is completed by the existing `processPendingOperations` (the pending chain is `[Copy x N]`), and the `createWriter` `max` hardening prevents a stale legacy lock from re-writing a committed record. Pinned by [`CommitModeSwitchTest`](../kafka-connect-cloud-common/src/test/scala/io/lenses/streamreactor/connect/cloud/common/sink/seek/CommitModeSwitchTest.scala).
 
 ---
 

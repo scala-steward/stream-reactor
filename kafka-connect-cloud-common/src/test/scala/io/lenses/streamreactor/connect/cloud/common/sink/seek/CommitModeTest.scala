@@ -19,9 +19,14 @@ import org.scalatest.EitherValues
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+/**
+ * `CommitMode.fromString` in isolation. `IndexSettingsTest` covers the full integration
+ * (ConfigDef validation, now case-insensitive via `CaseInsensitiveValidString`, so this
+ * parser's case-insensitivity is reachable from config, not dead code).
+ */
 class CommitModeTest extends AnyFunSuite with Matchers with EitherValues {
 
-  test("[B] T1.1 CommitMode.fromString accepts granular and batch case-insensitively") {
+  test("[B] CommitMode.fromString accepts granular and batch case-insensitively") {
     Seq("granular", "GRANULAR", "Granular", " granular ").foreach { s =>
       CommitMode.fromString(s).value shouldBe CommitMode.Granular
     }
@@ -30,14 +35,10 @@ class CommitModeTest extends AnyFunSuite with Matchers with EitherValues {
     }
   }
 
-  test("[B] T1.1 CommitMode.fromString rejects any other value with a message naming the valid values") {
+  test("[B] CommitMode.fromString rejects any other value with a message naming the valid values") {
     val err = CommitMode.fromString("bogus").left.value
     err should include("bogus")
     err should include("granular")
     err should include("batch")
-  }
-
-  test("[B] T1.1 the default commit mode is granular") {
-    CommitMode.Default shouldBe CommitMode.Granular
   }
 }

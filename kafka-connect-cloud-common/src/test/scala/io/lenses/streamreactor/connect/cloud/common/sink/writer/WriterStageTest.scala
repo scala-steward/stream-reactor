@@ -120,7 +120,7 @@ class WriterStageTest
   ): Writer[FakeFileMetadata] = {
     val idx = mock[IndexManager]
     when(idx.indexingEnabled).thenReturn(true)
-    // Echo index updates so a granular Writer.commit chain (T9.1) can run to completion.
+    // Echo index updates so a granular Writer.commit chain can run to completion.
     when(idx.updateForPartitionKey(any[TopicPartition], any[String], any[Option[Offset]], any[Option[PendingState]]))
       .thenAnswer((_: TopicPartition, _: String, co: Option[Offset], _: Option[PendingState]) => co.asRight[SinkError])
     when(idx.update(any[TopicPartition], any[Option[Offset]], any[Option[PendingState]]))
@@ -173,9 +173,7 @@ class WriterStageTest
       recordCount             = 7L,
     )
 
-  // ── T2.1 ────────────────────────────────────────────────────────────────────────────
-
-  test("[ND] T2.1 stage on a Writing writer completes the format writer once and uploads exactly one temp object") {
+  test("[ND] stage on a Writing writer completes the format writer once and uploads exactly one temp object") {
     val storage = new CountingStorage
     val file    = stagingFile()
     val fw      = mock[FormatWriter]
@@ -198,13 +196,11 @@ class WriterStageTest
     writer.currentWriteState shouldBe staged
   }
 
-  test("[ND] T2.1 the staged CopyOperation and DeleteOperation are built from the staged fields") {
+  test("[ND] the staged CopyOperation is built from the staged fields") {
     val storage = new CountingStorage
     val file    = stagingFile()
     val writer  = buildWriter(storage, file)
-    writer.forceWriteState(writingState(file, mock[FormatWriter]))
-    // The mock above has no stubbing for complete(); use one that succeeds.
-    val fw = mock[FormatWriter]
+    val fw      = mock[FormatWriter]
     when(fw.complete()).thenReturn(().asRight)
     writer.forceWriteState(writingState(file, fw))
 
@@ -214,14 +210,9 @@ class WriterStageTest
     staged.copyOp.source shouldBe staged.tempPath
     staged.copyOp.destination shouldBe finalPath
     staged.copyOp.eTag shouldBe staged.tempETag
-    staged.deleteOp.bucket shouldBe bucket
-    staged.deleteOp.source shouldBe staged.tempPath
-    staged.deleteOp.eTag shouldBe staged.tempETag
   }
 
-  // ── T2.2 ────────────────────────────────────────────────────────────────────────────
-
-  test("[ND] T2.2 stage on an already-Staged writer is idempotent and performs no storage call") {
+  test("[ND] stage on an already-Staged writer is idempotent and performs no storage call") {
     val storage = new CountingStorage
     val file    = stagingFile()
     val fw      = mock[FormatWriter]
@@ -239,9 +230,7 @@ class WriterStageTest
     storage.keysUnder(bucket, s".temp-upload/") should have size 1
   }
 
-  // ── T2.3 ────────────────────────────────────────────────────────────────────────────
-
-  test("[NL] T2.3 stage on an Uploading writer (a previously failed upload) uploads and keeps the local file") {
+  test("[NL] stage on an Uploading writer (a previously failed upload) uploads and keeps the local file") {
     val storage = new CountingStorage
     val file    = stagingFile()
     val writer  = buildWriter(storage, file)
@@ -255,9 +244,7 @@ class WriterStageTest
     file.exists() shouldBe true
   }
 
-  // ── T2.4 ────────────────────────────────────────────────────────────────────────────
-
-  test("[NL] T2.4 a transient stage upload failure is NonFatal, leaves the writer Uploading and writes nothing") {
+  test("[NL] a transient stage upload failure is NonFatal, leaves the writer Uploading and writes nothing") {
     val storage = new FailingUploadStorage(f => UploadFailedError(new RuntimeException("connection reset"), f))
     val file    = stagingFile()
     val writer  = buildWriter(storage, file)
@@ -279,9 +266,7 @@ class WriterStageTest
     healthy.keysUnder(bucket, tempPrefix()) should have size 1
   }
 
-  // ── T2.5 ────────────────────────────────────────────────────────────────────────────
-
-  test("[NL] T2.5 stage with a missing staging file is Fatal, rolls back and names the staging path") {
+  test("[NL] stage with a missing staging file is Fatal, rolls back and names the staging path") {
     val storage = new FailingUploadStorage(f => NonExistingFileError(f))
     val missing = new File("/nonexistent/stage-test/staging.tmp")
     missing.exists() shouldBe false
@@ -301,9 +286,7 @@ class WriterStageTest
     writer.currentWriteState shouldBe a[NoWriter]
   }
 
-  // ── T2.6 ────────────────────────────────────────────────────────────────────────────
-
-  test("[NL] T2.6 stage on Writing escalates an IOException-caused complete() failure to Fatal") {
+  test("[NL] stage on Writing escalates an IOException-caused complete() failure to Fatal") {
     val storage = new CountingStorage
     val file    = stagingFile()
     val fw      = mock[FormatWriter]
@@ -321,7 +304,7 @@ class WriterStageTest
     storage.keysUnder(bucket, ".temp-upload/") shouldBe empty
   }
 
-  test("[NL] T2.6 stage on Writing keeps a non-IOException complete() failure NonFatal") {
+  test("[NL] stage on Writing keeps a non-IOException complete() failure NonFatal") {
     val storage = new CountingStorage
     val file    = stagingFile()
     val fw      = mock[FormatWriter]
@@ -338,9 +321,7 @@ class WriterStageTest
     storage.uploads.get() shouldBe 0
   }
 
-  // ── T2.7 ────────────────────────────────────────────────────────────────────────────
-
-  test("[B] T2.7 stage on a NoWriter writer returns Right(None) and performs no storage call") {
+  test("[B] stage on a NoWriter writer returns Right(None) and performs no storage call") {
     val storage = new CountingStorage
     val writer  = buildWriter(storage, stagingFile())
 
@@ -350,9 +331,7 @@ class WriterStageTest
     storage.snapshot(bucket) shouldBe empty
   }
 
-  // ── T2.8 ────────────────────────────────────────────────────────────────────────────
-
-  test("[NL] T2.8 finalizeCommit moves the writer to NoWriter at the batch offset, deletes the local file") {
+  test("[NL] finalizeCommit moves the writer to NoWriter at the batch offset, deletes the local file") {
     val storage = new CountingStorage
     val file    = stagingFile()
     val metrics = new CloudSinkMetrics()
@@ -371,7 +350,7 @@ class WriterStageTest
     storage.keysUnder(bucket, tempPrefix()) should have size 1
   }
 
-  test("[NL] T2.8 finalizeCommit is monotone: a lower offset never lowers the committed offset") {
+  test("[NL] finalizeCommit is monotone: a lower offset never lowers the committed offset") {
     val storage = new CountingStorage
     val file    = stagingFile()
     val writer  = buildWriter(storage, file)
@@ -387,9 +366,7 @@ class WriterStageTest
     writer.getCommittedOffset shouldBe Some(Offset(300))
   }
 
-  // ── T2.9 ────────────────────────────────────────────────────────────────────────────
-
-  test("[NL] T2.9 a Staged writer is a first-buffered-offset barrier, has a pending upload, is not idle or flushable") {
+  test("[NL] a Staged writer is a first-buffered-offset barrier, has a pending upload, is not idle or flushable") {
     val storage = new CountingStorage
     val file    = stagingFile()
     val writer  = buildWriter(storage, file)
@@ -402,7 +379,7 @@ class WriterStageTest
     writer.shouldFlush shouldBe false
   }
 
-  test("[NL] T2.9 close() on a Staged writer deletes the local file and leaves the temp object for the sweep") {
+  test("[NL] close() on a Staged writer deletes the local file and leaves the temp object for the sweep") {
     val storage = new CountingStorage
     val file    = stagingFile()
     val writer  = buildWriter(storage, file)
@@ -416,7 +393,7 @@ class WriterStageTest
     storage.snapshot(bucket).keys should contain(staged.tempPath)
   }
 
-  test("[B] T9.1 batch stage temps are connector-scoped; granular commit temps are not") {
+  test("[B] batch stage temps are connector-scoped; granular commit temps are not") {
     // Batch: stage() uploads under .temp-upload/<connector>/<topic>/<partition>/<batchUuid>/.
     val batchStorage = new PathCapturingStorage
     val batchFile    = stagingFile()
@@ -438,7 +415,7 @@ class WriterStageTest
     granularPath should not startWith s".temp-upload/${connectorTaskId.name}/"
   }
 
-  test("[NL] T2.9 commit on a Staged writer is Fatal so a routing bug cannot mix the two protocols") {
+  test("[NL] commit on a Staged writer is Fatal so a routing bug cannot mix the two protocols") {
     val storage = new CountingStorage
     val file    = stagingFile()
     val writer  = buildWriter(storage, file)

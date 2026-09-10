@@ -350,9 +350,10 @@ class WriterManager[SM <: FileMetadata](
       shouldSkip <- commitMode match {
         case CommitMode.Granular => writer.shouldSkip(topicPartitionOffset.offset).asRight[SinkError]
         case CommitMode.Batch    =>
-          // Routing-independent floor: max(masterW, maxBuffered). A Left here is the same
-          // unswallowable NonFatal that a granular-lock read failure produces today.
-          indexManager.batchDedupFloor(topicPartitionOffset.toTopicPartition, writer.partitionKeyOpt).map {
+          // Routing-independent floor: max(masterW, maxBuffered). Deliberately ignores which key
+          // the record routed to (see `IndexManager.batchDedupFloor`) -- a replayed record is not
+          // guaranteed to route back to the key that originally handled it.
+          indexManager.batchDedupFloor(topicPartitionOffset.toTopicPartition).map {
             imFloor =>
               val floor =
                 (imFloor.map(_.value).toList ++ maxBufferedOffset.get(
@@ -469,11 +470,11 @@ class WriterManager[SM <: FileMetadata](
             // produces None.orElse(None) = None — no false skip of offset 0.
             indexManager.getSeekedOffsetForPartitionKey(topicPartition, pk).map {
               granularOffset =>
-                // max, not orElse: a granular lock K below the master floor M would otherwise let a
-                // replayed record in (M, K.lock]... wrong direction — K.lock < M means K has no
-                // records in (K.lock, M], because any buffered one would have pinned globalSafeOffset
-                // <= firstBuffered_K <= M. So max(K.lock, M) never skips an uncommitted record and
-                // fixes the duplication when a lock is GC'd below the master floor. See Cycle 8.
+                // max, not orElse: for a granular lock K below the master floor M, K.lock < M
+                // means K has no records in (K.lock, M] (any buffered one would have pinned
+                // globalSafeOffset <= firstBuffered_K <= M). So max(K.lock, M) never skips an
+                // uncommitted record and fixes the duplication when a lock is GC'd below the
+                // master floor.
                 val master = indexManager.getSeekedOffsetForTopicPartition(topicPartition)
                 (granularOffset.toList ++ master.toList) match {
                   case Nil  => None

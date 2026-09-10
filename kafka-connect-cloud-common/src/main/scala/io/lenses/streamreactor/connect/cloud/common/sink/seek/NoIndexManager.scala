@@ -77,10 +77,8 @@ class NoIndexManager extends IndexManager {
     committedOffset.asRight
 
   /** Indexing is disabled, so there is no floor and nothing is ever skipped. */
-  override def batchDedupFloor(
-    topicPartition: TopicPartition,
-    partitionKey:   Option[String],
-  ): Either[SinkError, Option[Offset]] = Option.empty[Offset].asRight
+  override def batchDedupFloor(topicPartition: TopicPartition): Either[SinkError, Option[Offset]] =
+    Option.empty[Offset].asRight
 
   override def afterBatchCommit(topicPartition: TopicPartition, committed: Offset): Unit = ()
 

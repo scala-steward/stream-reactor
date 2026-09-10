@@ -41,6 +41,8 @@ import io.lenses.streamreactor.connect.cloud.common.sink.naming.KeyNamer
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
 import io.lenses.streamreactor.connect.cloud.common.sink.writer.WriterManager
 import io.lenses.streamreactor.connect.cloud.common.storage.FileCreateError
+import io.lenses.streamreactor.connect.cloud.common.storage.FileListError
+import io.lenses.streamreactor.connect.cloud.common.storage.ListOfMetadataResponse
 import io.lenses.streamreactor.connect.cloud.common.storage.UploadError
 import io.lenses.streamreactor.connect.cloud.common.testing.FakeFileMetadata
 import io.lenses.streamreactor.connect.cloud.common.testing.InMemoryStorageInterface
@@ -60,10 +62,14 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.immutable
 
 /**
- * Granular -> batch migration (§2.6). A batch-mode task opening over a granular-mode layout must:
+ * Granular -> batch migration. A batch-mode task opening over a granular-mode layout must:
  * snapshot and eTag-bump every legacy granular lock (fencing granular zombies and resolving their
- * in-flight chains), raise the per-key dedup floor by those locks, and purge them only once the
- * batch watermark has caught up to every one of them.
+ * in-flight chains), then purge them immediately once every lock on the TP has been resolved --
+ * nothing is gated on a batch watermark, because `batchDedupFloor` is master-only and never
+ * consults these locks for deduplication (see `IndexManagerV2.batchDedupFloor`). The accepted
+ * trade-off is a bounded, one-time duplicate window: any record in
+ * `(masterAtSwitch, maxLegacyLockAtSwitch]` is re-written (never lost), even one that would have
+ * been skipped by the old per-key floor.
  */
 class CommitModeSwitchTest
     extends AnyFunSuiteLike
@@ -90,7 +96,6 @@ class CommitModeSwitchTest
   private def masterPath = IndexManagerV2.generateLockFilePath(connectorTaskId, tp, directoryName)
   private def granularPath(key: String) =
     IndexManagerV2.generateGranularLockFilePath(connectorTaskId, tp, key, directoryName)
-  private def sweepMarkerPath = IndexManagerV2.generateSweepMarkerPath(connectorTaskId, tp, directoryName)
 
   private var storage: InMemoryStorageInterface = _
 
@@ -103,9 +108,7 @@ class CommitModeSwitchTest
   private def writeIndex(path: String, idx: IndexFile): String =
     storage.writeBlobToFile(bucket, path, NoOverwriteExistingObject(idx)).value.eTag
 
-  private def eTagOf(path:   String): String = storage.snapshot(bucket)(path).eTag
-  private def offsetOf(path: String): Option[Offset] =
-    storage.getBlobAsObject[IndexFile](bucket, path).value.wrappedObject.committedOffset
+  private def eTagOf(path: String): String = storage.snapshot(bucket)(path).eTag
 
   /** Seeds a granular-mode master lock at committed offset `m`. */
   private def seedMaster(m: Long): Unit = {
@@ -198,19 +201,12 @@ class CommitModeSwitchTest
       offset    = Offset(offset),
     )
 
-  // ── T7.1 ────────────────────────────────────────────────────────────────────────────
-
   test(
-    "[Z] T7.1 the first batch open GETs and eTag-bumps every legacy lock, leaving marker and tmp orphans untouched",
+    "[Z] the first batch open eTag-bumps every legacy lock then purges them, leaving tmp orphans untouched",
   ) {
     seedMaster(99)
-    val e1 = writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(120)), None))
-    val e2 = writeIndex(granularPath(keyOf("B")), IndexFile("prev", Some(Offset(140)), None))
-    val marker = storage.writeBlobToFile(
-      bucket,
-      sweepMarkerPath,
-      NoOverwriteExistingObject(IndexManagerV2.SweepMarker(1L, 2L)),
-    )(IndexManagerV2.SweepMarker.sweepMarkerEncoder).value.eTag
+    writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(120)), None))
+    writeIndex(granularPath(keyOf("B")), IndexFile("prev", Some(Offset(140)), None))
     val tmpPath = granularPath(keyOf("A")) + ".tmp.0000abcd"
     val _       = writeIndex(tmpPath, IndexFile("prev", Some(Offset(999)), None))
     val tmpETag = eTagOf(tmpPath)
@@ -219,44 +215,46 @@ class CommitModeSwitchTest
     try {
       im.open(Set(tp)).value
 
-      eTagOf(granularPath(keyOf("A"))) should not be e1
-      eTagOf(granularPath(keyOf("B"))) should not be e2
-      offsetOf(granularPath(keyOf("A"))) shouldBe Some(Offset(120))
-      offsetOf(granularPath(keyOf("B"))) shouldBe Some(Offset(140))
-      // The sweep marker and the .lock.tmp orphan are not legacy locks; they are left alone.
-      eTagOf(sweepMarkerPath) shouldBe marker
+      // Fenced (harmless if the bump immediately precedes the delete) AND purged: nothing gates
+      // the delete on a batch watermark any more, because `batchDedupFloor` never reads these
+      // locks (see the class doc above).
+      im.legacyPurged(tp) shouldBe true
+      storage.snapshot(bucket).keys should not contain granularPath(keyOf("A"))
+      storage.snapshot(bucket).keys should not contain granularPath(keyOf("B"))
+      // The `.lock.tmp` orphan is not a legacy lock; it is left alone (only the sweep, or an
+      // operator, cleans it up).
       eTagOf(tmpPath) shouldBe tmpETag
-      im.legacyFloor(tp, keyOf("A")) shouldBe Some(Some(Offset(120)))
-      im.legacyFloor(tp, keyOf("B")) shouldBe Some(Some(Offset(140)))
     } finally im.close()
   }
 
-  // ── T7.2 ────────────────────────────────────────────────────────────────────────────
-
-  test("[ND] T7.2 a legacy lock ahead of the master floor skips replayed records up to it, then writes the next") {
+  test(
+    "[NL] a legacy lock ahead of the master floor does NOT skip replayed records: they are re-written, never lost",
+  ) {
     seedMaster(99)
     writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(150)), None))
 
     val im = buildIndexManager(CommitMode.Batch)
     im.open(Set(tp)).value
+    im.legacyPurged(tp) shouldBe true
     val metrics = new CloudSinkMetrics()
     val wm      = buildWriterManager(im, metrics, pv("A"), new TogglePolicy().policy)
 
+    // The master-only floor (99) does not know about A's old lock (150): every one of these
+    // records is re-written, not skipped. This is the accepted, bounded duplicate window that
+    // replaces the old per-key floor's silent skip -- see the class doc.
     (100L to 150L).foreach(o => wm.write(tp.withOffset(Offset(o)), message(o)).value)
-    metrics.getDuplicateRecordsSkippedTotal shouldBe 51L
-    metrics.getRecordsWrittenTotal shouldBe 0L
+    metrics.getRecordsWrittenTotal shouldBe 51L
+    metrics.getDuplicateRecordsSkippedTotal shouldBe 0L
 
     wm.write(tp.withOffset(Offset(151)), message(151)).value
-    metrics.getRecordsWrittenTotal shouldBe 1L
+    metrics.getRecordsWrittenTotal shouldBe 52L
 
     wm.close()
     im.close()
   }
 
-  // ── T7.3 ────────────────────────────────────────────────────────────────────────────
-
   test(
-    "[ND] T7.3 a legacy lock with a pending Copy/Delete chain is resolved at open; the floor is its pending offset",
+    "[NL] a legacy lock with a pending Copy/Delete chain is resolved and purged at open; replay re-writes, not skips",
   ) {
     seedMaster(99)
     val temp   = s".temp-upload/legacy/${tp.topic}/0/uuid/data/orders/0/legacy-A.json"
@@ -284,21 +282,23 @@ class CommitModeSwitchTest
     val im = buildIndexManager(CommitMode.Batch)
     im.open(Set(tp)).value
 
+    // The chain resolved (the Copy landed the data) and the now-clean lock was purged.
     storage.keysUnder(bucket, "data/orders/0/legacy-A") should have size 1
-    im.legacyFloor(tp, keyOf("A")) shouldBe Some(Some(Offset(120)))
+    im.legacyPurged(tp) shouldBe true
 
     val metrics = new CloudSinkMetrics()
     val wm      = buildWriterManager(im, metrics, pv("A"), new TogglePolicy().policy)
+    // Master floor is still 99: every one of these was already durably written by the resolved
+    // chain, but the master-only floor re-writes them anyway (the accepted duplicate window).
     (100L to 120L).foreach(o => wm.write(tp.withOffset(Offset(o)), message(o)).value)
-    metrics.getDuplicateRecordsSkippedTotal shouldBe 21L
+    metrics.getRecordsWrittenTotal shouldBe 21L
+    metrics.getDuplicateRecordsSkippedTotal shouldBe 0L
     wm.close()
     im.close()
   }
 
-  // ── T7.4 ────────────────────────────────────────────────────────────────────────────
-
   test(
-    "[NL] T7.4 a legacy pending chain whose upload never happened is dead-worker cleared; the floor is its committed offset",
+    "[NL] a legacy pending chain whose upload never happened is dead-worker cleared and purged; replay re-writes",
   ) {
     seedMaster(99)
     val missing = new File("/nonexistent/switch-test/legacy-staging.tmp")
@@ -324,30 +324,28 @@ class CommitModeSwitchTest
     val im = buildIndexManager(CommitMode.Batch)
     im.open(Set(tp)).value
 
-    // Dead-worker recovery: pending state cleared, floor stays at the recorded committed offset.
-    im.legacyFloor(tp, keyOf("A")) shouldBe Some(Some(Offset(110)))
+    // Dead-worker recovery: pending state cleared, lock fenced and then purged.
+    im.legacyPurged(tp) shouldBe true
     storage.keysUnder(bucket, "data/orders/0/legacy-A") shouldBe empty
 
     val metrics = new CloudSinkMetrics()
     val wm      = buildWriterManager(im, metrics, pv("A"), new TogglePolicy().policy)
-    (100L to 110L).foreach(o => wm.write(tp.withOffset(Offset(o)), message(o)).value)
-    metrics.getDuplicateRecordsSkippedTotal shouldBe 11L
-    wm.write(tp.withOffset(Offset(111)), message(111)).value
-    metrics.getRecordsWrittenTotal shouldBe 1L
+    // Master floor is 99: nothing here was ever durably written (the upload never happened), so
+    // every record is correctly written -- not a duplicate.
+    (100L to 111L).foreach(o => wm.write(tp.withOffset(Offset(o)), message(o)).value)
+    metrics.getRecordsWrittenTotal shouldBe 12L
+    metrics.getDuplicateRecordsSkippedTotal shouldBe 0L
     wm.close()
     im.close()
   }
-
-  // ── T7.5 ────────────────────────────────────────────────────────────────────────────
 
   /**
    * A granular zombie writes the lock between the new owner's read and its eTag bump, so the bump
    * 412s. The owner re-reads, sees the zombie's higher offset, and uses it. Exhausting the bounded
    * re-reads is fatal.
    *
-   * Deviation from the plan's literal CorruptETag mechanic: the same invariant [Z] is exercised
-   * more directly by mutating the stored lock (a fresh eTag at a higher offset) immediately before
-   * each bump write, which is exactly the race the re-read loop guards against.
+   * The invariant [Z] is exercised by mutating the stored lock (a fresh eTag at a higher offset)
+   * immediately before each bump write, which is exactly the race the re-read loop guards against.
    */
   private final class RaceOnBumpStorage(lockPath: String, raceOffset: Long, raceTimes: Int)
       extends InMemoryStorageInterface {
@@ -375,8 +373,11 @@ class CommitModeSwitchTest
       }
   }
 
-  test("[Z] T7.5 a bump that loses one race re-reads and adopts the racer's offset; exhausting the budget is fatal") {
-    // One race: re-read sees offset 150 and uses it.
+  test(
+    "[Z] a bump that loses one race re-reads and adopts the racer's lock; exhausting the budget is non-fatal " +
+      "to open() but leaves that lock unfenced-this-cycle",
+  ) {
+    // One race: re-read succeeds on retry, the lock is fenced and purged normally.
     locally {
       val st = new RaceOnBumpStorage(granularPath(keyOf("A")), raceOffset = 150, raceTimes = 1)
       storage = st
@@ -384,17 +385,15 @@ class CommitModeSwitchTest
       writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(140)), None))
       val im = buildIndexManager(CommitMode.Batch, st)
       im.open(Set(tp)).value
-      im.legacyFloor(tp, keyOf("A")) shouldBe Some(Some(Offset(150)))
-      // Record 140 for A is now below the adopted floor and is skipped.
-      val metrics = new CloudSinkMetrics()
-      val wm      = buildWriterManager(im, metrics, pv("A"), new TogglePolicy().policy, st)
-      wm.write(tp.withOffset(Offset(140)), message(140)).value
-      metrics.getDuplicateRecordsSkippedTotal shouldBe 1L
-      wm.close()
+      im.legacyPurged(tp) shouldBe true
+      st.snapshot(bucket).keys should not contain granularPath(keyOf("A"))
       im.close()
     }
 
-    // Never wins: three consecutive mismatches exhaust MaxLegacyBumpAttempts and fail open().
+    // Never wins: three consecutive mismatches exhaust MaxLegacyBumpAttempts. This is now
+    // NON-FATAL to open(): the TP simply is not purged this cycle, and the next open()
+    // retries. Correctness does not depend on it, because the master-only floor never reads this
+    // lock either way.
     locally {
       val st = new RaceOnBumpStorage(granularPath(keyOf("A")),
                                      raceOffset = 150,
@@ -404,96 +403,29 @@ class CommitModeSwitchTest
       seedMaster(99)
       writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(140)), None))
       val im = buildIndexManager(CommitMode.Batch, st)
-      im.open(Set(tp)).left.value shouldBe a[FatalCloudSinkError]
+      im.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(99)))
+      im.legacyPurged(tp) shouldBe false
+      st.snapshot(bucket).keys should contain(granularPath(keyOf("A")))
       im.close()
     }
   }
 
-  // ── T7.6 ────────────────────────────────────────────────────────────────────────────
-
-  test("[ND] T7.6 the legacy floor survives idle-writer eviction and is read from the TP map with no extra GET") {
-    seedMaster(99)
-    writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(150)), None))
-
-    val gets = new AtomicInteger(0)
-    val counting = new InMemoryStorageInterface() {
-      override def getBlobAsObject[O](
-        b: String,
-        p: String,
-      )(
-        implicit
-        d: io.circe.Decoder[O],
-      ): Either[io.lenses.streamreactor.connect.cloud.common.storage.FileLoadError, ObjectWithETag[O]] = {
-        if (p == granularPath(keyOf("A"))) gets.incrementAndGet()
-        super.getBlobAsObject(b, p)
-      }
-    }
-    // Re-seed on the counting storage.
-    storage = counting
-    seedMaster(99)
-    writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(150)), None))
-
-    val im = buildIndexManager(CommitMode.Batch, counting)
-    im.open(Set(tp)).value
-    val getsAfterOpen = gets.get()
-
-    val metrics = new CloudSinkMetrics()
-    val wm      = buildWriterManager(im, metrics, pv("A"), new TogglePolicy().policy, counting)
-    // Create a writer for A, then evict it by creating one for B (idle A is evicted on B's create).
-    wm.write(tp.withOffset(Offset(151)), message(151)).value
-    val wmB = buildWriterManager(im, metrics, pv("B"), new TogglePolicy().policy, counting)
-    wmB.write(tp.withOffset(Offset(200)), message(200)).value
-
-    // Record 140 for A is skipped from the TP-level floor without another GET of A's lock.
-    val wmA2   = buildWriterManager(im, metrics, pv("A"), new TogglePolicy().policy, counting)
-    val before = gets.get()
-    wmA2.write(tp.withOffset(Offset(140)), message(140)).value
-    gets.get() shouldBe before
-    getsAfterOpen should be <= 1
-
-    wm.close(); wmB.close(); wmA2.close(); im.close()
-  }
-
-  // ── T7.7 ────────────────────────────────────────────────────────────────────────────
-
-  test("[ND] T7.7 a legacy lock ahead of the batch watermark is NOT purged; its floor still skips records") {
+  test("[B] a legacy lock is purged immediately at open, independent of any batch commit or watermark") {
     seedMaster(99)
     writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(150)), None))
 
     val im = buildIndexManager(CommitMode.Batch)
+    // Purge happens as part of open() itself -- no writer, no commit, no watermark involved.
     im.open(Set(tp)).value
-    val metrics = new CloudSinkMetrics()
-    val policy  = new TogglePolicy()
-    val wm      = buildWriterManager(im, metrics, pv("B"), policy.policy)
 
-    // Deliver 100..125 under key B (A's records are all skipped by A's legacy floor; B buffers).
-    (100L to 125L).foreach(o => wm.write(tp.withOffset(Offset(o)), message(o)).value)
-    policy.flush.set(true)
-    wm.commitFlushableWriters().value
-
-    // maxLegacy (150) > P (125): the legacy lock survives and the TP is not purged.
-    storage.snapshot(bucket).keys should contain(granularPath(keyOf("A")))
-    im.legacyPurged(tp) shouldBe false
-
-    val wmA = buildWriterManager(im, metrics, pv("A"), new TogglePolicy().policy)
-    wmA.write(tp.withOffset(Offset(130)), message(130)).value
-    metrics.getDuplicateRecordsSkippedTotal shouldBe 1L
-    wmA.write(tp.withOffset(Offset(151)), message(151)).value
-    metrics.getRecordsWrittenTotal shouldBe (26L + 1L)
-
-    wm.close(); wmA.close(); im.close()
+    im.legacyPurged(tp) shouldBe true
+    storage.snapshot(bucket).keys should not contain granularPath(keyOf("A"))
+    im.close()
   }
 
-  // ── T7.8 ────────────────────────────────────────────────────────────────────────────
-
-  test(
-    "[ND] T7.8 once the batch watermark reaches maxLegacy the legacy locks and marker are purged; later floors need no GET",
-  ) {
+  test("[NL] a never-seen key's dedup floor is the master offset alone, with no per-key GET at all") {
     seedMaster(99)
     writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(150)), None))
-    storage.writeBlobToFile(bucket, sweepMarkerPath, NoOverwriteExistingObject(IndexManagerV2.SweepMarker(1L, 2L)))(
-      IndexManagerV2.SweepMarker.sweepMarkerEncoder,
-    ).value
 
     val gets = new AtomicInteger(0)
     val counting = new InMemoryStorageInterface() {
@@ -511,104 +443,146 @@ class CommitModeSwitchTest
     storage = counting
     seedMaster(99)
     writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(150)), None))
-    counting.writeBlobToFile(bucket, sweepMarkerPath, NoOverwriteExistingObject(IndexManagerV2.SweepMarker(1L, 2L)))(
-      IndexManagerV2.SweepMarker.sweepMarkerEncoder,
-    ).value
 
     val im = buildIndexManager(CommitMode.Batch, counting)
     im.open(Set(tp)).value
-    val policy = new TogglePolicy()
-    val wm     = buildWriterManager(im, new CloudSinkMetrics(), pv("A"), policy.policy, counting)
-
-    // Deliver up to 160 (> maxLegacy 150) then flush; the batch commit purges the legacy locks.
-    (151L to 160L).foreach(o => wm.write(tp.withOffset(Offset(o)), message(o)).value)
-    policy.flush.set(true)
-    wm.commitFlushableWriters().value
-
     im.legacyPurged(tp) shouldBe true
-    counting.snapshot(bucket).keys should not contain granularPath(keyOf("A"))
-    counting.snapshot(bucket).keys should not contain sweepMarkerPath
 
-    // A never-seen key's floor is the master offset with no per-key GET.
+    // batchDedupFloor never reads a per-key lock (there is no such lock to read any more): the
+    // floor for a never-seen key Z is exactly the master offset, with zero additional GETs.
     val getsBefore = gets.get()
-    im.batchDedupFloor(tp, Some(keyOf("Z"))).value shouldBe im.getSeekedOffsetForTopicPartition(tp)
+    im.batchDedupFloor(tp).value shouldBe im.getSeekedOffsetForTopicPartition(tp)
     gets.get() shouldBe getsBefore
 
-    wm.close(); im.close()
+    im.close()
   }
 
-  // ── T7.9 ────────────────────────────────────────────────────────────────────────────
-
-  test("[B] T7.9 a purge that fails on one lock leaves the locks in place; the next commit retries and succeeds") {
+  test("[B] a purge that fails leaves the lock in place; the next open() retries and succeeds") {
     seedMaster(99)
     writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(150)), None))
+    storage.arm(FailDeleteAt(bucket, granularPath(keyOf("A"))))
 
     val im = buildIndexManager(CommitMode.Batch)
     im.open(Set(tp)).value
-    val policy = new TogglePolicy()
-    val wm     = buildWriterManager(im, new CloudSinkMetrics(), pv("A"), policy.policy)
 
-    storage.arm(FailDeleteAt(bucket, granularPath(keyOf("A"))))
-    wm.write(tp.withOffset(Offset(151)), message(151)).value
-    policy.flush.set(true)
-    wm.commitFlushableWriters().value
-
-    // Purge failed: not purged, lock still present.
+    // Purge failed: not purged, lock still present (already fenced by the bump though).
     im.legacyPurged(tp) shouldBe false
     storage.snapshot(bucket).keys should contain(granularPath(keyOf("A")))
 
-    // Next commit retries the purge and succeeds.
-    wm.write(tp.withOffset(Offset(152)), message(152)).value
-    wm.commitFlushableWriters().value
+    // Next open() (e.g. a rebalance revoke+reassign within the same task) re-lists, re-fences
+    // (a harmless no-op bump), and retries the purge -- the one-shot hook was already consumed.
+    im.open(Set(tp)).value
     im.legacyPurged(tp) shouldBe true
     storage.snapshot(bucket).keys should not contain granularPath(keyOf("A"))
 
-    wm.close(); im.close()
+    im.close()
   }
 
-  // ── T7.10 ───────────────────────────────────────────────────────────────────────────
+  test(
+    "[B] a legacy-lock LIST failure leaves the TP unresolved but open() still succeeds; retried on the next open()",
+  ) {
+    seedMaster(99)
+    writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(150)), None))
 
-  test("[ND] T7.10 a key that appears after the snapshot is lazily loaded on first use and skips its committed range") {
+    val listFailing = new InMemoryStorageInterface() {
+      override def listFileMetaRecursive(
+        b:      String,
+        prefix: Option[String],
+      ): Either[FileListError, Option[ListOfMetadataResponse[FakeFileMetadata]]] =
+        if (prefix.exists(_.contains(".locks/")))
+          FileListError(new RuntimeException("boom"), b, prefix).asLeft
+        else super.listFileMetaRecursive(b, prefix)
+    }
+    storage = listFailing
+    seedMaster(99)
+    writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(150)), None))
+
+    val im = buildIndexManager(CommitMode.Batch, listFailing)
+    // A LIST failure must NOT fail open(): correctness no longer depends on legacy-lock
+    // fencing succeeding -- batchDedupFloor is master-only regardless.
+    im.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(99)))
+    im.legacyPurged(tp) shouldBe false
+    storage.snapshot(bucket).keys should contain(granularPath(keyOf("A")))
+
+    // Next open() (storage healthy again) retries and succeeds.
+    storage = new InMemoryStorageInterface()
+    seedMaster(99)
+    writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(150)), None))
+    val im2 = buildIndexManager(CommitMode.Batch)
+    im2.open(Set(tp)).value
+    im2.legacyPurged(tp) shouldBe true
+
+    im.close(); im2.close()
+  }
+
+  test("[B] purge chunks deletes by gcBatchSize, purging every lock across multiple delete calls") {
+    seedMaster(99)
+    writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(120)), None))
+    writeIndex(granularPath(keyOf("B")), IndexFile("prev", Some(Offset(130)), None))
+    writeIndex(granularPath(keyOf("C")), IndexFile("prev", Some(Offset(140)), None))
+
+    val deleteCallSizes = scala.collection.mutable.ListBuffer.empty[Int]
+    val countingDeletes = new InMemoryStorageInterface() {
+      override def deleteFiles(
+        b:     String,
+        files: Seq[String],
+      ): Either[io.lenses.streamreactor.connect.cloud.common.storage.FileDeleteError, Unit] = {
+        deleteCallSizes += files.size
+        super.deleteFiles(b, files)
+      }
+    }
+    storage = countingDeletes
+    seedMaster(99)
+    writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(120)), None))
+    writeIndex(granularPath(keyOf("B")), IndexFile("prev", Some(Offset(130)), None))
+    writeIndex(granularPath(keyOf("C")), IndexFile("prev", Some(Offset(140)), None))
+
+    implicit val si: InMemoryStorageInterface = countingDeletes
+    val im = new IndexManagerV2(
+      bucketAndPrefixFn           = bucketAndPrefix,
+      pendingOperationsProcessors = new PendingOperationsProcessors(countingDeletes),
+      directoryFileName           = directoryName,
+      gcIntervalSeconds           = Int.MaxValue,
+      gcBatchSize                 = 2, // 3 locks + 1 marker = 4 paths -> chunks of [2, 2]
+      gcSweepIntervalSeconds      = Int.MaxValue,
+      gcSweepMinAgeSeconds        = Int.MaxValue,
+      gcSweepEnabled              = false,
+      commitMode                  = CommitMode.Batch,
+    )(si, connectorTaskId)
+
+    im.open(Set(tp)).value
+    im.legacyPurged(tp) shouldBe true
+    storage.snapshot(bucket).keys should not contain granularPath(keyOf("A"))
+    storage.snapshot(bucket).keys should not contain granularPath(keyOf("B"))
+    storage.snapshot(bucket).keys should not contain granularPath(keyOf("C"))
+    // Every chunk is bounded by gcBatchSize; more than one call was needed for 4 paths.
+    deleteCallSizes.toList.forall(_ <= 2) shouldBe true
+    deleteCallSizes.sum shouldBe 4
+    deleteCallSizes.size should be >= 2
+
+    im.close()
+  }
+
+  test("[B] a purged TP does not consult a key that appears afterwards; the record is written, not skipped") {
     seedMaster(99)
     // No legacy locks at open time.
     val im = buildIndexManager(CommitMode.Batch)
     im.open(Set(tp)).value
-    im.legacyPurged(tp) shouldBe true // empty listing marks purged
+    im.legacyPurged(tp) shouldBe true // empty listing: nothing to fence
 
-    // A lock for K2 appears in storage after the snapshot. Because the TP was marked purged on an
-    // empty listing, the floor is the master offset and the new lock is not consulted.
-    writeIndex(granularPath(keyOf("K2")), IndexFile("prev", Some(Offset(130)), None))
-    val metrics = new CloudSinkMetrics()
-    val wm      = buildWriterManager(im, metrics, pv("K2"), new TogglePolicy().policy)
-    // Master floor is 99, so 120 is written (a purged TP does not consult late locks — the
-    // stop-first migration procedure guarantees no new granular locks appear post-switch).
-    wm.write(tp.withOffset(Offset(120)), message(120)).value
-    metrics.getRecordsWrittenTotal shouldBe 1L
-    wm.close(); im.close()
-  }
-
-  test("[ND] T7.10 a key not in a non-empty snapshot is lazily loaded with one GET and skips its committed range") {
-    seedMaster(99)
-    // A different key exists at open so the TP is NOT marked purged.
-    writeIndex(granularPath(keyOf("OTHER")), IndexFile("prev", Some(Offset(105)), None))
-    val im = buildIndexManager(CommitMode.Batch)
-    im.open(Set(tp)).value
-    im.legacyPurged(tp) shouldBe false
-
-    // A lock for K2 that was not in the snapshot appears; the lazy path loads it on first use.
+    // A lock for K2 appears in storage after the snapshot (should not happen post-switch under
+    // the stop-first procedure, but batchDedupFloor's master-only design does not depend on that
+    // procedure being followed: it never consults per-key locks in the first place).
     writeIndex(granularPath(keyOf("K2")), IndexFile("prev", Some(Offset(130)), None))
     val metrics = new CloudSinkMetrics()
     val wm      = buildWriterManager(im, metrics, pv("K2"), new TogglePolicy().policy)
     wm.write(tp.withOffset(Offset(120)), message(120)).value
-    metrics.getDuplicateRecordsSkippedTotal shouldBe 1L
-    wm.write(tp.withOffset(Offset(131)), message(131)).value
     metrics.getRecordsWrittenTotal shouldBe 1L
+    metrics.getDuplicateRecordsSkippedTotal shouldBe 0L
     wm.close(); im.close()
   }
 
-  // ── T7.11 ───────────────────────────────────────────────────────────────────────────
-
-  test("[Z] T7.11 bump-first: the new owner's open fences a granular zombie that opened earlier") {
+  test("[Z] bump-first: the new owner's open fences a granular zombie that opened earlier") {
     seedMaster(99)
     writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(120)), None))
 
@@ -639,10 +613,9 @@ class CommitModeSwitchTest
     wm.close(); owner.close(); zombie.close()
   }
 
-  // ── T7.12 ───────────────────────────────────────────────────────────────────────────
-
   test(
-    "[Z] T7.12 zombie-first: the new owner resolves a chain a zombie already completed; one object, floor at its offset",
+    "[NL] zombie-first: the new owner resolves a chain a zombie already completed and purges it; replay " +
+      "re-writes (a duplicate object), never loses",
   ) {
     seedMaster(99)
     // The zombie already performed its copy and recorded a Delete-only pending state.
@@ -664,20 +637,25 @@ class CommitModeSwitchTest
     val owner = buildIndexManager(CommitMode.Batch)
     owner.open(Set(tp)).value
 
-    // The Delete resolved (temp was already gone → idempotent), floor is the zombie's pending offset.
-    owner.legacyFloor(tp, keyOf("A")) shouldBe Some(Some(Offset(140)))
+    // The Delete resolved (temp was already gone -> idempotent) and the lock was purged.
+    owner.legacyPurged(tp) shouldBe true
     storage.keysUnder(bucket, "data/orders/0/z") should have size 1
 
     val metrics = new CloudSinkMetrics()
     val wm      = buildWriterManager(owner, metrics, pv("A"), new TogglePolicy().policy)
+    // Master floor is still 99: none of these are skipped, even though the zombie's resolved
+    // chain already made offsets 100..140's payload durable under "z.json" -- on an actual flush
+    // (not exercised by this harness, which only buffers) the object key builder would derive a
+    // fresh path from the replay's own offsets, producing a duplicate object, never a loss.
     (100L to 140L).foreach(o => wm.write(tp.withOffset(Offset(o)), message(o)).value)
-    metrics.getDuplicateRecordsSkippedTotal shouldBe 41L
+    metrics.getRecordsWrittenTotal shouldBe 41L
+    metrics.getDuplicateRecordsSkippedTotal shouldBe 0L
     wm.close(); owner.close()
   }
 
-  // ── Cycle 8: batch -> granular rollback ─────────────────────────────────────────────
+  // ── batch -> granular rollback ──────────────────────────────────────────────────────
 
-  test("[ND] T8.3 rollback: a stale legacy lock below the master floor cannot re-write a committed record") {
+  test("[ND] rollback: a stale legacy lock below the master floor cannot re-write a committed record") {
     // Batch mode committed W = 250 and left a stale legacy K.lock = 200 (crash before purge).
     seedMasterAt250()
     writeIndex(granularPath(keyOf("A")), IndexFile("prev", Some(Offset(200)), None))
@@ -687,7 +665,7 @@ class CommitModeSwitchTest
     val metrics = new CloudSinkMetrics()
     val wm      = buildWriterManager(im, metrics, pv("A"), new TogglePolicy().policy)
 
-    // The granular fallback floors at max(K.lock=200, master=250) = 250 (Cycle 8), so 250 is
+    // The granular fallback floors at max(K.lock=200, master=250) = 250, so 250 is
     // skipped and 251 written — the `orElse` behaviour would have re-written 201..250.
     wm.write(tp.withOffset(Offset(250)), message(250)).value
     metrics.getDuplicateRecordsSkippedTotal shouldBe 1L
@@ -697,7 +675,7 @@ class CommitModeSwitchTest
     wm.close(); im.close()
   }
 
-  test("[NL] T8.4 rollback with a pending batch chain: granular open completes the copies and skips <= P") {
+  test("[NL] rollback with a pending batch chain: granular open completes the copies and skips <= P") {
     // Master carries a batch PendingState of two copies; granular-mode open must drive it to
     // completion (Copy returns no eTag so updateEtag is a no-op; the last Copy sets committed = P).
     val tempA = ".temp-upload/switch-test/orders/0/uuid/data/orders/0/roll-a.json"
@@ -744,30 +722,66 @@ class CommitModeSwitchTest
     wm.close(); im.close()
   }
 
-  test("[B] T8.5 rollback before any batch commit is behaviourally identical to pre-switch granular") {
-    // W == M and the legacy locks are intact: each key floors at its own granular lock exactly as
-    // it did before the switch. Each key runs on its own storage so a close()-time master-lock
-    // force-write from one cannot raise the other's floor (a harness concern, not a mode concern).
-    def granularKeyScenario(keyName: String, lockOffset: Long): (Long, Long) = {
-      val st = new InMemoryStorageInterface()
-      storage = st
-      seedMaster(99)
-      writeIndex(granularPath(keyOf(keyName)), IndexFile("prev", Some(Offset(lockOffset)), None))
-      val im = buildIndexManager(CommitMode.Granular, st)
-      im.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(99)))
-      val m  = new CloudSinkMetrics()
-      val wm = buildWriterManager(im, m, pv(keyName), new TogglePolicy().policy, st)
-      wm.write(tp.withOffset(Offset(lockOffset)), message(lockOffset)).value
-      wm.write(tp.withOffset(Offset(lockOffset + 1)), message(lockOffset + 1)).value
-      wm.close(); im.close()
-      (m.getDuplicateRecordsSkippedTotal, m.getRecordsWrittenTotal)
-    }
-
-    granularKeyScenario("A", 150) shouldBe ((1L, 1L))
-    granularKeyScenario("B", 120) shouldBe ((1L, 1L))
-  }
+  // A test for "rollback before any batch commit" was removed: it never constructed a batch
+  // component or exercised any rollback path, only plain granular-mode behaviour already
+  // covered by GranularLockScenarioTest.
 
   private def seedMasterAt250(): Unit = {
     val _ = writeIndex(masterPath, IndexFile("prev-owner", Some(Offset(250)), None))
+  }
+
+  test(
+    "[ND] a batch Copy chain whose source is already gone (dest present) resolves as idempotent success",
+  ) {
+    // Models a crash between a completed mvFile and the lock rewrite: the source is gone (the
+    // move already happened) but the destination is present. `InMemoryStorageInterface.mvFile`
+    // treats missing-source + present-dest as success, and open() must resolve the chain rather
+    // than fail.
+    val finalPath = "data/orders/0/batch-a.json"
+    storage.writeStringToFile(
+      bucket,
+      finalPath,
+      io.lenses.streamreactor.connect.cloud.common.model.UploadableString("already-moved"),
+    ).value
+    writeIndex(
+      masterPath,
+      IndexFile(
+        "prev-owner",
+        Some(Offset(99)),
+        Some(
+          PendingState(
+            Offset(150),
+            NonEmptyList.of(CopyOperation(bucket, "gone-temp-path", finalPath, "does-not-matter")),
+          ),
+        ),
+      ),
+    )
+
+    val im = buildIndexManager(CommitMode.Batch)
+    im.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(150)))
+    storage.keysUnder(bucket, "data/orders/0/batch-a") should have size 1
+    storage.getBlobAsObject[IndexFile](bucket, masterPath).value.wrappedObject.pendingState shouldBe None
+    im.close()
+  }
+
+  test("[NL] a batch Copy chain whose source AND destination are both missing fails (not silently dropped)") {
+    writeIndex(
+      masterPath,
+      IndexFile(
+        "prev-owner",
+        Some(Offset(99)),
+        Some(
+          PendingState(
+            Offset(150),
+            NonEmptyList.of(CopyOperation(bucket, "gone-temp-path", "data/orders/0/never-arrived.json", "x")),
+          ),
+        ),
+      ),
+    )
+
+    val im = buildIndexManager(CommitMode.Batch)
+    im.open(Set(tp)).isLeft shouldBe true
+    storage.keysUnder(bucket, "data/orders/0/never-arrived") shouldBe empty
+    im.close()
   }
 }

@@ -36,7 +36,6 @@ import io.lenses.streamreactor.connect.cloud.common.sink.config.PartitionField
 import io.lenses.streamreactor.connect.cloud.common.sink.config.PartitionNamePath
 import io.lenses.streamreactor.connect.cloud.common.sink.config.ValuePartitionField
 import io.lenses.streamreactor.connect.cloud.common.sink.metrics.CloudSinkMetrics
-import io.lenses.streamreactor.connect.cloud.common.sink.naming.KeyNamer
 import io.lenses.streamreactor.connect.cloud.common.sink.naming.ObjectKeyBuilder
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.CommitMode
 import io.lenses.streamreactor.connect.cloud.common.sink.seek.CopyOperation
@@ -52,7 +51,6 @@ import io.lenses.streamreactor.connect.cloud.common.testing.InMemoryStorageInter
 import io.lenses.streamreactor.connect.cloud.common.testing.InMemoryStorageInterface.FailDeleteAt
 import io.lenses.streamreactor.connect.cloud.common.testing.InMemoryStorageInterface.FailMoveAt
 import io.lenses.streamreactor.connect.cloud.common.testing.InMemoryStorageInterface.FailWriteAt
-import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.mockito.ArgumentMatchersSugar
 import org.mockito.MockitoSugar
 import org.scalatest.BeforeAndAfterEach
@@ -260,9 +258,7 @@ class WriterCommitManagerBatchTest
   private def finalKeys(): Seq[String] = storage.keysUnder(bucket, "data/")
   private def tempKeys():  Seq[String] = storage.keysUnder(bucket, batchTempRoot)
 
-  // ── T4.1 ────────────────────────────────────────────────────────────────────────────
-
-  test("[NL] T4.1 a batch of two Writing writers commits both files and advances the master to the batch offset") {
+  test("[NL] a batch of two Writing writers commits both files and advances the master to the batch offset") {
     val im      = buildIndexManager()
     val metrics = new CloudSinkMetrics()
     val fileA   = stagingWith("A: 100..199")
@@ -290,9 +286,7 @@ class WriterCommitManagerBatchTest
     im.close()
   }
 
-  // ── T4.2 ────────────────────────────────────────────────────────────────────────────
-
-  test("[ND] T4.2 the CAS records exactly one Copy per staged writer, each pinned to that temp's eTag") {
+  test("[ND] the CAS records exactly one Copy per staged writer, each pinned to that temp's eTag") {
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val fileB = stagingWith("B")
@@ -327,9 +321,7 @@ class WriterCommitManagerBatchTest
     im.close()
   }
 
-  // ── T4.3 ────────────────────────────────────────────────────────────────────────────
-
-  test("[NL] T4.3 the CAS committedOffset comes from the master lock, never from a writer's stale state") {
+  test("[NL] the CAS committedOffset comes from the master lock, never from a writer's stale state") {
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val wA    = buildWriter(im, "A", "data/orders/0/a.json")
@@ -347,9 +339,7 @@ class WriterCommitManagerBatchTest
     im.close()
   }
 
-  // ── T4.4 / T4.5 ─────────────────────────────────────────────────────────────────────
-
-  test("[NL] T4.4 a staging failure before the CAS leaves the master lock and every final path untouched") {
+  test("[NL] a staging failure before the CAS leaves the master lock and every final path untouched") {
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val fileB = stagingWith("B")
@@ -380,7 +370,7 @@ class WriterCommitManagerBatchTest
     im.close()
   }
 
-  test("[ND] T4.5 the retry after a staging failure re-uploads only the writer that failed") {
+  test("[ND] the retry after a staging failure re-uploads only the writer that failed") {
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val fileB = stagingWith("B")
@@ -408,9 +398,7 @@ class WriterCommitManagerBatchTest
     im.close()
   }
 
-  // ── T4.6 ────────────────────────────────────────────────────────────────────────────
-
-  test("[NL] T4.6 a failed CAS is Fatal, changes nothing durable, and a restart replays from the old floor") {
+  test("[NL] a failed CAS is Fatal, changes nothing durable, and a restart replays from the old floor") {
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val fileB = stagingWith("B")
@@ -443,9 +431,7 @@ class WriterCommitManagerBatchTest
     restarted.close()
   }
 
-  // ── T4.7 ────────────────────────────────────────────────────────────────────────────
-
-  test("[NL] T4.7 a mid-chain copy failure is Fatal and the recorded remaining ops let a restart finish the batch") {
+  test("[NL] a mid-chain copy failure is Fatal and the recorded remaining ops let a restart finish the batch") {
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val fileB = stagingWith("B")
@@ -484,9 +470,9 @@ class WriterCommitManagerBatchTest
     restarted.close()
   }
 
-  // ── T4.8 ────────────────────────────────────────────────────────────────────────────
-
-  test("[ND] T4.8 a last-copy failure is NonFatal and the recommit re-drives the chain without re-uploading") {
+  test(
+    "[NL] a last-copy failure is Fatal; a restart (IndexManagerV2.open) resumes the chain without re-uploading",
+  ) {
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val wA    = buildWriter(im, "A", "data/orders/0/a.json")
@@ -498,24 +484,24 @@ class WriterCommitManagerBatchTest
 
     val cm    = commitManager(im, sourceOf("A" -> wA))
     val first = cm.commitBatch(tp)
-    first.left.value.rollBack() shouldBe false
-    wA.hasPendingUpload shouldBe true
-    finalKeys() shouldBe empty
+    // A tail CopyOperation failure is Fatal (previously NonFatal) -- the data is already
+    // durable at the temp and the lock's PendingState still references it, so recovery is via
+    // IndexManagerV2.open() on restart, not an in-process recommitPending retry on the same task.
+    first.left.value.rollBack() shouldBe true
+    masterLock().pendingState should not be None
+    im.close()
 
-    val second = cm.commitBatch(tp)
-
-    second.value shouldBe (())
+    // Restart: a fresh open() resumes the chain (the FailMoveAt hook was one-shot, so the mvFile
+    // retry succeeds without re-uploading anything).
+    val im2 = buildIndexManager(seedMasterAt = None)
+    im2.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(199)))
     storage.uploads.get() shouldBe uploadsAfterStage
     finalKeys() shouldBe Seq("data/orders/0/a.json")
-    masterLock().committedOffset shouldBe Some(Offset(199))
     masterLock().pendingState shouldBe None
-    wA.currentWriteState shouldBe a[NoWriter]
-    im.close()
+    im2.close()
   }
 
-  // ── T4.9 ────────────────────────────────────────────────────────────────────────────
-
-  test("[B] T4.9 a batch with only idle writers is a no-op with no storage calls and no CAS") {
+  test("[B] a batch with only idle writers is a no-op with no storage calls and no CAS") {
     val im   = buildIndexManager()
     val idle = buildWriter(im, "A", "data/orders/0/a.json")
     idle.forceWriteState(NoWriter(CommitState(tp, Some(Offset(99)))))
@@ -529,9 +515,7 @@ class WriterCommitManagerBatchTest
     im.close()
   }
 
-  // ── T4.10 ───────────────────────────────────────────────────────────────────────────
-
-  test("[ND] T4.10 a post-commit temp delete failure does not fail the batch; the temp becomes sweep work") {
+  test("[ND] a post-commit temp delete failure does not fail the batch; the temp becomes sweep work") {
     // A provider whose rename is a server-side copy leaves the source object behind, so the
     // post-commit cleanup delete has something to fail on. That failure is pure hygiene: the
     // bytes are already at their final path and the offset is already committed.
@@ -567,9 +551,7 @@ class WriterCommitManagerBatchTest
     im.close()
   }
 
-  // ── T4.11 ───────────────────────────────────────────────────────────────────────────
-
-  test("[B] T4.11 batch routing pulls every writer on the topic-partition into the commit") {
+  test("[B] batch routing pulls every writer on the topic-partition into the commit") {
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val fileB = stagingWith("B")
@@ -586,7 +568,7 @@ class WriterCommitManagerBatchTest
     im.close()
   }
 
-  test("[B] T4.11 commitPending and commitForTopicPartition also commit the whole topic-partition batch") {
+  test("[B] commitPending and commitForTopicPartition also commit the whole topic-partition batch") {
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val fileB = stagingWith("B")
@@ -609,7 +591,7 @@ class WriterCommitManagerBatchTest
     im.close()
   }
 
-  test("[B] T4.11 granular mode routes to Writer.commit and never stages a writer") {
+  test("[B] granular mode routes to Writer.commit and never stages a writer") {
     val im    = buildIndexManager()
     val fileA = stagingWith("A")
     val wA    = buildWriter(im, "A", "data/orders/0/a.json", commitPolicy = alwaysFlush)
@@ -630,39 +612,8 @@ class WriterCommitManagerBatchTest
     im.close()
   }
 
-  // ── T4.12 ───────────────────────────────────────────────────────────────────────────
-
-  test("[NL] T4.12 preCommit while a batch is staged returns the earliest buffered offset, not the batch offset") {
-    val im    = buildIndexManager()
-    val fileA = stagingWith("A")
-    val fileB = stagingWith("B")
-    val wA    = buildWriter(im, "A", "data/orders/0/a.json")
-    val wB    = buildWriter(im, "B", "data/orders/0/b.json")
-    writing(wA, fileA, 100, 199)
-    writing(wB, fileB, 200, 250)
-    wA.stage("probe").value.value
-    wB.stage("probe").value.value
-
-    val wm = new WriterManager[FakeFileMetadata](
-      commitPolicyFn              = _ => neverFlush.asRight,
-      bucketAndPrefixFn           = bucketAndPrefix,
-      keyNamerFn                  = _ => mock[KeyNamer].asRight,
-      stagingFilenameFn           = (_, _) => stagingWith("unused").asRight,
-      objKeyBuilderFn             = (_, _) => mock[ObjectKeyBuilder],
-      formatWriterFn              = (_, _) => mock[FormatWriter].asRight,
-      indexManager                = im,
-      transformerF                = Right(_),
-      schemaChangeDetector        = mock[SchemaChangeDetector],
-      skipNullValues              = false,
-      pendingOperationsProcessors = new PendingOperationsProcessors(storage),
-      commitMode                  = CommitMode.Batch,
-    )
-    wm.putWriter(MapKey(tp, pv("A")), wA)
-    wm.putWriter(MapKey(tp, pv("B")), wB)
-
-    val precommitted = wm.preCommit(Map(tp -> new OffsetAndMetadata(400)))
-
-    precommitted(tp).offset() shouldBe 100L
-    im.close()
-  }
+  // A duplicate test ("preCommit while a batch is staged returns the earliest buffered offset,
+  // not the batch offset") was removed: it was the same scenario as the equivalent test in
+  // WriterManagerPreCommitTest but at the wrong layer (a real WriterManager built inline inside
+  // a WriterCommitManager-focused test file) and missing the `never updateMasterLock` assertion.
 }

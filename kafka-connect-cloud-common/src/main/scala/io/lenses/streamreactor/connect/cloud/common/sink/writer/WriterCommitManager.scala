@@ -52,8 +52,8 @@ private[writer] trait WriterSource[SM <: FileMetadata] {
 /**
  * Manages the commit operations for writers.
  *
- * Selective-commit contract (see the "Selective commit fan-out" subsection in
- * `docs/datalake-exactly-once-partitionby.md`):
+ * Selective-commit contract in `CommitMode.Granular` (see the "Selective commit fan-out"
+ * subsection in `docs/datalake-exactly-once-partitionby.md`):
  *
  *   - `commitFlushableWriters` / `commitFlushableWritersForTopicPartition` commit ONLY
  *     writers where `shouldFlush == true`. Sibling writers on the same `TopicPartition`
@@ -61,10 +61,16 @@ private[writer] trait WriterSource[SM <: FileMetadata] {
  *   - `commitPending` commits ONLY writers in `Uploading` state (`hasPendingUpload == true`).
  *     Writing-state siblings are not opportunistically force-flushed by the pending-retry
  *     path; this avoids dragging unrelated writers into a commit cycle that they did not
- *     trigger and is the deliberate amendment to the prior plan version.
+ *     trigger.
  *   - `commitForTopicPartition` is the only path that still fans out across every writer
  *     for a `TopicPartition`. It is reserved for schema rollover, where every sibling must
  *     flush together to preserve format-boundary semantics. Do NOT replace this with a selective filter.
+ *
+ * `CommitMode.Batch` does NOT follow the selective contract above: every entry point routes
+ * through `commitBatch`, which stages and commits every non-idle writer on the topic-partition
+ * together (a `Writing` sibling is not left open the way it would be in granular mode) --
+ * routing-independence requires all writers on a partition to advance the master lock as one
+ * unit. See `commitBatch`'s doc for the full protocol.
  *
  * Safety: `WriterManager.getOffsetAndMeta` continues to scan EVERY active writer on the
  * topic-partition when computing `globalSafeOffset`, so the consumer-committable offset
@@ -151,9 +157,11 @@ class WriterCommitManager[SM <: FileMetadata](
     source.iterator.collect { case (key, w) if p(w) => key.topicPartition }.toSet
 
   private def commitBatches(topicPartitions: Set[TopicPartition]): Either[BatchCloudSinkError, Unit] = {
-    // Flatten: `BatchCloudSinkError.apply` only recognises Fatal / NonFatal leaves, so nesting one
-    // batch error inside another would silently discard every constituent error and produce an
-    // empty batch that `handleErrors` reads as "nothing went wrong".
+    // Flatten: `BatchCloudSinkError.apply` only recognises Fatal / NonFatal leaves. Nesting one
+    // batch error inside another loses its `rollBack()` / `topicPartitions()` and gets
+    // reclassified as a single opaque NonFatal leaf (swallowable under NOOP) instead of
+    // preserving each constituent's own Fatal/NonFatal classification -- flattening keeps every
+    // error's original severity intact.
     val errors = topicPartitions.toList.flatMap(tp => commitBatch(tp).left.toOption).flatMap {
       case b: BatchCloudSinkError => b.fatal.toList ++ b.nonFatal.toList
       case other => List(other)
@@ -174,21 +182,27 @@ class WriterCommitManager[SM <: FileMetadata](
    *     it is also the fence, because the write is conditional on the master eTag.
    *  3. Drive the chain. Each copy that succeeds rewrites the lock with the remaining ops, so a
    *     crash anywhere is resumable by `IndexManagerV2.open`.
-   *  4. Finalise the writers and delete the temps best-effort.
+   *  4. Finalise the writers.
    *
    * The chain deliberately contains only `CopyOperation`s. An `UploadOperation` would make
    * `updateEtag` overwrite every per-file eTag with the last upload's, and a `DeleteOperation`
    * would put a delete mid-chain where a failure is Fatal and would block rollback recovery.
+   * There is deliberately no post-chain temp delete: every `CopyOperation` is executed via
+   * `storageInterface.mvFile`, which MOVES the object on all three backends (copy + delete
+   * source) -- by the time the chain returns `Right`, every temp is already gone. Any temp left
+   * behind by a partial failure becomes a candidate for the `.temp-upload` orphan sweep.
    */
   private[writer] def commitBatch(topicPartition: TopicPartition): Either[SinkError, Unit] = {
     val writers = source.iteratorForTopicPartition(topicPartition).map(_._2).filterNot(_.isIdle).toList
     if (writers.isEmpty) ().asRight
     else {
-      val batchUuid   = UUID.randomUUID().toString
-      val results     = writers.map(_.stage(batchUuid))
-      val stageErrors = results.collect { case Left(err) => err }.toSet
+      val commitStartNanos = System.nanoTime()
+      val batchUuid        = UUID.randomUUID().toString
+      val results          = writers.map(_.stage(batchUuid))
+      val stageErrors      = results.collect { case Left(err) => err }.toSet
       if (stageErrors.nonEmpty) {
         metrics.incrementBatchCommitFailures()
+        metrics.incrementFilesFailedTotal()
         BatchCloudSinkError(stageErrors).asLeft
       } else {
         val staged = results.collect { case Right(Some(s)) => s }
@@ -205,6 +219,7 @@ class WriterCommitManager[SM <: FileMetadata](
               // Fatal (eTag mismatch or storage failure). Temps and staging files stay put: the
               // restart replays from `committed` and the temps become sweep candidates.
               metrics.incrementBatchCommitFailures()
+              metrics.incrementFilesFailedTotal()
               logger.error(
                 s"[${connectorTaskId.show}] Batch commit CAS failed for $topicPartition at " +
                   s"pendingOffset=${pendingOffset.value}: ${err.message()}",
@@ -223,11 +238,14 @@ class WriterCommitManager[SM <: FileMetadata](
                 writers.foreach(_.finalizeCommit(pendingOffset))
                 metrics.incrementBatchCommits()
                 metrics.addBatchCommitFiles(staged.size.toLong)
-                // Legacy granular-lock purge hook (granular -> batch transition, §2.6).
+                metrics.recordCommitTimer((System.nanoTime() - commitStartNanos) / 1_000_000L)
+                // Legacy granular-lock purge hook -- a no-op on IndexManagerV2 (purge now
+                // happens synchronously in batch-mode open()); kept so this call site does not
+                // need a mode branch.
                 indexManager.afterBatchCommit(topicPartition, pendingOffset)
-                pendingOperationsProcessors.deleteTempsBestEffort(staged.map(_.deleteOp))
               }.leftMap { err =>
                 metrics.incrementBatchCommitFailures()
+                metrics.incrementFilesFailedTotal()
                 err
               }
           }

@@ -122,25 +122,6 @@ class PendingOperationsProcessors(
     }
 
   /**
-   * Deletes batch temp objects after their copies have already reached their final paths.
-   *
-   * Purely hygiene: the commit point has passed, so a failure here must never be surfaced as an
-   * error. Undeleted temps are picked up later by the orphan sweep.
-   */
-  def deleteTempsBestEffort(ops: List[DeleteOperation]): Unit =
-    ops.groupBy(_.bucket).foreach {
-      case (bucket, bucketOps) =>
-        storageInterface.deleteFiles(bucket, bucketOps.map(_.source)) match {
-          case Left(err) =>
-            logger.warn(
-              s"[${connectorTaskId.show}] Best-effort delete of ${bucketOps.size} batch temp object(s) in " +
-                s"bucket=$bucket failed: ${err.message()}. They become orphan-sweep candidates.",
-            )
-          case Right(_) =>
-        }
-    }
-
-  /**
    * Builds the operator-facing message used for both the ERROR log and the `FatalCloudSinkError`
    * raised when a task-private staging file disappears mid-commit. Shared by the live-commit
    * cancellation path and by [[uploadOnly]].
@@ -296,10 +277,15 @@ class PendingOperationsProcessors(
           //     MUST stay symmetric with the multi-op (Some(furtherOps)) branch.
           //   - DeleteOperation: NORMAL last-op for IndexManagerV2-backed [Upload, Copy, Delete]
           //     chains, reached via recursion after Upload and Copy have succeeded.
-          //   - CopyOperation: never reachable here today.
+          //   - CopyOperation: reachable in `CommitMode.Batch`, whose chain is Copy-only (see
+          //     `WriterCommitManager.commitBatch`) and so can be exhausted down to a single
+          //     remaining Copy; also reachable on legacy-lock recovery (`IndexManagerV2`) from a
+          //     single-op `[Copy]` chain left by a batch commit's `open()` recovery.
           // Future maintainers must NOT add a multi-op-style `UploadOperation` branch here that
-          // would conflict with the `Some(furtherOps)` handling, and must NOT escalate non-Upload
-          // last-op errors to Fatal (Delete failures stay NonFatal -- preserves current behaviour).
+          // would conflict with the `Some(furtherOps)` handling, and must NOT escalate Delete
+          // last-op errors to Fatal (Delete failures stay NonFatal -- preserves current
+          // behaviour: a Delete is hygiene-only, not a correctness step). A tail Copy failure
+          // DOES escalate (below), matching the mid-chain treatment.
           (head, processor.process(head)) match {
             // Live-commit cancellation on a single-op chain (NoIndexManager path)
             case (upload: UploadOperation, Left(NonExistingFileError(missing))) if escalateOnCancel =>
@@ -312,7 +298,26 @@ class PendingOperationsProcessors(
               )
               fnIndexUpdate(topicPartition, committedOffset, Option.empty)
 
-            // Non-Upload last-op errors (Delete) stay NonFatal -- preserves current behaviour.
+            // A tail CopyOperation failure escalates exactly like the mid-chain case: the
+            // data is already durable at .temp-upload/<uuid> and the lock's PendingState still
+            // references it, so the existing crash-recovery path (IndexManagerV2.open) can
+            // resume. NonFatal here would let the caller believe the writers can keep buffering
+            // while the lock still carries a single-op PendingState that only the next
+            // recommitPending/open() can drive to completion.
+            case (_: CopyOperation, Left(uploadErr)) =>
+              logger.error(
+                s"[${connectorTaskId.show}] Fatal error encountered while processing tail $head: ${uploadErr.message()}",
+                uploadErr.toExceptionOption.orNull,
+              )
+              new FatalCloudSinkError(
+                s"Unable to resume processOperations: ${uploadErr.message()}",
+                uploadErr.toExceptionOption,
+                topicPartition,
+              ).asLeft
+
+            // Non-Upload, non-Copy last-op errors (Delete) stay NonFatal -- preserves current
+            // behaviour: a Delete is hygiene-only (the Copy already landed the data), so a
+            // failure here is retried by the orphan sweep, not the commit path.
             case (_, Left(uploadErr)) =>
               logger.error(
                 s"[${connectorTaskId.show}] Error encountered while processing $head: ${uploadErr.message()}",

@@ -50,19 +50,43 @@ class IndexSettingsTest extends AnyFunSuite with Matchers with OptionValues {
     }
   }
 
-  test("[B] T1.2 an absent commit.mode key yields CommitMode.Granular") {
+  test("[B] an absent commit.mode key yields CommitMode.Granular") {
     settingsFor(Map.empty).getIndexSettings.value.commitMode shouldBe CommitMode.Granular
   }
 
-  test("[B] T1.2 commit.mode=batch yields CommitMode.Batch") {
+  test("[B] commit.mode=batch yields CommitMode.Batch") {
     settingsFor(Map(Keys.EXACTLY_ONCE_COMMIT_MODE -> "batch"))
       .getIndexSettings.value.commitMode shouldBe CommitMode.Batch
   }
 
-  test("[B] T1.2 an unrecognised commit.mode is rejected by ConfigDef validation") {
+  test("[B] an unrecognised commit.mode is rejected by ConfigDef validation") {
     val ex = intercept[ConfigException] {
       new AbstractConfig(configDef, Map(Keys.EXACTLY_ONCE_COMMIT_MODE -> "bogus").asJava)
     }
     ex.getMessage should include("bogus")
+  }
+
+  // ── case-insensitive commit.mode ────────────────────────────────────────────────────
+
+  test("[B] commit.mode is accepted case-insensitively at the ConfigDef level") {
+    Seq("batch", "Batch", "BATCH").foreach { value =>
+      settingsFor(Map(Keys.EXACTLY_ONCE_COMMIT_MODE -> value))
+        .getIndexSettings.value.commitMode shouldBe CommitMode.Batch
+    }
+    Seq("granular", "Granular", "GRANULAR").foreach { value =>
+      settingsFor(Map(Keys.EXACTLY_ONCE_COMMIT_MODE -> value))
+        .getIndexSettings.value.commitMode shouldBe CommitMode.Granular
+    }
+  }
+
+  // ── commit.mode ignored when exactly-once disabled ──────────────────────────────────
+
+  test("[B] commit.mode=batch has no effect (indexOptions is None) when exactly-once is disabled") {
+    settingsFor(
+      Map(
+        Keys.ENABLE_EXACTLY_ONCE      -> "false",
+        Keys.EXACTLY_ONCE_COMMIT_MODE -> "batch",
+      ),
+    ).getIndexSettings shouldBe None
   }
 }
