@@ -18,6 +18,7 @@ package io.lenses.streamreactor.connect.cloud.common.sink.seek
 import cats.data.NonEmptyList
 import cats.data.Validated
 import cats.implicits.catsSyntaxEitherId
+import io.circe.Decoder
 import io.circe.Encoder
 import io.lenses.streamreactor.connect.cloud.common.config.ConnectorTaskId
 import io.lenses.streamreactor.connect.cloud.common.model.Offset
@@ -28,6 +29,8 @@ import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocation
 import io.lenses.streamreactor.connect.cloud.common.model.location.CloudLocationValidator
 import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
 import io.lenses.streamreactor.connect.cloud.common.storage.FileListError
+import io.lenses.streamreactor.connect.cloud.common.storage.FileLoadError
+import io.lenses.streamreactor.connect.cloud.common.storage.GeneralFileLoadError
 import io.lenses.streamreactor.connect.cloud.common.storage.ListOfMetadataResponse
 import io.lenses.streamreactor.connect.cloud.common.testing.FakeFileMetadata
 import io.lenses.streamreactor.connect.cloud.common.testing.InMemoryStorageInterface
@@ -38,6 +41,7 @@ import org.scalatest.funsuite.AnyFunSuiteLike
 import org.scalatest.matchers.should.Matchers
 
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The batch-mode `.temp-upload` orphan sweep. It runs at the end of batch-mode `open()`,
@@ -182,6 +186,105 @@ class BatchTempSweepTest extends AnyFunSuiteLike with Matchers with EitherValues
     val im = buildIndexManager(listFailing)
     try {
       im.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(99)))
+    } finally im.close()
+  }
+
+  /**
+   * Storage whose master-lock GET can be turned into a transient failure while LIST and every
+   * other operation keeps working -- a 5xx or timeout on the single read the sweep uses to learn
+   * which temps are still referenced by an in-flight batch.
+   *
+   * `failFromCall` fails from the Nth master-lock GET onwards (so `open()`'s own read can
+   * succeed and the sweep's read fail); `failMasterGet` fails every one until cleared.
+   */
+  private class FlakyMasterGetStorage(failFromCall: Int = Int.MaxValue) extends InMemoryStorageInterface {
+    private val masterGets = new AtomicInteger(0)
+    @volatile var failMasterGet: Boolean = false
+
+    override def getBlobAsObject[O](
+      b: String,
+      p: String,
+    )(
+      implicit
+      d: Decoder[O],
+    ): Either[FileLoadError, ObjectWithETag[O]] =
+      if (p == masterPath && (failMasterGet || masterGets.incrementAndGet() >= failFromCall))
+        GeneralFileLoadError(new RuntimeException("boom"), p).asLeft
+      else super.getBlobAsObject(b, p)
+  }
+
+  test("[NL] an unreadable master lock skips the sweep rather than treating everything as orphaned") {
+    val flaky = new FlakyMasterGetStorage(failFromCall = 2)
+    storage = flaky
+    seedMaster(99)
+    val old = scopedPrefix + "uuid-old/data/orders/0/old.json"
+    writeTemp(old, ageSecondsAgo = ageSeconds + 60)
+
+    val im = buildIndexManager(flaky)
+    try {
+      // open()'s own master read is the first GET and succeeds; the sweep's is the second and fails.
+      im.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(99)))
+      // Fail closed: without a readable lock the sweep cannot tell an orphan from an in-flight
+      // Copy source, so it defers to the next cycle instead of deleting.
+      storage.snapshot(bucket).keys should contain(old)
+    } finally im.close()
+  }
+
+  test("[B] the periodic sweep reaps aged orphans but keeps a live batch's referenced temps") {
+    seedMaster(99)
+    val orphan    = scopedPrefix + "uuid-orphan/data/orders/0/orphan.json"
+    val inFlight  = scopedPrefix + "uuid-live/data/orders/0/live.json"
+    val finalPath = "data/orders/0/live.json"
+
+    val im = buildIndexManager()
+    try {
+      im.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(99)))
+      // Staged after open() so the at-open sweep does not reap them first: this models a
+      // long-running task whose batch has been in flight longer than gcSweepMinAgeSeconds.
+      writeTemp(orphan, ageSecondsAgo   = ageSeconds + 60)
+      writeTemp(inFlight, ageSecondsAgo = ageSeconds + 60)
+      val liveETag = storage.snapshot(bucket)(inFlight).eTag
+      // A live batch commit: CAS a PendingState referencing the in-flight temp, exactly as
+      // `WriterCommitManager.commitBatch` does before driving the copy chain.
+      im.update(
+        tp,
+        Some(Offset(99)),
+        Some(PendingState(Offset(150), NonEmptyList.of(CopyOperation(bucket, inFlight, finalPath, liveETag)))),
+      ).value
+
+      im.sweepAllBatchTemps()
+
+      storage.snapshot(bucket).keys should contain(inFlight)
+      storage.snapshot(bucket).keys should not contain orphan
+    } finally im.close()
+  }
+
+  test("[NL] the periodic sweep does not delete a live batch's referenced temp when the master read fails") {
+    val flaky = new FlakyMasterGetStorage()
+    storage = flaky
+    seedMaster(99)
+    val inFlight  = scopedPrefix + "uuid-live/data/orders/0/live.json"
+    val finalPath = "data/orders/0/live.json"
+
+    val im = buildIndexManager(flaky)
+    try {
+      im.open(Set(tp)).value shouldBe Map(tp -> Some(Offset(99)))
+      writeTemp(inFlight, ageSecondsAgo = ageSeconds + 60)
+      val liveETag = storage.snapshot(bucket)(inFlight).eTag
+      im.update(
+        tp,
+        Some(Offset(99)),
+        Some(PendingState(Offset(150), NonEmptyList.of(CopyOperation(bucket, inFlight, finalPath, liveETag)))),
+      ).value
+
+      // The lock read now fails transiently. Reading that as "no pending operations" would make
+      // the sweep delete the source of a Copy the commit chain is about to run, after which
+      // `mvFile` finds neither source nor destination and every later open() fails fatally on
+      // the same PendingState.
+      flaky.failMasterGet = true
+      im.sweepAllBatchTemps()
+
+      storage.snapshot(bucket).keys should contain(inFlight)
     } finally im.close()
   }
 }

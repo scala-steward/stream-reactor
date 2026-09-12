@@ -385,67 +385,101 @@ class IndexManagerV2(
    * Deletes orphaned batch temp objects under this task's connector-scoped prefix
    * `.temp-upload/<connector>/<topic>/<partition>/`. An orphan is any object older than
    * `gcSweepMinAgeSeconds` that is not the source of a `CopyOperation` still referenced by the
-   * master lock's `PendingState` (which is `None` after a successful open; the exclusion is
-   * defensive). Never touches paths outside the prefix — granular temps live under
-   * `.temp-upload/<topic>/<partition>/` and other connectors under their own name. Failures are
-   * logged, never fatal.
+   * master lock's `PendingState`. That exclusion is merely defensive on the at-`open()` call site
+   * (a resolved open leaves `pendingState = None`) but load-bearing on the periodic
+   * `sweepAllBatchTemps` call site, which runs concurrently with live commits — hence the
+   * fail-closed handling of an unreadable lock below. Never touches paths outside the prefix —
+   * granular temps live under `.temp-upload/<topic>/<partition>/` and other connectors under
+   * their own name. Failures are logged, never fatal.
    */
   private def sweepBatchTemps(topicPartition: TopicPartition, bucketAndPrefix: CloudLocation): Unit =
     try {
       val prefix       = s".temp-upload/${connectorTaskId.name}/${topicPartition.topic}/${topicPartition.partition}/"
       val ageThreshold = Instant.now().minusSeconds(gcSweepMinAgeSeconds.toLong)
-      // Defensive exclusion: any Copy source still recorded in the master lock's PendingState.
+      // Exclusion: any Copy source still recorded in the master lock's PendingState. On the
+      // at-`open()` path this is purely defensive (a resolved open leaves pendingState = None),
+      // but on the periodic `sweepAllBatchTemps` path it is the ONLY thing keeping a live
+      // commit's in-flight Copy sources out of the orphan set, so an unreadable lock must NOT
+      // be read as "nothing is referenced". Fail closed and skip the cycle, exactly as
+      // `isSweepDueForPartition` does for the sweep marker; the next sweep retries.
       val masterPath = generateLockFilePath(connectorTaskId, topicPartition, directoryFileName)
-      val referenced: Set[String] =
-        tryOpen(bucketAndPrefix.bucket, masterPath).toOption
-          .flatMap(_.wrappedObject.pendingState)
-          .toList
-          .flatMap(_.pendingOperations.toList)
-          .collect { case c: CopyOperation => c.source }
-          .toSet
-      storageInterface.listFileMetaRecursive(bucketAndPrefix.bucket, Some(prefix)) match {
-        case Right(maybeListing) =>
-          val orphans = maybeListing.toList
-            .flatMap(_.files)
-            .collect { case fm: FileMetadata => fm }
-            .filter(fm =>
-              fm.file.startsWith(prefix) && !fm.lastModified.isAfter(ageThreshold) && !referenced.contains(fm.file),
-            )
-            .map(_.file)
-          if (orphans.nonEmpty) {
-            // Chunked: a single `deleteFiles` call with every orphan can exceed a provider's
-            // batch-delete limit (S3 rejects >1000 keys), which would otherwise fail permanently
-            // for a high-cardinality partition. Each chunk is independent and idempotent, so a
-            // partial failure just leaves the failed chunk's temps for the next sweep.
-            var deleted = 0
-            var failed  = 0
-            orphans.grouped(gcBatchSize).foreach { chunk =>
-              storageInterface.deleteFiles(bucketAndPrefix.bucket, chunk) match {
-                case Left(err) =>
-                  failed += chunk.size
-                  logger.warn(
-                    s"[${connectorTaskId.show}] Batch temp sweep failed to delete ${chunk.size} orphan(s) for " +
-                      s"$topicPartition: ${err.message()}",
-                  )
-                case Right(_) =>
-                  deleted += chunk.size
-              }
-            }
-            if (deleted > 0) {
-              logger.debug(
-                s"[${connectorTaskId.show}] Batch temp sweep deleted $deleted orphan(s) for $topicPartition" +
-                  (if (failed > 0) s" ($failed failed and will be retried on the next sweep)" else ""),
-              )
-            }
-          }
+      val referencedOrSkip: Either[FileLoadError, Set[String]] =
+        tryOpen(bucketAndPrefix.bucket, masterPath) match {
+          case Right(master) =>
+            master.wrappedObject.pendingState.toList
+              .flatMap(_.pendingOperations.toList)
+              .collect { case c: CopyOperation => c.source }
+              .toSet
+              .asRight
+          // No lock, or a 0-byte lock that cannot carry a PendingState by construction
+          // (see the EmptyFileError arm of `decideOpen`): nothing can be referenced.
+          case Left(_: FileNotFoundError) => Set.empty[String].asRight
+          case Left(_: EmptyFileError) => Set.empty[String].asRight
+          case Left(err) => err.asLeft
+        }
+      referencedOrSkip match {
         case Left(err) =>
           logger.warn(
-            s"[${connectorTaskId.show}] Batch temp sweep LIST failed for $topicPartition: ${err.message()}",
+            s"[${connectorTaskId.show}] Batch temp sweep skipped for $topicPartition: master lock unreadable, " +
+              s"cannot tell in-flight Copy sources from orphans: ${err.message()}",
           )
+        case Right(referenced) => sweepOrphansUnder(topicPartition, bucketAndPrefix, prefix, ageThreshold, referenced)
       }
     } catch {
       case NonFatal(e) =>
         logger.warn(s"[${connectorTaskId.show}] Batch temp sweep threw for $topicPartition; ignoring", e)
+    }
+
+  /**
+   * LIST-and-delete half of [[sweepBatchTemps]]: deletes every object under `prefix` older than
+   * `ageThreshold` that is not in `referenced`.
+   */
+  private def sweepOrphansUnder(
+    topicPartition:  TopicPartition,
+    bucketAndPrefix: CloudLocation,
+    prefix:          String,
+    ageThreshold:    Instant,
+    referenced:      Set[String],
+  ): Unit =
+    storageInterface.listFileMetaRecursive(bucketAndPrefix.bucket, Some(prefix)) match {
+      case Right(maybeListing) =>
+        val orphans = maybeListing.toList
+          .flatMap(_.files)
+          .collect { case fm: FileMetadata => fm }
+          .filter(fm =>
+            fm.file.startsWith(prefix) && !fm.lastModified.isAfter(ageThreshold) && !referenced.contains(fm.file),
+          )
+          .map(_.file)
+        if (orphans.nonEmpty) {
+          // Chunked: a single `deleteFiles` call with every orphan can exceed a provider's
+          // batch-delete limit (S3 rejects >1000 keys), which would otherwise fail permanently
+          // for a high-cardinality partition. Each chunk is independent and idempotent, so a
+          // partial failure just leaves the failed chunk's temps for the next sweep.
+          var deleted = 0
+          var failed  = 0
+          orphans.grouped(gcBatchSize).foreach { chunk =>
+            storageInterface.deleteFiles(bucketAndPrefix.bucket, chunk) match {
+              case Left(err) =>
+                failed += chunk.size
+                logger.warn(
+                  s"[${connectorTaskId.show}] Batch temp sweep failed to delete ${chunk.size} orphan(s) for " +
+                    s"$topicPartition: ${err.message()}",
+                )
+              case Right(_) =>
+                deleted += chunk.size
+            }
+          }
+          if (deleted > 0) {
+            logger.debug(
+              s"[${connectorTaskId.show}] Batch temp sweep deleted $deleted orphan(s) for $topicPartition" +
+                (if (failed > 0) s" ($failed failed and will be retried on the next sweep)" else ""),
+            )
+          }
+        }
+      case Left(err) =>
+        logger.warn(
+          s"[${connectorTaskId.show}] Batch temp sweep LIST failed for $topicPartition: ${err.message()}",
+        )
     }
 
   /**
