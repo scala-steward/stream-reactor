@@ -366,9 +366,23 @@ The number of concurrent writers is not the concern. Multiple writers are archit
 
 1. **Use record-intrinsic timestamps.** Partition by the Kafka record timestamp or a field set by the producer (e.g., `_value.event_time`, `_value.created_at`). These are immutable in the Kafka log and produce identical partition keys on every delivery.
 
-2. **If an SMT is required**, ensure it derives values exclusively from the record content (key, value, headers, or timestamp), not from processing context. For example, an SMT that reformats `_timestamp` into `yyyy-MM-dd` is safe; an SMT that calls `LocalDate.now()` is not.
+2. **If an SMT is required**, ensure it derives values exclusively from the record content (key, value, headers, or timestamp), not from processing context. For example, an SMT that reformats `_timestamp` into `yyyy-MM-dd` is safe; an SMT that calls `LocalDate.now()` is not. The `kafka-connect-smt` project's `InsertRecordTimestampHeaders` / `InsertRollingRecordTimestampHeaders` / `InsertFieldTimestampHeaders` / `InsertRollingFieldTimestampHeaders` are record-derived and safe here.
 
-3. **If wallclock partitioning is unavoidable**, use [`commit.mode=batch`](#partition-batch-commit-mode-commitmodebatch), which is the supported configuration for non-deterministic PARTITIONBY keys. In the default granular mode, wall-clock keys are not merely a duplication/misplacement hazard: a replayed offset that routes to a key whose granular lock is *ahead* of it is **silently dropped** (see [Failure mode: silent data loss](#failure-mode-silent-data-loss)). Batch mode removes this exposure by deduplicating against a topic-partition-level floor rather than a per-key lock.
+3. **If wallclock partitioning is unavoidable**, use [`commit.mode=batch`](#partition-batch-commit-mode-commitmodebatch), which is the supported configuration for non-deterministic PARTITIONBY keys. In the default granular mode, wall-clock keys are not merely a duplication/misplacement hazard: a replayed offset that routes to a key whose granular lock is *ahead* of it is **silently dropped** (see [Failure mode: silent data loss](#failure-mode-silent-data-loss)). Batch mode removes this exposure by deduplicating against a topic-partition-level floor rather than a per-key lock. As of the check below, this is no longer just a recommendation for the granular/wallclock combination -- it is enforced at startup.
+
+### Startup validation: known wallclock SMTs are rejected under granular commit mode
+
+The connector fails to start (`ConfigException`, task goes `FAILED`) rather than silently risking loss/duplication/misplacement when **all three** of the following hold:
+
+- Exactly-once is enabled (`connect.<prefix>.exactly.once.enable=true`, the default), and
+- Commit mode is at its default, `connect.<prefix>.exactly.once.commit.mode=granular` (batch mode is exempt -- see [Partition-batch commit mode](#partition-batch-commit-mode-commitmodebatch)), and
+- KCQL `PARTITIONBY` references a `_header.<name>` field whose header is injected by one of the five wallclock SMTs shipped in `kafka-connect-smt`: `InsertWallclockHeaders`, `InsertRollingWallclockHeaders`, `InsertWallclock`, `InsertRollingWallclock`, `InsertWallclockDateTimePart`.
+
+The check reads the connector's `transforms` chain and the relevant SMT's own config (`header.prefix.name` for the multi-header SMTs, `header.name` for the single-header ones) to compute exactly which header name(s) that SMT will produce, then compares them against the header name(s) used in `PARTITIONBY`. It is implemented once in `CloudSinkBucketOptions` (`kafka-connect-cloud-common`, delegating to `WallclockPartitionKeyValidator`) and therefore applies identically to S3, GCP Storage and Azure Data Lake Gen2.
+
+This is a targeted, class-name-based check against the five SMTs above; it does not detect a customer's own custom SMT that stamps a wallclock value into a header under a different class name. The general guidance in Recommendations above still applies to that residual case.
+
+The remedy is one of: set `connect.<prefix>.exactly.once.commit.mode=batch` (recommendation 3, the supported fix -- key determinism stops mattering), partition by a deterministic key instead (recommendation 1/2), or set `connect.<prefix>.exactly.once.enable=false` (accept at-least-once). There is no override flag -- this is a hard failure by design.
 
 ---
 
