@@ -1,0 +1,23 @@
+name: AI code review
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # git-mirror copies this file to the public lensesio/stream-reactor, which can't
+    # call the internal reviewer: run only in the internal repository.
+    if: >-
+      github.repository == 'lensesio-dev/stream-reactor' &&
+      !github.event.pull_request.draft &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    uses: lensesio-dev/ai-code-review/.github/workflows/review.yml@v0
